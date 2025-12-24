@@ -39,7 +39,7 @@ impl fmt::Display for LexError {
     }
 }
 
-/// プリプロセッサエラー（Phase 2 で拡張）
+/// プリプロセッサエラー
 #[derive(Debug)]
 pub enum PPError {
     /// 不正なディレクティブ
@@ -54,6 +54,20 @@ pub enum PPError {
     MissingEndif,
     /// 不正なマクロ引数
     InvalidMacroArgs(String),
+    /// ファイル読み込みエラー
+    IoError(PathBuf, String),
+    /// #if の条件式エラー
+    InvalidCondition(String),
+    /// 不正な#演算子の使用
+    InvalidStringize,
+    /// 不正な##演算子の使用
+    InvalidTokenPaste,
+    /// 再帰的マクロ展開の検出
+    RecursiveMacro(String),
+    /// 対応する#elseがない
+    UnmatchedElse,
+    /// #elifが#elseの後に出現
+    ElifAfterElse,
 }
 
 impl fmt::Display for PPError {
@@ -65,6 +79,13 @@ impl fmt::Display for PPError {
             PPError::UnmatchedEndif => write!(f, "#endif without matching #if"),
             PPError::MissingEndif => write!(f, "missing #endif"),
             PPError::InvalidMacroArgs(s) => write!(f, "invalid macro arguments: {}", s),
+            PPError::IoError(p, e) => write!(f, "I/O error reading {}: {}", p.display(), e),
+            PPError::InvalidCondition(s) => write!(f, "invalid preprocessor condition: {}", s),
+            PPError::InvalidStringize => write!(f, "'#' is not followed by a macro parameter"),
+            PPError::InvalidTokenPaste => write!(f, "'##' cannot appear at boundary of macro expansion"),
+            PPError::RecursiveMacro(s) => write!(f, "recursive macro expansion: {}", s),
+            PPError::UnmatchedElse => write!(f, "#else without matching #if"),
+            PPError::ElifAfterElse => write!(f, "#elif after #else"),
         }
     }
 }

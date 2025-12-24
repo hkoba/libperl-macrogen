@@ -43,6 +43,11 @@ impl StringInterner {
         &self.strings[id.0 as usize]
     }
 
+    /// 文字列がインターン済みか検索（新規登録しない）
+    pub fn lookup(&self, s: &str) -> Option<InternedStr> {
+        self.map.get(s).copied()
+    }
+
     /// インターン済み文字列の数を返す
     pub fn len(&self) -> usize {
         self.strings.len()

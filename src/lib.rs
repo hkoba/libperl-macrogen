@@ -6,6 +6,9 @@
 pub mod error;
 pub mod intern;
 pub mod lexer;
+pub mod macro_def;
+pub mod pp_expr;
+pub mod preprocessor;
 pub mod source;
 pub mod token;
 
@@ -13,6 +16,8 @@ pub mod token;
 pub use error::{CompileError, LexError, PPError, ParseError, Result};
 pub use intern::{InternedStr, StringInterner};
 pub use lexer::Lexer;
+pub use macro_def::{MacroDef, MacroKind, MacroTable};
+pub use preprocessor::{PPConfig, Preprocessor};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 
@@ -71,9 +76,13 @@ mod tests {
         let mut interner = StringInterner::new();
         let mut lexer = Lexer::new(source, file_id, &mut interner);
 
+        // 最初に改行トークンが来る（コメントはその前）
+        let newline = lexer.next_token().unwrap();
+        assert!(matches!(newline.kind, TokenKind::Newline));
+        assert_eq!(newline.leading_comments.len(), 1);
+        assert!(newline.leading_comments[0].text.contains("doc comment"));
+
         let token = lexer.next_token().unwrap();
         assert!(matches!(token.kind, TokenKind::KwInt));
-        assert_eq!(token.leading_comments.len(), 1);
-        assert!(token.leading_comments[0].text.contains("doc comment"));
     }
 }

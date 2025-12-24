@@ -31,6 +31,11 @@ impl<'a> Lexer<'a> {
         SourceLocation::new(self.file_id, self.line, self.column)
     }
 
+    /// ファイルIDを取得
+    pub fn file_id(&self) -> FileId {
+        self.file_id
+    }
+
     /// 次のトークンを取得
     pub fn next_token(&mut self) -> Result<Token> {
         let mut leading_comments = Vec::new();
@@ -80,10 +85,10 @@ impl<'a> Lexer<'a> {
         Some(c)
     }
 
-    /// 空白をスキップ（改行は含まない場合もあるが、ここでは含む）
+    /// 空白をスキップ（改行は含まない - プリプロセッサのため）
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
-            if c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' {
+            if c == b' ' || c == b'\t' || c == b'\r' {
                 self.advance();
             } else {
                 break;
@@ -141,6 +146,11 @@ impl<'a> Lexer<'a> {
         };
 
         match c {
+            // 改行（プリプロセッサのために独立したトークンとして扱う）
+            b'\n' => {
+                self.advance();
+                Ok(TokenKind::Newline)
+            }
             // ワイド文字列/文字リテラル（識別子より先にチェック）
             b'L' if matches!(self.peek_n(1), Some(b'"') | Some(b'\'')) => {
                 self.advance(); // L
