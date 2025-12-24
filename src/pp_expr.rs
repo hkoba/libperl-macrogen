@@ -329,6 +329,10 @@ impl<'a> PPExprEvaluator<'a> {
                 self.advance();
                 Ok(c as i64)
             }
+            Some(TokenKind::WideCharLit(c)) => {
+                self.advance();
+                Ok(c as i64)
+            }
             Some(TokenKind::LParen) => {
                 self.advance();
                 let val = self.expr()?;

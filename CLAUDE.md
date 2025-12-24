@@ -46,6 +46,7 @@ When testing with `samples/wrapper.h`, use the following options:
 cargo run -- -E \
   -I/usr/include \
   -I/usr/include/linux \
+  -I/usr/lib/gcc/x86_64-redhat-linux/15/include \
   -D_REENTRANT \
   -D_GNU_SOURCE \
   -I/usr/local/include \

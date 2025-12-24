@@ -196,7 +196,8 @@ impl InputSource {
     /// 空白をスキップ（改行は含まない）
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.peek() {
-            if c == b' ' || c == b'\t' || c == b'\r' {
+            // space, tab, carriage return, form feed (^L), vertical tab
+            if c == b' ' || c == b'\t' || c == b'\r' || c == 0x0C || c == 0x0B {
                 self.advance();
             } else {
                 break;
@@ -325,12 +326,13 @@ impl Preprocessor {
             // return_spaces モードの場合、空白をトークンとして返す
             if self.return_spaces {
                 if let Some(c) = source.peek() {
-                    if c == b' ' || c == b'\t' {
+                    // space, tab, form feed, vertical tab
+                    if c == b' ' || c == b'\t' || c == 0x0C || c == 0x0B {
                         let loc = source.current_location();
                         source.advance();
                         // 連続する空白は1つのSpaceトークンにまとめる
                         while let Some(c) = source.peek() {
-                            if c == b' ' || c == b'\t' {
+                            if c == b' ' || c == b'\t' || c == 0x0C || c == 0x0B {
                                 source.advance();
                             } else {
                                 break;
@@ -772,11 +774,18 @@ impl Preprocessor {
             })?;
             Ok(TokenKind::UIntLit(value))
         } else {
-            let value = i64::from_str_radix(num_text, radix).map_err(|_| CompileError::Lex {
-                loc: loc.clone(),
-                kind: crate::error::LexError::InvalidNumber(text.to_string()),
-            })?;
-            Ok(TokenKind::IntLit(value))
+            // まずi64でパースを試み、失敗したらu64でリトライ
+            // (サフィックスなしでも大きな数値に対応)
+            match i64::from_str_radix(num_text, radix) {
+                Ok(value) => Ok(TokenKind::IntLit(value)),
+                Err(_) => {
+                    let value = u64::from_str_radix(num_text, radix).map_err(|_| CompileError::Lex {
+                        loc: loc.clone(),
+                        kind: crate::error::LexError::InvalidNumber(text.to_string()),
+                    })?;
+                    Ok(TokenKind::UIntLit(value))
+                }
+            }
         }
     }
 
@@ -1308,6 +1317,7 @@ impl Preprocessor {
     }
 
     /// 関数マクロのパラメータをパース
+    /// GNU拡張: NAME... 形式の可変長引数もサポート
     fn parse_macro_params(&mut self) -> Result<(Vec<InternedStr>, bool), CompileError> {
         let mut params = Vec::new();
         let mut is_variadic = false;
@@ -1322,6 +1332,19 @@ impl Preprocessor {
                     match next.kind {
                         TokenKind::Comma => continue,
                         TokenKind::RParen => break,
+                        TokenKind::Ellipsis => {
+                            // GNU拡張: NAME... 形式
+                            // パラメータ名はそのまま保持し、variadic フラグをセット
+                            is_variadic = true;
+                            let rparen = self.next_raw_token()?;
+                            if !matches!(rparen.kind, TokenKind::RParen) {
+                                return Err(CompileError::Preprocess {
+                                    loc: token.loc,
+                                    kind: PPError::InvalidMacroArgs("expected ')' after '...'".to_string()),
+                                });
+                            }
+                            break;
+                        }
                         _ => {
                             return Err(CompileError::Preprocess {
                                 loc: token.loc,
@@ -1331,6 +1354,7 @@ impl Preprocessor {
                     }
                 }
                 TokenKind::Ellipsis => {
+                    // 標準 C99: ... のみ（__VA_ARGS__ として扱う）
                     is_variadic = true;
                     let next = self.next_raw_token()?;
                     if !matches!(next.kind, TokenKind::RParen) {
@@ -1752,27 +1776,51 @@ impl Preprocessor {
                 let args = self.collect_macro_args(params.len(), *is_variadic)?;
 
                 let mut arg_map = HashMap::new();
-                for (i, param) in params.iter().enumerate() {
-                    if i < args.len() {
-                        arg_map.insert(*param, args[i].clone());
-                    } else {
-                        arg_map.insert(*param, Vec::new());
-                    }
-                }
 
-                if *is_variadic {
-                    let va_args = self.interner.intern("__VA_ARGS__");
-                    if args.len() > params.len() {
-                        let mut va = Vec::new();
-                        for (i, arg) in args.iter().enumerate().skip(params.len()) {
-                            if i > params.len() {
-                                va.push(Token::new(TokenKind::Comma, token.loc.clone()));
-                            }
-                            va.extend(arg.clone());
+                if *is_variadic && !params.is_empty() {
+                    // GNU拡張: NAME... 形式の場合、最後のパラメータが可変長引数を受け取る
+                    // 標準形式: ... のみの場合、params に可変長用パラメータは含まれない
+                    let va_args_id = self.interner.intern("__VA_ARGS__");
+                    let last_param = *params.last().unwrap();
+                    let is_gnu_style = last_param != va_args_id;
+
+                    // 通常のパラメータをマップ（最後のパラメータを除く場合がある）
+                    let normal_param_count = if is_gnu_style { params.len() - 1 } else { params.len() };
+                    for (i, param) in params.iter().take(normal_param_count).enumerate() {
+                        if i < args.len() {
+                            arg_map.insert(*param, args[i].clone());
+                        } else {
+                            arg_map.insert(*param, Vec::new());
                         }
-                        arg_map.insert(va_args, va);
+                    }
+
+                    // 可変長引数を構築
+                    let mut va = Vec::new();
+                    let va_start = normal_param_count;
+                    for (i, arg) in args.iter().enumerate().skip(va_start) {
+                        if i > va_start {
+                            va.push(Token::new(TokenKind::Comma, token.loc.clone()));
+                        }
+                        va.extend(arg.clone());
+                    }
+
+                    if is_gnu_style {
+                        // GNU拡張: 名前付きパラメータに格納
+                        arg_map.insert(last_param, va.clone());
+                        // __VA_ARGS__ もエイリアスとして登録（互換性のため）
+                        arg_map.insert(va_args_id, va);
                     } else {
-                        arg_map.insert(va_args, Vec::new());
+                        // 標準形式: __VA_ARGS__ に格納
+                        arg_map.insert(va_args_id, va);
+                    }
+                } else {
+                    // 非可変長マクロ
+                    for (i, param) in params.iter().enumerate() {
+                        if i < args.len() {
+                            arg_map.insert(*param, args[i].clone());
+                        } else {
+                            arg_map.insert(*param, Vec::new());
+                        }
                     }
                 }
 
@@ -1862,6 +1910,26 @@ impl Preprocessor {
                             kind: PPError::InvalidTokenPaste,
                         });
                     }
+
+                    // 左辺のトークンを取得
+                    let left = result.pop().unwrap();
+
+                    // 右辺のトークンを取得（パラメータの場合は展開）
+                    i += 1;
+                    let right_token = &tokens[i];
+                    let right_tokens = if let TokenKind::Ident(id) = right_token.kind {
+                        if let Some(arg_tokens) = args.get(&id) {
+                            arg_tokens.clone()
+                        } else {
+                            vec![right_token.clone()]
+                        }
+                    } else {
+                        vec![right_token.clone()]
+                    };
+
+                    // トークン連結を実行
+                    let pasted = self.paste_tokens(&left, &right_tokens, &token.loc)?;
+                    result.extend(pasted);
                     i += 1;
                     continue;
                 }
@@ -1879,6 +1947,97 @@ impl Preprocessor {
         }
 
         Ok(result)
+    }
+
+    /// トークン連結 (##)
+    fn paste_tokens(&mut self, left: &Token, right: &[Token], loc: &SourceLocation) -> Result<Vec<Token>, CompileError> {
+        // 左辺と右辺の文字列表現を取得
+        let left_str = self.token_to_string(left);
+
+        // 右辺が空の場合は左辺のみ返す
+        if right.is_empty() {
+            return Ok(vec![left.clone()]);
+        }
+
+        // 右辺の最初のトークンと連結
+        let right_first_str = self.token_to_string(&right[0]);
+        let pasted_str = format!("{}{}", left_str, right_first_str);
+
+        // 連結結果を再トークン化
+        let pasted_tokens = self.tokenize_string(&pasted_str);
+
+        // 右辺の残りのトークンを追加
+        let mut result = pasted_tokens;
+        result.extend(right.iter().skip(1).cloned());
+
+        // 位置情報を更新
+        for t in &mut result {
+            t.loc = loc.clone();
+        }
+
+        Ok(result)
+    }
+
+    /// トークンを文字列表現に変換
+    fn token_to_string(&self, token: &Token) -> String {
+        match &token.kind {
+            TokenKind::Ident(id) => self.interner.get(*id).to_string(),
+            TokenKind::IntLit(n) => n.to_string(),
+            TokenKind::UIntLit(n) => n.to_string(),
+            TokenKind::FloatLit(f) => f.to_string(),
+            TokenKind::StringLit(s) => format!("\"{}\"", String::from_utf8_lossy(s)),
+            TokenKind::CharLit(c) => format!("'{}'", *c as char),
+            TokenKind::WideCharLit(c) => format!("L'{}'", char::from_u32(*c).unwrap_or('?')),
+            TokenKind::Plus => "+".to_string(),
+            TokenKind::Minus => "-".to_string(),
+            TokenKind::Star => "*".to_string(),
+            TokenKind::Slash => "/".to_string(),
+            TokenKind::Percent => "%".to_string(),
+            TokenKind::Amp => "&".to_string(),
+            TokenKind::Pipe => "|".to_string(),
+            TokenKind::Caret => "^".to_string(),
+            TokenKind::Tilde => "~".to_string(),
+            TokenKind::Bang => "!".to_string(),
+            TokenKind::Lt => "<".to_string(),
+            TokenKind::Gt => ">".to_string(),
+            TokenKind::Eq => "=".to_string(),
+            TokenKind::Question => "?".to_string(),
+            TokenKind::Colon => ":".to_string(),
+            TokenKind::Dot => ".".to_string(),
+            TokenKind::Comma => ",".to_string(),
+            TokenKind::Semi => ";".to_string(),
+            TokenKind::LParen => "(".to_string(),
+            TokenKind::RParen => ")".to_string(),
+            TokenKind::LBracket => "[".to_string(),
+            TokenKind::RBracket => "]".to_string(),
+            TokenKind::LBrace => "{".to_string(),
+            TokenKind::RBrace => "}".to_string(),
+            TokenKind::Arrow => "->".to_string(),
+            TokenKind::PlusPlus => "++".to_string(),
+            TokenKind::MinusMinus => "--".to_string(),
+            TokenKind::LtLt => "<<".to_string(),
+            TokenKind::GtGt => ">>".to_string(),
+            TokenKind::LtEq => "<=".to_string(),
+            TokenKind::GtEq => ">=".to_string(),
+            TokenKind::EqEq => "==".to_string(),
+            TokenKind::BangEq => "!=".to_string(),
+            TokenKind::AmpAmp => "&&".to_string(),
+            TokenKind::PipePipe => "||".to_string(),
+            TokenKind::PlusEq => "+=".to_string(),
+            TokenKind::MinusEq => "-=".to_string(),
+            TokenKind::StarEq => "*=".to_string(),
+            TokenKind::SlashEq => "/=".to_string(),
+            TokenKind::PercentEq => "%=".to_string(),
+            TokenKind::AmpEq => "&=".to_string(),
+            TokenKind::PipeEq => "|=".to_string(),
+            TokenKind::CaretEq => "^=".to_string(),
+            TokenKind::LtLtEq => "<<=".to_string(),
+            TokenKind::GtGtEq => ">>=".to_string(),
+            TokenKind::Ellipsis => "...".to_string(),
+            TokenKind::Hash => "#".to_string(),
+            TokenKind::HashHash => "##".to_string(),
+            _ => String::new(),
+        }
     }
 
     /// トークン列を文字列化
