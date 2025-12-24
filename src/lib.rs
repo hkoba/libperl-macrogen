@@ -17,7 +17,7 @@ pub mod token;
 
 // 主要な型を再エクスポート
 pub use ast::*;
-pub use error::{CompileError, LexError, PPError, ParseError, Result};
+pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use intern::{InternedStr, StringInterner};
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};

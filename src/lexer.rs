@@ -11,6 +11,8 @@ pub struct Lexer<'a> {
     column: u32,
     file_id: FileId,
     interner: &'a mut StringInterner,
+    /// スペース/タブをトークンとして返すかどうか（TinyCC の PARSE_FLAG_SPACES 相当）
+    return_spaces: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -23,7 +25,18 @@ impl<'a> Lexer<'a> {
             column: 1,
             file_id,
             interner,
+            return_spaces: false,
         }
+    }
+
+    /// スペースをトークンとして返すかどうかを設定
+    pub fn set_return_spaces(&mut self, enabled: bool) {
+        self.return_spaces = enabled;
+    }
+
+    /// 現在のスペース返却モードを取得
+    pub fn return_spaces(&self) -> bool {
+        self.return_spaces
     }
 
     /// 現在位置を取得
@@ -41,7 +54,26 @@ impl<'a> Lexer<'a> {
         let mut leading_comments = Vec::new();
 
         loop {
-            self.skip_whitespace();
+            // return_spaces モードの場合、空白をトークンとして返す
+            if self.return_spaces {
+                if let Some(c) = self.peek() {
+                    if c == b' ' || c == b'\t' {
+                        let loc = self.current_location();
+                        self.advance();
+                        // 連続する空白は1つのSpaceトークンにまとめる
+                        while let Some(c) = self.peek() {
+                            if c == b' ' || c == b'\t' {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        return Ok(Token::with_comments(TokenKind::Space, loc, leading_comments));
+                    }
+                }
+            } else {
+                self.skip_whitespace();
+            }
 
             match (self.peek(), self.peek_n(1)) {
                 (Some(b'/'), Some(b'/')) => {

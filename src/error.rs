@@ -1,7 +1,20 @@
-use crate::source::SourceLocation;
+use crate::source::{FileRegistry, SourceLocation};
 use crate::token::TokenKind;
 use std::fmt;
 use std::path::PathBuf;
+
+/// エラー表示用のロケーション（ファイル名解決付き）
+pub struct DisplayLocation<'a> {
+    pub loc: &'a SourceLocation,
+    pub files: &'a FileRegistry,
+}
+
+impl<'a> fmt::Display for DisplayLocation<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path = self.files.get_path(self.loc.file_id);
+        write!(f, "{}:{}:{}", path.display(), self.loc.line, self.loc.column)
+    }
+}
 
 /// レキサーエラー
 #[derive(Debug)]
@@ -144,6 +157,26 @@ impl fmt::Display for CompileError {
 }
 
 impl std::error::Error for CompileError {}
+
+impl CompileError {
+    /// ファイル名を解決してエラーメッセージをフォーマット
+    pub fn format_with_files(&self, files: &FileRegistry) -> String {
+        match self {
+            CompileError::Lex { loc, kind } => {
+                let disp = DisplayLocation { loc, files };
+                format!("{}: lexer error: {}", disp, kind)
+            }
+            CompileError::Preprocess { loc, kind } => {
+                let disp = DisplayLocation { loc, files };
+                format!("{}: preprocessor error: {}", disp, kind)
+            }
+            CompileError::Parse { loc, kind } => {
+                let disp = DisplayLocation { loc, files };
+                format!("{}: parse error: {}", disp, kind)
+            }
+        }
+    }
+}
 
 /// Result型エイリアス
 pub type Result<T> = std::result::Result<T, CompileError>;

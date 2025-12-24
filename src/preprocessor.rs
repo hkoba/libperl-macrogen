@@ -183,6 +183,8 @@ pub struct Preprocessor {
     pending_comments: Vec<Comment>,
     /// 現在の条件が有効かどうかのキャッシュ
     cond_active: bool,
+    /// スペースをトークンとして返すかどうか（TinyCC の PARSE_FLAG_SPACES 相当）
+    return_spaces: bool,
 }
 
 impl Preprocessor {
@@ -199,6 +201,7 @@ impl Preprocessor {
             lookahead: Vec::new(),
             pending_comments: Vec::new(),
             cond_active: true,
+            return_spaces: false,
         };
 
         // 事前定義マクロを登録
@@ -275,7 +278,26 @@ impl Preprocessor {
                 return Ok(source.next_buffered_token());
             }
 
-            source.skip_whitespace();
+            // return_spaces モードの場合、空白をトークンとして返す
+            if self.return_spaces {
+                if let Some(c) = source.peek() {
+                    if c == b' ' || c == b'\t' {
+                        let loc = source.current_location();
+                        source.advance();
+                        // 連続する空白は1つのSpaceトークンにまとめる
+                        while let Some(c) = source.peek() {
+                            if c == b' ' || c == b'\t' {
+                                source.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        return Ok(Some(Token::new(TokenKind::Space, loc)));
+                    }
+                }
+            } else {
+                source.skip_whitespace();
+            }
         }
 
         // コメントを処理
@@ -285,7 +307,9 @@ impl Preprocessor {
                 let Some(source) = self.sources.last_mut() else {
                     return Ok(None);
                 };
-                source.skip_whitespace();
+                if !self.return_spaces {
+                    source.skip_whitespace();
+                }
             }
 
             let (is_line_comment, is_block_comment) = {
@@ -1186,12 +1210,22 @@ impl Preprocessor {
             }
         };
 
+        // TinyCC方式: スペースモードを有効にして次のトークンを取得
+        // '(' がマクロ名の直後にある場合のみ関数マクロとして扱う
+        self.return_spaces = true;
         let next = self.next_raw_token()?;
+        self.return_spaces = false;
 
         let (kind, body_start) = if matches!(next.kind, TokenKind::LParen) {
+            // マクロ名の直後に '(' があるので関数マクロ
             let (params, is_variadic) = self.parse_macro_params()?;
             (MacroKind::Function { params, is_variadic }, None)
+        } else if matches!(next.kind, TokenKind::Space) {
+            // スペースがあった場合、次のトークンを読んでオブジェクトマクロのボディとする
+            let body_first = self.next_raw_token()?;
+            (MacroKind::Object, Some(body_first))
         } else {
+            // その他（改行など）はそのままオブジェクトマクロ
             (MacroKind::Object, Some(next))
         };
 
