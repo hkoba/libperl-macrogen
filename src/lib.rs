@@ -47,23 +47,30 @@ mod tests {
 
         // int main ( void ) { return 0 ; }
         assert_eq!(tokens.len(), 10);
-        assert!(matches!(tokens[0].kind, TokenKind::KwInt));
+        // tinycc方式: キーワードも識別子として返される
+        assert!(matches!(tokens[0].kind, TokenKind::Ident(_)));
         assert!(matches!(tokens[1].kind, TokenKind::Ident(_)));
         assert!(matches!(tokens[2].kind, TokenKind::LParen));
-        assert!(matches!(tokens[3].kind, TokenKind::KwVoid));
+        assert!(matches!(tokens[3].kind, TokenKind::Ident(_)));
         assert!(matches!(tokens[4].kind, TokenKind::RParen));
         assert!(matches!(tokens[5].kind, TokenKind::LBrace));
-        assert!(matches!(tokens[6].kind, TokenKind::KwReturn));
+        assert!(matches!(tokens[6].kind, TokenKind::Ident(_)));
         assert!(matches!(tokens[7].kind, TokenKind::IntLit(0)));
         assert!(matches!(tokens[8].kind, TokenKind::Semi));
         assert!(matches!(tokens[9].kind, TokenKind::RBrace));
 
-        // 識別子 "main" が正しくインターンされていることを確認
-        if let TokenKind::Ident(id) = tokens[1].kind {
-            assert_eq!(interner.get(id), "main");
-        } else {
-            panic!("Expected identifier");
-        }
+        // 識別子の内容を確認
+        let get_ident = |t: &Token| -> Option<&str> {
+            if let TokenKind::Ident(id) = t.kind {
+                Some(interner.get(id))
+            } else {
+                None
+            }
+        };
+        assert_eq!(get_ident(&tokens[0]), Some("int"));
+        assert_eq!(get_ident(&tokens[1]), Some("main"));
+        assert_eq!(get_ident(&tokens[3]), Some("void"));
+        assert_eq!(get_ident(&tokens[6]), Some("return"));
     }
 
     #[test]
@@ -83,6 +90,10 @@ mod tests {
         assert!(newline.leading_comments[0].text.contains("doc comment"));
 
         let token = lexer.next_token().unwrap();
-        assert!(matches!(token.kind, TokenKind::KwInt));
+        // tinycc方式: キーワードも識別子として返される
+        assert!(matches!(token.kind, TokenKind::Ident(_)));
+        if let TokenKind::Ident(id) = token.kind {
+            assert_eq!(interner.get(id), "int");
+        }
     }
 }

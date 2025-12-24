@@ -1,5 +1,5 @@
 use crate::error::{CompileError, LexError, Result};
-use crate::intern::StringInterner;
+use crate::intern::{InternedStr, StringInterner};
 use crate::source::{FileId, SourceLocation};
 use crate::token::{Comment, CommentKind, Token, TokenKind};
 
@@ -244,7 +244,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// 識別子またはキーワードをスキャン
+    /// 識別子をスキャン（tinycc方式：キーワード変換しない）
     fn scan_identifier(&mut self) -> Result<TokenKind> {
         let start = self.pos;
         while let Some(c) = self.peek() {
@@ -257,12 +257,7 @@ impl<'a> Lexer<'a> {
 
         let text = std::str::from_utf8(&self.source[start..self.pos]).unwrap();
 
-        // キーワードかチェック
-        if let Some(kw) = TokenKind::from_keyword(text) {
-            return Ok(kw);
-        }
-
-        // 識別子
+        // すべて識別子として返す（キーワード判定は後段で行う）
         let interned = self.interner.intern(text);
         Ok(TokenKind::Ident(interned))
     }
@@ -926,19 +921,34 @@ mod tests {
     }
 
     #[test]
-    fn test_keywords() {
-        let tokens = lex("int if else while for return struct");
+    fn test_identifiers_including_keywords() {
+        // tinycc方式: キーワードも識別子として返す
+        let mut interner = StringInterner::new();
+
+        let ident_ids: Vec<InternedStr> = {
+            let mut lexer = Lexer::new(
+                b"int if else while for return struct foo",
+                FileId::default(),
+                &mut interner,
+            );
+
+            let mut ids = Vec::new();
+            loop {
+                let token = lexer.next_token().unwrap();
+                if matches!(token.kind, TokenKind::Eof) {
+                    break;
+                }
+                if let TokenKind::Ident(id) = token.kind {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+
+        let idents: Vec<&str> = ident_ids.iter().map(|id| interner.get(*id)).collect();
         assert_eq!(
-            tokens,
-            vec![
-                TokenKind::KwInt,
-                TokenKind::KwIf,
-                TokenKind::KwElse,
-                TokenKind::KwWhile,
-                TokenKind::KwFor,
-                TokenKind::KwReturn,
-                TokenKind::KwStruct,
-            ]
+            idents,
+            vec!["int", "if", "else", "while", "for", "return", "struct", "foo"]
         );
     }
 
@@ -979,10 +989,14 @@ mod tests {
             &mut interner,
         );
 
+        // コメントの後に改行がある場合、改行トークンにコメントが付く
+        let newline = lexer.next_token().unwrap();
+        assert_eq!(newline.kind, TokenKind::Newline);
+        assert_eq!(newline.leading_comments.len(), 1);
+        assert_eq!(newline.leading_comments[0].kind, CommentKind::Line);
+
         let tok1 = lexer.next_token().unwrap();
         assert_eq!(tok1.kind, TokenKind::IntLit(42));
-        assert_eq!(tok1.leading_comments.len(), 1);
-        assert_eq!(tok1.leading_comments[0].kind, CommentKind::Line);
 
         let tok2 = lexer.next_token().unwrap();
         assert_eq!(tok2.kind, TokenKind::IntLit(100));

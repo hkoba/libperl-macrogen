@@ -553,7 +553,7 @@ impl Preprocessor {
         }
     }
 
-    /// 識別子をスキャン
+    /// 識別子をスキャン（tinycc方式：キーワード変換しない）
     fn scan_identifier(&mut self) -> Result<TokenKind, CompileError> {
         let source = self.sources.last_mut().unwrap();
         let start = source.pos;
@@ -567,12 +567,7 @@ impl Preprocessor {
 
         let text = std::str::from_utf8(&source.source[start..source.pos]).unwrap();
 
-        // キーワードかチェック
-        if let Some(kw) = TokenKind::from_keyword(text) {
-            return Ok(kw);
-        }
-
-        // 識別子
+        // すべて識別子として返す（キーワード判定は後段で行う）
         let interned = self.interner.intern(text);
         Ok(TokenKind::Ident(interned))
     }
@@ -1201,17 +1196,23 @@ impl Preprocessor {
         };
 
         let mut body = Vec::new();
+        let mut need_more = true;
         if let Some(first) = body_start {
-            if !matches!(first.kind, TokenKind::Newline | TokenKind::Eof) {
+            if matches!(first.kind, TokenKind::Newline | TokenKind::Eof) {
+                // 値なしマクロ：これ以上読む必要なし
+                need_more = false;
+            } else {
                 body.push(first);
             }
         }
 
-        loop {
-            let token = self.next_raw_token()?;
-            match token.kind {
-                TokenKind::Newline | TokenKind::Eof => break,
-                _ => body.push(token),
+        if need_more {
+            loop {
+                let token = self.next_raw_token()?;
+                match token.kind {
+                    TokenKind::Newline | TokenKind::Eof => break,
+                    _ => body.push(token),
+                }
             }
         }
 
@@ -1800,6 +1801,17 @@ mod tests {
         file
     }
 
+    /// 識別子文字列がトークン列に含まれるかチェック
+    fn has_ident(pp: &Preprocessor, tokens: &[Token], name: &str) -> bool {
+        tokens.iter().any(|t| {
+            if let TokenKind::Ident(id) = t.kind {
+                pp.interner().get(id) == name
+            } else {
+                false
+            }
+        })
+    }
+
     #[test]
     fn test_simple_tokens() {
         let file = create_temp_file("int x;");
@@ -1807,8 +1819,11 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
+        // int, x, ; の3トークン
         assert_eq!(tokens.len(), 3);
-        assert!(matches!(tokens[0].kind, TokenKind::KwInt));
+        // tinycc方式: キーワードも識別子として返される
+        assert!(has_ident(&pp, &tokens, "int"));
+        assert!(has_ident(&pp, &tokens, "x"));
     }
 
     #[test]
@@ -1838,7 +1853,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
+        assert!(has_ident(&pp, &tokens, "int"));
     }
 
     #[test]
@@ -1848,7 +1863,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
+        assert!(has_ident(&pp, &tokens, "int"));
     }
 
     #[test]
@@ -1858,8 +1873,11 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(!tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::KwFloat)));
+        // UNDEFINED は定義されていないので、int x は出力されない
+        assert!(!has_ident(&pp, &tokens, "x"));
+        // float y は出力される
+        assert!(has_ident(&pp, &tokens, "float"));
+        assert!(has_ident(&pp, &tokens, "y"));
     }
 
     #[test]
@@ -1869,7 +1887,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
+        assert!(has_ident(&pp, &tokens, "int"));
     }
 
     #[test]
@@ -1893,7 +1911,8 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(!tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
+        // FOO は #undef されているので、int x は出力されない
+        assert!(!has_ident(&pp, &tokens, "x"));
     }
 
     #[test]
@@ -1905,7 +1924,9 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(!tokens.iter().any(|t| matches!(t.kind, TokenKind::KwInt)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::KwFloat)));
+        // A は定義されているが B は定義されていないので、float y が出力される
+        assert!(!has_ident(&pp, &tokens, "x"));
+        assert!(has_ident(&pp, &tokens, "float"));
+        assert!(has_ident(&pp, &tokens, "y"));
     }
 }
