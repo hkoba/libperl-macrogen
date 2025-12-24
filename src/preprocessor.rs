@@ -1451,7 +1451,8 @@ impl Preprocessor {
 
     /// #if を処理
     fn process_if(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
-        let tokens = self.collect_to_eol()?;
+        // マクロ展開付きでトークンを収集
+        let tokens = self.collect_if_condition()?;
 
         let active = if self.cond_active {
             let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc.clone());
@@ -1525,7 +1526,8 @@ impl Preprocessor {
             });
         }
 
-        let tokens = self.collect_to_eol()?;
+        // マクロ展開付きでトークンを収集
+        let tokens = self.collect_if_condition()?;
 
         let new_active = if parent_active && !seen_active {
             let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc);
@@ -1626,7 +1628,7 @@ impl Preprocessor {
         self.cond_active = self.cond_stack.iter().all(|s| s.active);
     }
 
-    /// 行末までトークンを収集
+    /// 行末までトークンを収集（マクロ展開なし）
     fn collect_to_eol(&mut self) -> Result<Vec<Token>, CompileError> {
         let mut tokens = Vec::new();
         loop {
@@ -1636,6 +1638,58 @@ impl Preprocessor {
                 _ => tokens.push(token),
             }
         }
+        Ok(tokens)
+    }
+
+    /// #if条件用：マクロ展開付きでトークン収集
+    /// TinyCC方式: マクロは展開するが、defined の引数は展開しない
+    fn collect_if_condition(&mut self) -> Result<Vec<Token>, CompileError> {
+        let mut tokens = Vec::new();
+        let defined_id = self.interner.intern("defined");
+
+        loop {
+            // 生トークンを読む（先読みバッファから、またはソースから）
+            let token = self.next_raw_token()?;
+
+            match &token.kind {
+                TokenKind::Newline | TokenKind::Eof => break,
+                TokenKind::Ident(id) if *id == defined_id => {
+                    // defined演算子の場合、引数は展開しない
+                    tokens.push(token);
+
+                    // 次のトークン（パーレンまたは識別子）を収集
+                    let next = self.next_raw_token()?;
+                    if matches!(next.kind, TokenKind::LParen) {
+                        tokens.push(next);
+                        // ( 内の識別子を収集（展開しない）
+                        let ident = self.next_raw_token()?;
+                        tokens.push(ident);
+                        let rparen = self.next_raw_token()?;
+                        tokens.push(rparen);
+                    } else {
+                        // defined IDENT 形式（parenthesisなし）
+                        tokens.push(next);
+                    }
+                }
+                TokenKind::Ident(id) => {
+                    let id = *id;
+                    // マクロ展開を試みる
+                    if let Some(expanded) = self.try_expand_macro(id, &token)? {
+                        // 展開されたトークンを先読みバッファに入れて再処理
+                        for t in expanded.into_iter().rev() {
+                            self.lookahead.push(t);
+                        }
+                    } else {
+                        // 展開できなかった（未定義の識別子、または展開中のマクロ）
+                        tokens.push(token);
+                    }
+                }
+                _ => {
+                    tokens.push(token);
+                }
+            }
+        }
+
         Ok(tokens)
     }
 
