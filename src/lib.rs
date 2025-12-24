@@ -3,21 +3,27 @@
 //! C言語のヘッダーファイルからマクロとinline static関数を抽出し、
 //! Rustコードに変換するツール。
 
+pub mod ast;
 pub mod error;
 pub mod intern;
 pub mod lexer;
 pub mod macro_def;
+pub mod parser;
 pub mod pp_expr;
 pub mod preprocessor;
+pub mod sexp;
 pub mod source;
 pub mod token;
 
 // 主要な型を再エクスポート
+pub use ast::*;
 pub use error::{CompileError, LexError, PPError, ParseError, Result};
 pub use intern::{InternedStr, StringInterner};
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
+pub use parser::Parser;
 pub use preprocessor::{PPConfig, Preprocessor};
+pub use sexp::SexpPrinter;
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 

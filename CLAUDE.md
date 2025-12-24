@@ -2,6 +2,10 @@
 
 This file contains guidelines for Claude Code when working on this project.
 
+## Project Configuration
+
+- **Rust Edition**: 2024 (do not change this)
+
 ## Development Workflow
 
 ### Signature Approval Rule
