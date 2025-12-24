@@ -122,20 +122,64 @@ impl InputSource {
         SourceLocation::new(self.file_id, self.line, self.column)
     }
 
-    /// 現在の文字をピーク
+    /// 行継続をスキップした実際の位置を取得
+    fn skip_line_continuations(&self, start_pos: usize) -> usize {
+        let mut pos = start_pos;
+        loop {
+            // \ の後に改行があれば行継続
+            if self.source.get(pos) == Some(&b'\\') {
+                let next = self.source.get(pos + 1);
+                if next == Some(&b'\n') {
+                    pos += 2;
+                    continue;
+                } else if next == Some(&b'\r') && self.source.get(pos + 2) == Some(&b'\n') {
+                    // Windows形式の改行 (\r\n)
+                    pos += 3;
+                    continue;
+                }
+            }
+            break;
+        }
+        pos
+    }
+
+    /// 現在の文字をピーク（行継続を処理）
     fn peek(&self) -> Option<u8> {
-        self.source.get(self.pos).copied()
+        let pos = self.skip_line_continuations(self.pos);
+        self.source.get(pos).copied()
     }
 
-    /// n文字先をピーク
+    /// n文字先をピーク（行継続を処理）
     fn peek_n(&self, n: usize) -> Option<u8> {
-        self.source.get(self.pos + n).copied()
+        let mut pos = self.pos;
+        for i in 0..=n {
+            pos = self.skip_line_continuations(pos);
+            if pos >= self.source.len() {
+                return None;
+            }
+            if i < n {
+                pos += 1;
+            }
+        }
+        self.source.get(pos).copied()
     }
 
-    /// 1文字進める
+    /// 1文字進める（行継続を処理）
     fn advance(&mut self) -> Option<u8> {
-        let c = self.peek()?;
+        // 行継続をスキップ
+        let old_pos = self.pos;
+        self.pos = self.skip_line_continuations(self.pos);
+
+        // スキップした行継続の分だけ行番号を更新
+        for i in old_pos..self.pos {
+            if self.source.get(i) == Some(&b'\n') {
+                self.line += 1;
+            }
+        }
+
+        let c = self.source.get(self.pos).copied()?;
         self.pos += 1;
+
         if c == b'\n' {
             self.line += 1;
             self.column = 1;
