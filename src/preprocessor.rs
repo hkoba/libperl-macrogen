@@ -750,22 +750,26 @@ impl Preprocessor {
         }
 
         let text = std::str::from_utf8(&source.source[start..source.pos]).unwrap();
-        let num_text = text
-            .trim_start_matches("0x")
-            .trim_start_matches("0X")
-            .trim_start_matches("0b")
-            .trim_start_matches("0B")
-            .trim_end_matches(|c: char| c == 'u' || c == 'U' || c == 'l' || c == 'L');
 
-        let radix = if text.starts_with("0x") || text.starts_with("0X") {
-            16
+        // プレフィックスと基数を判定（チェイン trim ではなく排他的に処理）
+        let (num_text, radix) = if text.starts_with("0x") || text.starts_with("0X") {
+            (&text[2..], 16)
         } else if text.starts_with("0b") || text.starts_with("0B") {
-            2
-        } else if text.starts_with('0') && text.len() > 1 && !num_text.is_empty() {
-            8
+            (&text[2..], 2)
+        } else if text.starts_with('0') && text.len() > 1 {
+            // 8進数（ただしサフィックスのみの場合は10進数の0として扱う）
+            let without_suffix = text.trim_end_matches(|c: char| c == 'u' || c == 'U' || c == 'l' || c == 'L');
+            if without_suffix.len() > 1 {
+                (without_suffix, 8)
+            } else {
+                (without_suffix, 10)
+            }
         } else {
-            10
+            (text, 10)
         };
+
+        // サフィックスを除去
+        let num_text = num_text.trim_end_matches(|c: char| c == 'u' || c == 'U' || c == 'l' || c == 'L');
 
         if is_unsigned || is_longlong {
             let value = u64::from_str_radix(num_text, radix).map_err(|_| CompileError::Lex {
@@ -1461,29 +1465,121 @@ impl Preprocessor {
 
     /// #if を処理
     fn process_if(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
+        // 親が無効な場合は文字レベルでスキップ
+        if !self.cond_active {
+            self.cond_stack.push(CondState {
+                active: false,
+                seen_active: false,
+                seen_else: false,
+                loc: loc.clone(),
+            });
+            self.skip_false_branch(loc)?;
+            return Ok(());
+        }
+
         // マクロ展開付きでトークンを収集
         let tokens = self.collect_if_condition()?;
 
-        let active = if self.cond_active {
-            let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc.clone());
-            eval.evaluate()? != 0
-        } else {
-            false
-        };
+        let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc.clone());
+        let active = eval.evaluate()? != 0;
 
         self.cond_stack.push(CondState {
             active,
             seen_active: active,
             seen_else: false,
-            loc,
+            loc: loc.clone(),
         });
 
         self.update_cond_active();
+
+        // 条件が偽の場合、TinyCC方式でスキップ
+        if !active {
+            self.skip_false_branch(loc)?;
+        }
+
         Ok(())
+    }
+
+    /// 偽ブランチをスキップし、#else/#elif/#endif を処理
+    fn skip_false_branch(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
+        loop {
+            let directive = self.preprocess_skip()?;
+            match directive.as_str() {
+                "endif" => {
+                    // #endif: スタックからポップして終了
+                    self.cond_stack.pop();
+                    self.update_cond_active();
+                    return Ok(());
+                }
+                "else" => {
+                    // #else: 今までどのブランチも有効でなければこのブランチを有効化
+                    if let Some(state) = self.cond_stack.last_mut() {
+                        if state.seen_else {
+                            return Err(CompileError::Preprocess {
+                                loc,
+                                kind: PPError::UnmatchedElse,
+                            });
+                        }
+                        state.seen_else = true;
+                        if !state.seen_active {
+                            state.active = true;
+                            state.seen_active = true;
+                            self.update_cond_active();
+                            return Ok(());
+                        }
+                        // seen_active が true なら、このelseブランチも偽なので続けてスキップ
+                    }
+                }
+                "elif" => {
+                    // #elif: 条件を評価
+                    if let Some(state) = self.cond_stack.last() {
+                        if state.seen_else {
+                            return Err(CompileError::Preprocess {
+                                loc,
+                                kind: PPError::ElifAfterElse,
+                            });
+                        }
+                        if state.seen_active {
+                            // 既に有効なブランチがあったので、この elif もスキップ
+                            self.skip_to_eol()?;
+                            continue;
+                        }
+                    }
+                    // 条件を評価
+                    let tokens = self.collect_if_condition()?;
+                    let new_active = {
+                        let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc.clone());
+                        eval.evaluate()? != 0
+                    };
+                    if let Some(state) = self.cond_stack.last_mut() {
+                        if new_active {
+                            state.active = true;
+                            state.seen_active = true;
+                            self.update_cond_active();
+                            return Ok(());
+                        }
+                        // 条件が偽なので続けてスキップ
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// #ifdef / #ifndef を処理
     fn process_ifdef(&mut self, loc: SourceLocation, negate: bool) -> Result<(), CompileError> {
+        // 親が無効な場合は文字レベルでスキップ
+        if !self.cond_active {
+            self.cond_stack.push(CondState {
+                active: false,
+                seen_active: false,
+                seen_else: false,
+                loc: loc.clone(),
+            });
+            self.skip_false_branch(loc)?;
+            return Ok(());
+        }
+
         let token = self.next_raw_token()?;
         let defined = if let TokenKind::Ident(id) = token.kind {
             self.macros.is_defined(id)
@@ -1493,24 +1589,27 @@ impl Preprocessor {
 
         self.skip_to_eol()?;
 
-        let active = if self.cond_active {
-            if negate { !defined } else { defined }
-        } else {
-            false
-        };
+        let active = if negate { !defined } else { defined };
 
         self.cond_stack.push(CondState {
             active,
             seen_active: active,
             seen_else: false,
-            loc,
+            loc: loc.clone(),
         });
 
         self.update_cond_active();
+
+        // 条件が偽の場合、TinyCC方式でスキップ
+        if !active {
+            self.skip_false_branch(loc)?;
+        }
+
         Ok(())
     }
 
     /// #elif を処理
+    /// 注: これは有効なブランチから呼ばれる（そのブランチは終了し、残りをスキップする必要がある）
     fn process_elif(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
         if self.cond_stack.is_empty() {
             return Err(CompileError::Preprocess {
@@ -1519,16 +1618,7 @@ impl Preprocessor {
             });
         }
 
-        // 状態を読み取ってからcollect_to_eolを呼び出す
-        let (seen_else, seen_active, parent_active) = {
-            let state = self.cond_stack.last().unwrap();
-            let seen_else = state.seen_else;
-            let seen_active = state.seen_active;
-            let parent_active = self.cond_stack.len() == 1 ||
-                self.cond_stack.iter().rev().skip(1).all(|s| s.active);
-            (seen_else, seen_active, parent_active)
-        };
-
+        let seen_else = self.cond_stack.last().unwrap().seen_else;
         if seen_else {
             return Err(CompileError::Preprocess {
                 loc,
@@ -1536,27 +1626,16 @@ impl Preprocessor {
             });
         }
 
-        // マクロ展開付きでトークンを収集
-        let tokens = self.collect_if_condition()?;
+        // 有効なブランチを見た後なので、#endif までスキップ
+        // (seen_active = true を維持したまま)
+        self.skip_to_eol()?;
+        self.skip_false_branch(loc)?;
 
-        let new_active = if parent_active && !seen_active {
-            let mut eval = PPExprEvaluator::new(&tokens, &self.interner, &self.macros, loc);
-            eval.evaluate()? != 0
-        } else {
-            false
-        };
-
-        let state = self.cond_stack.last_mut().unwrap();
-        state.active = new_active;
-        if new_active {
-            state.seen_active = true;
-        }
-
-        self.update_cond_active();
         Ok(())
     }
 
     /// #else を処理
+    /// 注: これは有効なブランチから呼ばれる（そのブランチは終了し、#else 以降をスキップする必要がある）
     fn process_else(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
         if self.cond_stack.is_empty() {
             return Err(CompileError::Preprocess {
@@ -1565,15 +1644,7 @@ impl Preprocessor {
             });
         }
 
-        let (seen_else, seen_active, parent_active) = {
-            let state = self.cond_stack.last().unwrap();
-            let seen_else = state.seen_else;
-            let seen_active = state.seen_active;
-            let parent_active = self.cond_stack.len() == 1 ||
-                self.cond_stack.iter().rev().skip(1).all(|s| s.active);
-            (seen_else, seen_active, parent_active)
-        };
-
+        let seen_else = self.cond_stack.last().unwrap().seen_else;
         if seen_else {
             return Err(CompileError::Preprocess {
                 loc,
@@ -1581,12 +1652,15 @@ impl Preprocessor {
             });
         }
 
-        let state = self.cond_stack.last_mut().unwrap();
-        state.seen_else = true;
-        state.active = parent_active && !seen_active;
+        // seen_else をマーク
+        if let Some(state) = self.cond_stack.last_mut() {
+            state.seen_else = true;
+        }
 
+        // 有効なブランチを見た後なので、#endif までスキップ
         self.skip_to_eol()?;
-        self.update_cond_active();
+        self.skip_false_branch(loc)?;
+
         Ok(())
     }
 
@@ -1746,6 +1820,185 @@ impl Preprocessor {
             }
         }
         Ok(())
+    }
+
+    /// TinyCC方式: 条件が偽のブロックをスキップ
+    /// トークナイザを使わず文字レベルでスキャンし、#else/#elif/#endif を見つけるまでスキップ
+    /// 戻り値: 見つかったディレクティブ名 ("else", "elif", "endif")
+    fn preprocess_skip(&mut self) -> Result<String, CompileError> {
+        let mut depth = 0i32;  // #if のネスト深度
+
+        loop {
+            let source = match self.sources.last_mut() {
+                Some(s) => s,
+                None => {
+                    return Err(CompileError::Preprocess {
+                        loc: SourceLocation::default(),
+                        kind: PPError::MissingEndif,
+                    });
+                }
+            };
+
+            // 行頭フラグをリセット
+            let mut at_line_start = source.is_at_line_start();
+
+            loop {
+                let c = match source.peek() {
+                    Some(c) => c,
+                    None => break, // このソースは終了、外側ループで次のソースへ
+                };
+
+                match c {
+                    // 空白はスキップ
+                    b' ' | b'\t' | b'\r' | 0x0C | 0x0B => {
+                        source.advance();
+                    }
+                    // 改行
+                    b'\n' => {
+                        source.advance();
+                        at_line_start = true;
+                    }
+                    // 行継続
+                    b'\\' => {
+                        source.advance();
+                        if source.peek() == Some(b'\n') {
+                            source.advance();
+                        } else if source.peek() == Some(b'\r') {
+                            source.advance();
+                            if source.peek() == Some(b'\n') {
+                                source.advance();
+                            }
+                        }
+                    }
+                    // 文字列リテラル（スキップ）
+                    b'"' | b'\'' => {
+                        let quote = c;
+                        source.advance();
+                        loop {
+                            match source.peek() {
+                                Some(c) if c == quote => {
+                                    source.advance();
+                                    break;
+                                }
+                                Some(b'\\') => {
+                                    source.advance();
+                                    source.advance(); // エスケープ文字をスキップ
+                                }
+                                Some(b'\n') | None => break,
+                                Some(_) => {
+                                    source.advance();
+                                }
+                            }
+                        }
+                        at_line_start = false;
+                    }
+                    // コメント
+                    b'/' => {
+                        source.advance();
+                        match source.peek() {
+                            Some(b'/') => {
+                                // 行コメント
+                                while source.peek().is_some_and(|c| c != b'\n') {
+                                    source.advance();
+                                }
+                            }
+                            Some(b'*') => {
+                                // ブロックコメント
+                                source.advance();
+                                loop {
+                                    match (source.peek(), source.peek_n(1)) {
+                                        (Some(b'*'), Some(b'/')) => {
+                                            source.advance();
+                                            source.advance();
+                                            break;
+                                        }
+                                        (Some(_), _) => {
+                                            source.advance();
+                                        }
+                                        (None, _) => break,
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        at_line_start = false;
+                    }
+                    // プリプロセッサディレクティブ
+                    b'#' if at_line_start => {
+                        source.advance();
+                        // 空白をスキップ
+                        while matches!(source.peek(), Some(b' ') | Some(b'\t')) {
+                            source.advance();
+                        }
+                        // ディレクティブ名を読む
+                        let mut directive = String::new();
+                        while let Some(c) = source.peek() {
+                            if c.is_ascii_alphabetic() || c == b'_' {
+                                directive.push(c as char);
+                                source.advance();
+                            } else {
+                                break;
+                            }
+                        }
+
+                        match directive.as_str() {
+                            "if" | "ifdef" | "ifndef" => {
+                                depth += 1;
+                                // 行末までスキップ
+                                while source.peek().is_some_and(|c| c != b'\n') {
+                                    source.advance();
+                                }
+                            }
+                            "endif" => {
+                                if depth == 0 {
+                                    // 行末までスキップしてから戻る
+                                    while source.peek().is_some_and(|c| c != b'\n') {
+                                        source.advance();
+                                    }
+                                    return Ok("endif".to_string());
+                                }
+                                depth -= 1;
+                                while source.peek().is_some_and(|c| c != b'\n') {
+                                    source.advance();
+                                }
+                            }
+                            "else" if depth == 0 => {
+                                while source.peek().is_some_and(|c| c != b'\n') {
+                                    source.advance();
+                                }
+                                return Ok("else".to_string());
+                            }
+                            "elif" if depth == 0 => {
+                                // elifの場合は条件式を読む必要があるので、行末までスキップせずに戻る
+                                return Ok("elif".to_string());
+                            }
+                            _ => {
+                                // その他のディレクティブは行末までスキップ
+                                while source.peek().is_some_and(|c| c != b'\n') {
+                                    source.advance();
+                                }
+                            }
+                        }
+                        at_line_start = false;
+                    }
+                    // その他の文字
+                    _ => {
+                        source.advance();
+                        at_line_start = false;
+                    }
+                }
+            }
+
+            // このソースが終了したら次のソースへ
+            if self.sources.len() > 1 {
+                self.sources.pop();
+            } else {
+                return Err(CompileError::Preprocess {
+                    loc: SourceLocation::default(),
+                    kind: PPError::MissingEndif,
+                });
+            }
+        }
     }
 
     /// マクロ展開を試みる
