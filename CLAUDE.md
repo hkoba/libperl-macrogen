@@ -37,3 +37,32 @@ This project is developed in phases. Each phase should:
 
 - Commit after each phase is complete
 - Use descriptive commit messages explaining the changes
+
+### Test Options for samples/wrapper.h
+
+When testing with `samples/wrapper.h`, use the following options:
+
+```bash
+cargo run -- -E \
+  -I/usr/include \
+  -I/usr/include/linux \
+  -D_REENTRANT \
+  -D_GNU_SOURCE \
+  -I/usr/local/include \
+  -D_LARGEFILE_SOURCE \
+  -D_FILE_OFFSET_BITS=64 \
+  -I/usr/lib64/perl5/CORE \
+  -D__linux \
+  -D__linux__ \
+  -D__unix \
+  -D__unix__ \
+  -D__x86_64 \
+  -D__x86_64__ \
+  -Dlinux \
+  -Dunix \
+  -D__gnu_linux__ \
+  -D__STDC__ \
+  -D__LP64__ \
+  -D_LP64 \
+  samples/wrapper.h
+```

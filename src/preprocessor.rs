@@ -1373,23 +1373,9 @@ impl Preprocessor {
                 (path, IncludeKind::Local)
             }
             TokenKind::Lt => {
-                let mut path = String::new();
-                loop {
-                    let t = self.next_raw_token()?;
-                    match t.kind {
-                        TokenKind::Gt => break,
-                        TokenKind::Eof | TokenKind::Newline => {
-                            return Err(CompileError::Preprocess {
-                                loc,
-                                kind: PPError::InvalidDirective("unterminated include path".to_string()),
-                            });
-                        }
-                        TokenKind::Ident(id) => path.push_str(self.interner.get(id)),
-                        TokenKind::Slash => path.push('/'),
-                        TokenKind::Dot => path.push('.'),
-                        _ => {}
-                    }
-                }
+                // TinyCC方式: トークナイザを使わず文字レベルで直接読み取る
+                // ファイル名に含まれる "64.h" などが FloatLit として誤解析されるのを防ぐ
+                let path = self.scan_include_path('>')?;
                 (path, IncludeKind::System)
             }
             _ => {
@@ -1691,6 +1677,40 @@ impl Preprocessor {
         }
 
         Ok(tokens)
+    }
+
+    /// #include <...> のパスを文字レベルで読み取る（TinyCC方式）
+    fn scan_include_path(&mut self, terminator: char) -> Result<String, CompileError> {
+        let source = self.sources.last_mut().ok_or_else(|| {
+            CompileError::Preprocess {
+                loc: SourceLocation::default(),
+                kind: PPError::InvalidDirective("no source".to_string()),
+            }
+        })?;
+
+        let loc = source.current_location();
+        let mut path = String::new();
+
+        loop {
+            match source.peek() {
+                Some(c) if c == terminator as u8 => {
+                    source.advance();
+                    break;
+                }
+                Some(b'\n') | None => {
+                    return Err(CompileError::Preprocess {
+                        loc,
+                        kind: PPError::InvalidDirective("unterminated include path".to_string()),
+                    });
+                }
+                Some(c) => {
+                    source.advance();
+                    path.push(c as char);
+                }
+            }
+        }
+
+        Ok(path)
     }
 
     /// 行末までスキップ
