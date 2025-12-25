@@ -31,6 +31,8 @@ pub struct PPConfig {
     pub include_paths: Vec<PathBuf>,
     /// 事前定義マクロ (-D)
     pub predefined: Vec<(String, Option<String>)>,
+    /// プリプロセッサデバッグ出力 (--debug-pp)
+    pub debug_pp: bool,
 }
 
 /// 条件コンパイル状態
@@ -257,18 +259,45 @@ impl Preprocessor {
 
     /// 事前定義マクロを登録
     fn define_predefined_macros(&mut self) {
-        // 設定から事前定義マクロを登録
-        for (name, value) in self.config.predefined.clone() {
-            let name_id = self.interner.intern(&name);
-            let body = if let Some(val) = value {
-                // 値を字句解析
-                self.tokenize_string(&val)
+        // TinyCC方式: -Dオプションを#defineディレクティブとして処理
+        // これにより関数マクロも正しく処理される
+        let mut defines_source = String::new();
+        for (name, value) in &self.config.predefined {
+            if let Some(val) = value {
+                defines_source.push_str(&format!("#define {} {}\n", name, val));
             } else {
-                // 値なしは 1 として扱う
-                vec![Token::new(TokenKind::IntLit(1), SourceLocation::default())]
-            };
-            let def = MacroDef::object(name_id, body, SourceLocation::default()).as_builtin();
-            self.macros.define(def);
+                defines_source.push_str(&format!("#define {} 1\n", name));
+            }
+        }
+
+        if !defines_source.is_empty() {
+            // 仮想ファイルとして登録
+            let file_id = self.files.register(PathBuf::from("<cmdline>"));
+            let input = InputSource::from_file(defines_source.into_bytes(), file_id);
+            self.sources.push(input);
+
+            // ディレクティブを処理
+            loop {
+                match self.next_raw_token() {
+                    Ok(token) => {
+                        match token.kind {
+                            TokenKind::Eof => break,
+                            TokenKind::Hash => {
+                                // #define ディレクティブを処理
+                                if let Err(_) = self.process_directive(token.loc) {
+                                    break;
+                                }
+                            }
+                            TokenKind::Newline => continue,
+                            _ => {} // その他のトークンは無視
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // 仮想ファイルソースをポップ
+            self.sources.pop();
         }
     }
 
@@ -1218,7 +1247,14 @@ impl Preprocessor {
             }
             "include" => {
                 if self.cond_active {
-                    self.process_include(loc)?;
+                    self.process_include(loc, false)?;
+                } else {
+                    self.skip_to_eol()?;
+                }
+            }
+            "include_next" => {
+                if self.cond_active {
+                    self.process_include(loc, true)?;
                 } else {
                     self.skip_to_eol()?;
                 }
@@ -1392,7 +1428,7 @@ impl Preprocessor {
     }
 
     /// #include を処理
-    fn process_include(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
+    fn process_include(&mut self, loc: SourceLocation, is_include_next: bool) -> Result<(), CompileError> {
         let token = self.next_raw_token()?;
 
         let (path, kind) = match &token.kind {
@@ -1416,7 +1452,7 @@ impl Preprocessor {
 
         self.skip_to_eol()?;
 
-        let resolved = self.resolve_include(&path, kind, &loc)?;
+        let resolved = self.resolve_include(&path, kind, &loc, is_include_next)?;
 
         let source = fs::read(&resolved).map_err(|e| {
             CompileError::Preprocess {
@@ -1433,10 +1469,17 @@ impl Preprocessor {
     }
 
     /// インクルードパスを解決
-    fn resolve_include(&self, path: &str, kind: IncludeKind, loc: &SourceLocation) -> Result<PathBuf, CompileError> {
+    fn resolve_include(&self, path: &str, kind: IncludeKind, loc: &SourceLocation, is_include_next: bool) -> Result<PathBuf, CompileError> {
         let path = Path::new(path);
 
-        if kind == IncludeKind::Local {
+        // #include_next の場合は、現在のファイルのディレクトリ以降から検索開始
+        let start_index = if is_include_next {
+            self.find_current_include_index()
+        } else {
+            0
+        };
+
+        if kind == IncludeKind::Local && !is_include_next {
             if let Some(source) = self.sources.last() {
                 if !source.is_token_source() {
                     let current_path = self.files.get_path(source.file_id);
@@ -1450,7 +1493,7 @@ impl Preprocessor {
             }
         }
 
-        for dir in &self.config.include_paths {
+        for dir in self.config.include_paths.iter().skip(start_index) {
             let candidate = dir.join(path);
             if candidate.exists() {
                 return Ok(candidate);
@@ -1461,6 +1504,25 @@ impl Preprocessor {
             loc: loc.clone(),
             kind: PPError::IncludeNotFound(path.to_path_buf()),
         })
+    }
+
+    /// 現在のファイルがどのインクルードパスに属するかを探し、次のインデックスを返す
+    fn find_current_include_index(&self) -> usize {
+        // 現在のファイルパスを取得
+        let current_file_path = if let Some(source) = self.sources.iter().rev().find(|s| !s.is_token_source()) {
+            self.files.get_path(source.file_id).to_path_buf()
+        } else {
+            return 0;
+        };
+
+        // どのインクルードパスに含まれているか探す
+        for (i, dir) in self.config.include_paths.iter().enumerate() {
+            if current_file_path.starts_with(dir) {
+                return i + 1; // 次のインデックスから開始
+            }
+        }
+
+        0
     }
 
     /// #if を処理
@@ -1771,6 +1833,14 @@ impl Preprocessor {
                 _ => {
                     tokens.push(token);
                 }
+            }
+        }
+
+        // Debug: print collected tokens
+        if self.config.debug_pp {
+            eprintln!("DEBUG: collected tokens for #if condition:");
+            for t in &tokens {
+                eprintln!("  {:?}", t.kind);
             }
         }
 

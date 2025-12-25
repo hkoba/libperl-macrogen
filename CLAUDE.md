@@ -6,6 +6,16 @@ This file contains guidelines for Claude Code when working on this project.
 
 - **Rust Edition**: 2024 (do not change this)
 
+## TinyCC Reference Rule
+
+**IMPORTANT**: When encountering problems or implementing new features:
+
+1. **First check TinyCC's approach**: Before implementing a solution, investigate how TinyCC (especially `tccpp.c`) handles the same problem
+2. **Document findings**: Explain how TinyCC solves the problem before proposing a solution
+3. **Follow TinyCC patterns**: Prefer solutions that align with TinyCC's approach for consistency
+
+The TinyCC source code is located in the `tinycc/` directory.
+
 ## Development Workflow
 
 ### Signature Approval Rule
@@ -37,6 +47,10 @@ This project is developed in phases. Each phase should:
 
 - Commit after each phase is complete
 - Use descriptive commit messages explaining the changes
+
+### Test Files Location
+
+Temporary test files should be placed in `./samples/` directory, not `/tmp`.
 
 ### Test Options for samples/wrapper.h
 

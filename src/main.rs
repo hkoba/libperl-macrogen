@@ -34,6 +34,10 @@ struct Cli {
     /// プリプロセッサ出力のみ (cc -E 相当)
     #[arg(short = 'E')]
     preprocess_only: bool,
+
+    /// プリプロセッサデバッグ出力
+    #[arg(long = "debug-pp")]
+    debug_pp: bool,
 }
 
 fn main() {
@@ -50,6 +54,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = PPConfig {
         include_paths: cli.include,
         predefined: parse_defines(&cli.define),
+        debug_pp: cli.debug_pp,
     };
 
     // プリプロセッサを初期化してファイルを処理
