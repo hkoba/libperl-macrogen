@@ -1082,21 +1082,20 @@ impl Preprocessor {
     /// 次のトークンを取得（メインインターフェース）
     pub fn next_token(&mut self) -> Result<Token, CompileError> {
         loop {
-            // 先読みバッファから取得
-            if let Some(token) = self.lookahead.pop() {
-                return Ok(token);
-            }
-
-            // 現在のソースからトークンを取得
-            let token = match self.lex_token_from_source()? {
-                Some(t) => t,
-                None => {
-                    // ソースが空 - ポップして続行
-                    if self.sources.len() > 1 {
-                        self.sources.pop();
-                        continue;
+            // 先読みバッファまたはソースからトークンを取得
+            let token = if let Some(token) = self.lookahead.pop() {
+                token
+            } else {
+                match self.lex_token_from_source()? {
+                    Some(t) => t,
+                    None => {
+                        // ソースが空 - ポップして続行
+                        if self.sources.len() > 1 {
+                            self.sources.pop();
+                            continue;
+                        }
+                        Token::new(TokenKind::Eof, SourceLocation::default())
                     }
-                    Token::new(TokenKind::Eof, SourceLocation::default())
                 }
             };
 

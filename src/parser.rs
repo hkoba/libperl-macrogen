@@ -44,6 +44,8 @@ struct Keywords {
     kw_const: InternedStr,
     kw_volatile: InternedStr,
     kw_restrict: InternedStr,
+    kw_restrict2: InternedStr, // __restrict
+    kw_restrict3: InternedStr, // __restrict__
     kw_atomic: InternedStr,
     // 構造体・共用体・列挙
     kw_struct: InternedStr,
@@ -66,6 +68,12 @@ struct Keywords {
     kw_inline: InternedStr,
     kw_sizeof: InternedStr,
     kw_alignof: InternedStr,
+    // GCC拡張
+    kw_extension: InternedStr,
+    kw_inline2: InternedStr,    // __inline
+    kw_inline3: InternedStr,    // __inline__
+    kw_attribute: InternedStr,  // __attribute__
+    kw_attribute2: InternedStr, // __attribute
 }
 
 impl Keywords {
@@ -90,6 +98,8 @@ impl Keywords {
             kw_const: interner.intern("const"),
             kw_volatile: interner.intern("volatile"),
             kw_restrict: interner.intern("restrict"),
+            kw_restrict2: interner.intern("__restrict"),
+            kw_restrict3: interner.intern("__restrict__"),
             kw_atomic: interner.intern("_Atomic"),
             kw_struct: interner.intern("struct"),
             kw_union: interner.intern("union"),
@@ -109,6 +119,11 @@ impl Keywords {
             kw_inline: interner.intern("inline"),
             kw_sizeof: interner.intern("sizeof"),
             kw_alignof: interner.intern("_Alignof"),
+            kw_extension: interner.intern("__extension__"),
+            kw_inline2: interner.intern("__inline"),
+            kw_inline3: interner.intern("__inline__"),
+            kw_attribute: interner.intern("__attribute__"),
+            kw_attribute2: interner.intern("__attribute"),
         }
     }
 }
@@ -159,6 +174,9 @@ impl<'a> Parser<'a> {
 
         // 宣言子をパース
         let declarator = self.parse_declarator()?;
+
+        // __attribute__ をスキップ
+        self.try_skip_attribute()?;
 
         // 関数定義かどうかを判定
         // 関数定義: 宣言子の後に { が来る
@@ -223,7 +241,11 @@ impl<'a> Parser<'a> {
 
         loop {
             if let Some(id) = self.current_ident() {
-                if id == self.kw.kw_typedef {
+                // GCC拡張: __extension__ は無視（TinyCC方式）
+                if id == self.kw.kw_extension {
+                    self.advance()?;
+                    continue;
+                } else if id == self.kw.kw_typedef {
                     specs.storage = Some(StorageClass::Typedef);
                     self.advance()?;
                 } else if id == self.kw.kw_extern {
@@ -238,7 +260,7 @@ impl<'a> Parser<'a> {
                 } else if id == self.kw.kw_register {
                     specs.storage = Some(StorageClass::Register);
                     self.advance()?;
-                } else if id == self.kw.kw_inline {
+                } else if id == self.kw.kw_inline || id == self.kw.kw_inline2 || id == self.kw.kw_inline3 {
                     specs.is_inline = true;
                     self.advance()?;
                 } else if id == self.kw.kw_const {
@@ -247,7 +269,7 @@ impl<'a> Parser<'a> {
                 } else if id == self.kw.kw_volatile {
                     specs.qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict {
+                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
                     specs.qualifiers.is_restrict = true;
                     self.advance()?;
                 } else if id == self.kw.kw_atomic {
@@ -292,6 +314,9 @@ impl<'a> Parser<'a> {
                     specs.type_specs.push(self.parse_struct_or_union(false)?);
                 } else if id == self.kw.kw_enum {
                     specs.type_specs.push(self.parse_enum()?);
+                } else if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
+                    // GCC拡張: __attribute__((...)) をスキップ
+                    self.skip_attribute()?;
                 } else if self.typedefs.contains(&id) {
                     specs.type_specs.push(TypeSpec::TypedefName(id));
                     self.advance()?;
@@ -500,7 +525,7 @@ impl<'a> Parser<'a> {
                 } else if id == self.kw.kw_volatile {
                     qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict {
+                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
                     qualifiers.is_restrict = true;
                     self.advance()?;
                 } else {
@@ -591,7 +616,7 @@ impl<'a> Parser<'a> {
                 } else if id == self.kw.kw_volatile {
                     qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict {
+                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
                     qualifiers.is_restrict = true;
                     self.advance()?;
                 } else if id == self.kw.kw_atomic {
@@ -1344,40 +1369,49 @@ impl<'a> Parser<'a> {
 
     /// キャスト式をパース
     fn parse_cast_expr(&mut self) -> Result<Expr> {
-        // ( type-name ) cast-expression
-        if self.check(&TokenKind::LParen) && self.is_type_start_after_lparen() {
+        // ( type-name ) cast-expression または ( expr )
+        if self.check(&TokenKind::LParen) {
             let loc = self.current.loc.clone();
             self.advance()?; // (
-            let type_name = self.parse_type_name()?;
-            self.expect(&TokenKind::RParen)?;
 
-            // 複合リテラルのチェック
-            if self.check(&TokenKind::LBrace) {
-                self.advance()?;
-                let mut items = Vec::new();
-                while !self.check(&TokenKind::RBrace) {
-                    let designation = self.parse_designation()?;
-                    let init = self.parse_initializer()?;
-                    items.push(InitializerItem { designation, init });
-                    if !self.check(&TokenKind::Comma) {
-                        break;
-                    }
+            if self.is_type_start() {
+                // キャストまたは複合リテラル
+                let type_name = self.parse_type_name()?;
+                self.expect(&TokenKind::RParen)?;
+
+                // 複合リテラルのチェック
+                if self.check(&TokenKind::LBrace) {
                     self.advance()?;
+                    let mut items = Vec::new();
+                    while !self.check(&TokenKind::RBrace) {
+                        let designation = self.parse_designation()?;
+                        let init = self.parse_initializer()?;
+                        items.push(InitializerItem { designation, init });
+                        if !self.check(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.advance()?;
+                    }
+                    self.expect(&TokenKind::RBrace)?;
+                    return Ok(Expr::CompoundLit {
+                        type_name: Box::new(type_name),
+                        init: items,
+                        loc,
+                    });
                 }
-                self.expect(&TokenKind::RBrace)?;
-                return Ok(Expr::CompoundLit {
+
+                let expr = self.parse_cast_expr()?;
+                return Ok(Expr::Cast {
                     type_name: Box::new(type_name),
-                    init: items,
+                    expr: Box::new(expr),
                     loc,
                 });
+            } else {
+                // 括弧で囲まれた式
+                let expr = self.parse_expr()?;
+                self.expect(&TokenKind::RParen)?;
+                return Ok(expr);
             }
-
-            let expr = self.parse_cast_expr()?;
-            return Ok(Expr::Cast {
-                type_name: Box::new(type_name),
-                expr: Box::new(expr),
-                loc,
-            });
         }
 
         self.parse_unary_expr()
@@ -1430,11 +1464,19 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(id) if *id == self.kw.kw_sizeof => {
                 self.advance()?;
-                if self.check(&TokenKind::LParen) && self.is_type_start_after_lparen() {
-                    self.advance()?;
-                    let type_name = self.parse_type_name()?;
-                    self.expect(&TokenKind::RParen)?;
-                    Ok(Expr::SizeofType(Box::new(type_name), loc))
+                if self.check(&TokenKind::LParen) {
+                    self.advance()?; // (
+                    if self.is_type_start() {
+                        // sizeof(type)
+                        let type_name = self.parse_type_name()?;
+                        self.expect(&TokenKind::RParen)?;
+                        Ok(Expr::SizeofType(Box::new(type_name), loc))
+                    } else {
+                        // sizeof(expr) - 括弧付きの式
+                        let expr = self.parse_expr()?;
+                        self.expect(&TokenKind::RParen)?;
+                        Ok(Expr::Sizeof(Box::new(expr), loc))
+                    }
                 } else {
                     let expr = self.parse_unary_expr()?;
                     Ok(Expr::Sizeof(Box::new(expr), loc))
@@ -1446,6 +1488,11 @@ impl<'a> Parser<'a> {
                 let type_name = self.parse_type_name()?;
                 self.expect(&TokenKind::RParen)?;
                 Ok(Expr::Alignof(Box::new(type_name), loc))
+            }
+            // GCC拡張: __extension__ は無視して続行（TinyCC方式）
+            TokenKind::Ident(id) if *id == self.kw.kw_extension => {
+                self.advance()?;
+                self.parse_unary_expr()
             }
             _ => self.parse_postfix_expr(),
         }
@@ -1664,6 +1711,8 @@ impl<'a> Parser<'a> {
             || id == self.kw.kw_const
             || id == self.kw.kw_volatile
             || id == self.kw.kw_restrict
+            || id == self.kw.kw_restrict2
+            || id == self.kw.kw_restrict3
             || id == self.kw.kw_atomic
             || id == self.kw.kw_struct
             || id == self.kw.kw_union
@@ -1681,6 +1730,8 @@ impl<'a> Parser<'a> {
             || id == self.kw.kw_break
             || id == self.kw.kw_return
             || id == self.kw.kw_inline
+            || id == self.kw.kw_inline2
+            || id == self.kw.kw_inline3
             || id == self.kw.kw_sizeof
             || id == self.kw.kw_alignof
     }
@@ -1701,6 +1752,8 @@ impl<'a> Parser<'a> {
                 || id == self.kw.kw_const
                 || id == self.kw.kw_volatile
                 || id == self.kw.kw_restrict
+                || id == self.kw.kw_restrict2
+                || id == self.kw.kw_restrict3
                 || id == self.kw.kw_atomic
                 || id == self.kw.kw_struct
                 || id == self.kw.kw_union
@@ -1712,12 +1765,15 @@ impl<'a> Parser<'a> {
     }
 
     fn is_type_start_after_lparen(&self) -> bool {
-        // 簡易実装：LParen の次が型指定子かどうか
-        // 本来は先読みが必要だが、現在のトークンが LParen のときに
-        // 次のトークンを見て判定する必要がある
-        // ここでは現状の current を見て、その後ろを推測する
+        // sizeof の後に ( がある場合、その次のトークンが型かどうかを判定
+        // 実際には現在のトークンが ( なので、その次を見る必要があるが、
+        // ここでは現在のトークンをチェックする（advance後に呼ばれる前提）
+        // Note: 実際には sizeof ( の後、advance()前に呼ばれる
+        // つまり current は ( なので判定できない
+        // -> parse_type_name を try して失敗したら式として処理する方式に変更が必要
+        // 簡易実装: 数値リテラルなら式、それ以外は型と仮定
         // TODO: より正確な実装
-        true // 一旦 true で試す
+        self.is_type_start()
     }
 
     fn is_declaration_start(&self) -> bool {
@@ -1731,6 +1787,69 @@ impl<'a> Parser<'a> {
         } else {
             false
         }
+    }
+
+    /// __attribute__ があればスキップ
+    fn try_skip_attribute(&mut self) -> Result<()> {
+        if let Some(id) = self.current_ident() {
+            if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
+                self.skip_attribute()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// GCC拡張: __attribute__((...)) をスキップ
+    fn skip_attribute(&mut self) -> Result<()> {
+        self.advance()?; // __attribute__ / __attribute
+
+        // 外側の ( を期待
+        if !self.check(&TokenKind::LParen) {
+            return Ok(()); // 引数なしの場合
+        }
+        self.advance()?;
+
+        // 内側の ( を期待
+        if !self.check(&TokenKind::LParen) {
+            // 単一括弧の場合もある
+            self.skip_balanced_parens()?;
+            return Ok(());
+        }
+        self.advance()?;
+
+        // 内側の括弧の中身をスキップ
+        self.skip_balanced_parens()?;
+
+        // 外側の ) を期待
+        self.expect(&TokenKind::RParen)?;
+
+        Ok(())
+    }
+
+    /// 括弧のバランスを取りながらスキップ
+    fn skip_balanced_parens(&mut self) -> Result<()> {
+        let mut depth = 1;
+        while depth > 0 {
+            match &self.current.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::Eof => {
+                    return Err(CompileError::Parse {
+                        loc: self.current.loc.clone(),
+                        kind: ParseError::UnexpectedToken {
+                            expected: ")".to_string(),
+                            found: TokenKind::Eof,
+                        },
+                    });
+                }
+                _ => {}
+            }
+            if depth > 0 {
+                self.advance()?;
+            }
+        }
+        self.advance()?; // 最後の )
+        Ok(())
     }
 }
 
