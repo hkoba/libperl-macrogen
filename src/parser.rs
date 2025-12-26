@@ -289,6 +289,9 @@ impl<'a> Parser<'a> {
             declarators.push(InitDeclarator { declarator, init });
         }
 
+        // GCC拡張: 宣言の最後の __attribute__((...)) をスキップ
+        self.try_skip_attribute()?;
+
         self.expect(&TokenKind::Semi)?;
 
         // typedef の場合、名前を登録
@@ -951,6 +954,10 @@ impl<'a> Parser<'a> {
 
         loop {
             let declarator = self.parse_declarator()?;
+
+            // GCC拡張: 宣言子の後の __attribute__((...)) をスキップ
+            self.try_skip_attribute()?;
+
             let init = if self.check(&TokenKind::Eq) {
                 self.advance()?;
                 Some(self.parse_initializer()?)
@@ -964,6 +971,9 @@ impl<'a> Parser<'a> {
             }
             self.advance()?;
         }
+
+        // GCC拡張: 宣言の最後の __attribute__((...)) をスキップ
+        self.try_skip_attribute()?;
 
         self.expect(&TokenKind::Semi)?;
 

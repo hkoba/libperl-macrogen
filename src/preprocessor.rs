@@ -2144,12 +2144,15 @@ impl Preprocessor {
         let mut inherited_no_expand = token.no_expand.clone();
         inherited_no_expand.insert(id);
 
+        // マクロ呼び出し位置を保存
+        let call_loc = token.loc.clone();
+
         match &def.kind {
             MacroKind::Object => {
                 let empty = HashMap::new();
                 let expanded = self.expand_tokens(&def.body, &empty, &empty)?;
-                // 全トークンに no_expand を適用
-                let marked = self.mark_no_expand(expanded, &inherited_no_expand);
+                // 全トークンに no_expand と呼び出し位置を適用
+                let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
                 Ok(Some(marked))
             }
             MacroKind::Function { params, is_variadic } => {
@@ -2228,18 +2231,23 @@ impl Preprocessor {
                 let prescanned_args = self.prescan_args(&arg_map)?;
 
                 let expanded = self.expand_tokens(&def.body, &arg_map, &prescanned_args)?;
-                // 全トークンに no_expand を適用
-                let marked = self.mark_no_expand(expanded, &inherited_no_expand);
+                // 全トークンに no_expand と呼び出し位置を適用
+                let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
                 Ok(Some(marked))
             }
         }
     }
 
-    /// トークン列に no_expand セットを適用
-    fn mark_no_expand(&self, tokens: Vec<Token>, no_expand: &HashSet<InternedStr>) -> Vec<Token> {
+    /// トークン列に no_expand セットとマクロ呼び出し位置を適用
+    ///
+    /// マクロ展開後のトークンには、マクロ呼び出し位置を設定する。
+    /// これにより、エラーメッセージがマクロ定義位置ではなく使用位置を指すようになる。
+    fn mark_expanded(&self, tokens: Vec<Token>, no_expand: &HashSet<InternedStr>, call_loc: &SourceLocation) -> Vec<Token> {
         tokens.into_iter().map(|mut t| {
             // 既存の no_expand と新しい no_expand をマージ
             t.no_expand.extend(no_expand.iter().cloned());
+            // マクロ呼び出し位置を設定
+            t.loc = call_loc.clone();
             t
         }).collect()
     }
