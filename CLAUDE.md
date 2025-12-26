@@ -37,7 +37,7 @@ This project is developed in phases. Each phase should:
 
 - **Phase 1**: Lexer foundation (completed)
 - **Phase 2**: Preprocessor (completed)
-- **Phase 3**: Parser + S-expression dump
+- **Phase 3**: Parser + S-expression dump (completed)
   - `ast.rs` - Abstract Syntax Tree definitions
   - `parser.rs` - C language parser
   - `sexp.rs` - S-expression output
@@ -50,11 +50,33 @@ This project is developed in phases. Each phase should:
 
 ### Test Files Location
 
-Temporary test files should be placed in `./samples/` directory, not `/tmp`.
+Temporary test files should be placed in `./tmp/` directory, not `/tmp`.
 
-### Test Options for samples/wrapper.h
+## CLI Usage
 
-When testing with `samples/wrapper.h`, use the following options:
+### Testing with samples/wrapper.h
+
+The recommended way to test with `samples/wrapper.h` is using the `--auto` option:
+
+```bash
+# Parse and output S-expression (recommended)
+cargo run -- --auto samples/wrapper.h
+
+# Streaming mode with source context on errors
+cargo run -- --auto --streaming samples/wrapper.h
+
+# Preprocess only (like gcc -E)
+cargo run -- --auto -E samples/wrapper.h
+
+# GCC-compatible output format (for diff comparison)
+cargo run -- --auto -E --gcc-format samples/wrapper.h
+```
+
+The `--auto` option automatically retrieves include paths and defines from Perl's `Config.pm`.
+
+### Manual Options (alternative)
+
+If `--auto` doesn't work, use explicit options:
 
 ```bash
 cargo run -- -E \
@@ -81,3 +103,44 @@ cargo run -- -E \
   -D_LP64 \
   samples/wrapper.h
 ```
+
+## Implemented Features
+
+### GCC Extensions Supported
+
+- `__attribute__((...))` - on functions, parameters, struct members, declarations
+- `__extension__` - ignored
+- `__asm__` / `asm` / `__asm` - inline assembly (skipped in parsing)
+- `__typeof__` / `typeof` - typeof operator
+- `__alignof__` / `__alignof` - alignof operator
+- `__signed__` - signed keyword variant
+- `bool` (C23/GCC) - boolean type
+- `_Bool` - C99 boolean type
+- `_Complex` - complex number type
+- `_Float16`, `_Float32`, `_Float64`, `_Float128`, `_Float32x`, `_Float64x` - extended float types
+- `__int128` - 128-bit integer type
+- `_Thread_local` / `__thread` - thread-local storage (ignored)
+- `({ ... })` - statement expressions
+- `_Pragma(...)` - pragma operator (defined as empty macro)
+
+### Preprocessor Features
+
+- Object and function-like macros
+- `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, `#endif`
+- `#include` and `#include_next`
+- `#define` and `#undef`
+- `#pragma` (ignored)
+- `#error` and `#warning`
+- Token pasting (`##`) and stringification (`#`)
+- Variadic macros (`__VA_ARGS__`, `##__VA_ARGS__`)
+- Predefined macros (`__FILE__`, `__LINE__`, etc.)
+- Macro argument prescanning (C standard compliant)
+
+### Macro Expansion Location Tracking
+
+When errors occur in macro-expanded code, the error location points to where the macro is **used**, not where it is **defined**. This makes debugging easier.
+
+## Current Status
+
+- **wrapper.h parsing**: Successfully parses 5529 declarations
+- **All tests passing**: 52 tests pass
