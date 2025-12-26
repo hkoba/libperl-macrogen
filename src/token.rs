@@ -107,6 +107,13 @@ pub enum TokenKind {
     KwNoreturn,
     KwStaticAssert,
     KwThreadLocal,
+    // GCC拡張浮動小数点型
+    KwFloat16,
+    KwFloat32,
+    KwFloat64,
+    KwFloat128,
+    KwFloat32x,
+    KwFloat64x,
 
     // === 演算子 ===
     // 算術
@@ -168,6 +175,7 @@ pub enum TokenKind {
     // === プリプロセッサ用 ===
     Hash,       // #
     HashHash,   // ##
+    Backslash,  // \ (インラインアセンブリマクロなどで使用)
 
     // === 特殊 ===
     /// ファイル終端
@@ -236,6 +244,13 @@ impl TokenKind {
             "_Noreturn" => Some(TokenKind::KwNoreturn),
             "_Static_assert" => Some(TokenKind::KwStaticAssert),
             "_Thread_local" => Some(TokenKind::KwThreadLocal),
+            // GCC拡張浮動小数点型
+            "_Float16" => Some(TokenKind::KwFloat16),
+            "_Float32" => Some(TokenKind::KwFloat32),
+            "_Float64" => Some(TokenKind::KwFloat64),
+            "_Float128" => Some(TokenKind::KwFloat128),
+            "_Float32x" => Some(TokenKind::KwFloat32x),
+            "_Float64x" => Some(TokenKind::KwFloat64x),
             _ => None,
         }
     }
@@ -297,6 +312,12 @@ impl TokenKind {
             TokenKind::KwNoreturn => "_Noreturn".to_string(),
             TokenKind::KwStaticAssert => "_Static_assert".to_string(),
             TokenKind::KwThreadLocal => "_Thread_local".to_string(),
+            TokenKind::KwFloat16 => "_Float16".to_string(),
+            TokenKind::KwFloat32 => "_Float32".to_string(),
+            TokenKind::KwFloat64 => "_Float64".to_string(),
+            TokenKind::KwFloat128 => "_Float128".to_string(),
+            TokenKind::KwFloat32x => "_Float32x".to_string(),
+            TokenKind::KwFloat64x => "_Float64x".to_string(),
             // 演算子
             TokenKind::Plus => "+".to_string(),
             TokenKind::Minus => "-".to_string(),
@@ -348,6 +369,7 @@ impl TokenKind {
             // プリプロセッサ用
             TokenKind::Hash => "#".to_string(),
             TokenKind::HashHash => "##".to_string(),
+            TokenKind::Backslash => "\\".to_string(),
             // 特殊
             TokenKind::Newline => "\n".to_string(),
             TokenKind::Eof => "".to_string(),

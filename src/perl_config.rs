@@ -127,7 +127,10 @@ pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
 
     // cppsymbols を取得
     let cppsymbols = get_config_value("cppsymbols")?;
-    let defines = parse_cppsymbols(&cppsymbols);
+    let mut defines = parse_cppsymbols(&cppsymbols);
+
+    // PERL_CORE を追加 (perl.h内のDFA表などを正しく展開するために必要)
+    defines.push(("PERL_CORE".to_string(), None));
 
     // デバッグ: __x86_64__ が含まれているか確認
     if std::env::var("DEBUG_PERL_CONFIG").is_ok() {

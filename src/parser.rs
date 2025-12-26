@@ -37,8 +37,10 @@ struct Keywords {
     kw_float: InternedStr,
     kw_double: InternedStr,
     kw_signed: InternedStr,
+    kw_signed2: InternedStr,    // __signed__
     kw_unsigned: InternedStr,
     kw_bool: InternedStr,
+    kw_bool2: InternedStr,      // bool (C23/GCC)
     kw_complex: InternedStr,
     // 型修飾子
     kw_const: InternedStr,
@@ -77,6 +79,23 @@ struct Keywords {
     kw_asm: InternedStr,        // asm
     kw_asm2: InternedStr,       // __asm
     kw_asm3: InternedStr,       // __asm__
+    kw_alignof2: InternedStr,   // __alignof
+    kw_alignof3: InternedStr,   // __alignof__
+    kw_typeof: InternedStr,     // typeof (C23)
+    kw_typeof2: InternedStr,    // __typeof
+    kw_typeof3: InternedStr,    // __typeof__
+    // GCC拡張浮動小数点型
+    kw_float16: InternedStr,
+    kw_float32: InternedStr,
+    kw_float64: InternedStr,
+    kw_float128: InternedStr,
+    kw_float32x: InternedStr,
+    kw_float64x: InternedStr,
+    // GCC拡張: 128ビット整数
+    kw_int128: InternedStr,
+    // C11/GCC: thread-local storage
+    kw_thread_local: InternedStr,   // _Thread_local
+    kw_thread: InternedStr,         // __thread (GCC)
 }
 
 impl Keywords {
@@ -95,8 +114,10 @@ impl Keywords {
             kw_float: interner.intern("float"),
             kw_double: interner.intern("double"),
             kw_signed: interner.intern("signed"),
+            kw_signed2: interner.intern("__signed__"),
             kw_unsigned: interner.intern("unsigned"),
             kw_bool: interner.intern("_Bool"),
+            kw_bool2: interner.intern("bool"),
             kw_complex: interner.intern("_Complex"),
             kw_const: interner.intern("const"),
             kw_volatile: interner.intern("volatile"),
@@ -130,6 +151,20 @@ impl Keywords {
             kw_asm: interner.intern("asm"),
             kw_asm2: interner.intern("__asm"),
             kw_asm3: interner.intern("__asm__"),
+            kw_alignof2: interner.intern("__alignof"),
+            kw_alignof3: interner.intern("__alignof__"),
+            kw_typeof: interner.intern("typeof"),
+            kw_typeof2: interner.intern("__typeof"),
+            kw_typeof3: interner.intern("__typeof__"),
+            kw_float16: interner.intern("_Float16"),
+            kw_float32: interner.intern("_Float32"),
+            kw_float64: interner.intern("_Float64"),
+            kw_float128: interner.intern("_Float128"),
+            kw_float32x: interner.intern("_Float32x"),
+            kw_float64x: interner.intern("_Float64x"),
+            kw_int128: interner.intern("__int128"),
+            kw_thread_local: interner.intern("_Thread_local"),
+            kw_thread: interner.intern("__thread"),
         }
     }
 }
@@ -152,6 +187,11 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// StringInterner への参照を取得
+    pub fn interner(&self) -> &crate::intern::StringInterner {
+        self.pp.interner()
+    }
+
     /// 翻訳単位をパース
     pub fn parse(&mut self) -> Result<TranslationUnit> {
         let mut decls = Vec::new();
@@ -162,6 +202,28 @@ impl<'a> Parser<'a> {
         }
 
         Ok(TranslationUnit { decls })
+    }
+
+    /// ストリーミング形式でパース
+    ///
+    /// 各外部宣言を順次パースし、結果をコールバックに渡す。
+    /// コールバックが `ControlFlow::Break(())` を返すと処理を中断する。
+    ///
+    /// # Arguments
+    /// * `callback` - 各宣言のパース結果と開始位置を受け取るクロージャ。
+    ///   `ControlFlow::Continue(())` を返すと次の宣言を処理、
+    ///   `ControlFlow::Break(())` を返すと処理を中断。
+    pub fn parse_each<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation) -> std::ops::ControlFlow<()>,
+    {
+        while !self.is_eof() {
+            let loc = self.current.loc.clone();
+            let result = self.parse_external_decl();
+            if callback(result, &loc).is_break() {
+                break;
+            }
+        }
     }
 
     /// 外部宣言をパース
@@ -256,6 +318,10 @@ impl<'a> Parser<'a> {
                 if id == self.kw.kw_extension {
                     self.advance()?;
                     continue;
+                // C11/GCC: _Thread_local, __thread は無視（TinyCC方式）
+                } else if id == self.kw.kw_thread_local || id == self.kw.kw_thread {
+                    self.advance()?;
+                    continue;
                 } else if id == self.kw.kw_typedef {
                     specs.storage = Some(StorageClass::Typedef);
                     self.advance()?;
@@ -307,18 +373,46 @@ impl<'a> Parser<'a> {
                 } else if id == self.kw.kw_double {
                     specs.type_specs.push(TypeSpec::Double);
                     self.advance()?;
-                } else if id == self.kw.kw_signed {
+                } else if id == self.kw.kw_signed || id == self.kw.kw_signed2 {
                     specs.type_specs.push(TypeSpec::Signed);
                     self.advance()?;
                 } else if id == self.kw.kw_unsigned {
                     specs.type_specs.push(TypeSpec::Unsigned);
                     self.advance()?;
-                } else if id == self.kw.kw_bool {
+                } else if id == self.kw.kw_bool || id == self.kw.kw_bool2 {
                     specs.type_specs.push(TypeSpec::Bool);
                     self.advance()?;
                 } else if id == self.kw.kw_complex {
                     specs.type_specs.push(TypeSpec::Complex);
                     self.advance()?;
+                } else if id == self.kw.kw_float16 {
+                    specs.type_specs.push(TypeSpec::Float16);
+                    self.advance()?;
+                } else if id == self.kw.kw_float32 {
+                    specs.type_specs.push(TypeSpec::Float32);
+                    self.advance()?;
+                } else if id == self.kw.kw_float64 {
+                    specs.type_specs.push(TypeSpec::Float64);
+                    self.advance()?;
+                } else if id == self.kw.kw_float128 {
+                    specs.type_specs.push(TypeSpec::Float128);
+                    self.advance()?;
+                } else if id == self.kw.kw_float32x {
+                    specs.type_specs.push(TypeSpec::Float32x);
+                    self.advance()?;
+                } else if id == self.kw.kw_float64x {
+                    specs.type_specs.push(TypeSpec::Float64x);
+                    self.advance()?;
+                } else if id == self.kw.kw_int128 {
+                    specs.type_specs.push(TypeSpec::Int128);
+                    self.advance()?;
+                } else if id == self.kw.kw_typeof || id == self.kw.kw_typeof2 || id == self.kw.kw_typeof3 {
+                    // GCC拡張/C23: typeof(expr) または typeof(type)
+                    self.advance()?;
+                    self.expect(&TokenKind::LParen)?;
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::RParen)?;
+                    specs.type_specs.push(TypeSpec::TypeofExpr(Box::new(expr)));
                 } else if id == self.kw.kw_struct {
                     specs.type_specs.push(self.parse_struct_or_union(true)?);
                 } else if id == self.kw.kw_union {
@@ -346,6 +440,9 @@ impl<'a> Parser<'a> {
     fn parse_struct_or_union(&mut self, is_struct: bool) -> Result<TypeSpec> {
         let loc = self.current.loc.clone();
         self.advance()?; // struct/union
+
+        // GCC拡張: struct __attribute__((...)) name { ... }
+        self.try_skip_attribute()?;
 
         // 名前（オプション）
         let name = self.current_ident();
@@ -387,6 +484,9 @@ impl<'a> Parser<'a> {
             } else {
                 Some(self.parse_declarator()?)
             };
+
+            // GCC拡張: 宣言子の後の __attribute__ をスキップ
+            self.try_skip_attribute()?;
 
             let bitfield = if self.check(&TokenKind::Colon) {
                 self.advance()?;
@@ -598,6 +698,9 @@ impl<'a> Parser<'a> {
                 Some(self.parse_declarator()?)
             };
 
+            // GCC拡張: パラメータ後の __attribute__((...)) をスキップ
+            self.try_skip_attribute()?;
+
             params.push(ParamDecl {
                 specs,
                 declarator,
@@ -781,6 +884,9 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+
+            // GCC拡張: パラメータ後の __attribute__((...)) をスキップ
+            self.try_skip_attribute()?;
 
             params.push(ParamDecl {
                 specs,
@@ -1380,7 +1486,8 @@ impl<'a> Parser<'a> {
 
     /// キャスト式をパース
     fn parse_cast_expr(&mut self) -> Result<Expr> {
-        // ( type-name ) cast-expression または ( expr )
+        // ( type-name ) cast-expression のみをここで処理
+        // ( expr ) は parse_primary_expr で処理し、postfix操作を許可する
         if self.check(&TokenKind::LParen) {
             let loc = self.current.loc.clone();
             self.advance()?; // (
@@ -1417,15 +1524,88 @@ impl<'a> Parser<'a> {
                     expr: Box::new(expr),
                     loc,
                 });
+            } else if self.check(&TokenKind::LBrace) {
+                // GCC拡張: ステートメント式 ({ ... })
+                let stmt = self.parse_compound_stmt()?;
+                self.expect(&TokenKind::RParen)?;
+                // ステートメント式の後もpostfixを許可する
+                return self.parse_postfix_on(Expr::StmtExpr(stmt, loc));
             } else {
-                // 括弧で囲まれた式
+                // 括弧で囲まれた式 - parse_primary_exprに任せる
+                // いったん戻してparse_unary_exprに任せる
+                // 注: ここではadvanceを巻き戻す代わりに、式をパースしてからpostfixを処理
                 let expr = self.parse_expr()?;
                 self.expect(&TokenKind::RParen)?;
-                return Ok(expr);
+                // postfix操作を許可する（->や.など）
+                return self.parse_postfix_on(expr);
             }
         }
 
         self.parse_unary_expr()
+    }
+
+    /// 既存の式に対してpostfix操作をパース
+    fn parse_postfix_on(&mut self, mut expr: Expr) -> Result<Expr> {
+        loop {
+            let loc = self.current.loc.clone();
+            match &self.current.kind {
+                TokenKind::LBracket => {
+                    self.advance()?;
+                    let index = self.parse_expr()?;
+                    self.expect(&TokenKind::RBracket)?;
+                    expr = Expr::Index {
+                        expr: Box::new(expr),
+                        index: Box::new(index),
+                        loc,
+                    };
+                }
+                TokenKind::LParen => {
+                    self.advance()?;
+                    let mut args = Vec::new();
+                    while !self.check(&TokenKind::RParen) {
+                        args.push(self.parse_assignment_expr()?);
+                        if !self.check(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.advance()?;
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                    expr = Expr::Call {
+                        func: Box::new(expr),
+                        args,
+                        loc,
+                    };
+                }
+                TokenKind::Dot => {
+                    self.advance()?;
+                    let member = self.expect_ident()?;
+                    expr = Expr::Member {
+                        expr: Box::new(expr),
+                        member,
+                        loc,
+                    };
+                }
+                TokenKind::Arrow => {
+                    self.advance()?;
+                    let member = self.expect_ident()?;
+                    expr = Expr::PtrMember {
+                        expr: Box::new(expr),
+                        member,
+                        loc,
+                    };
+                }
+                TokenKind::PlusPlus => {
+                    self.advance()?;
+                    expr = Expr::PostInc(Box::new(expr), loc);
+                }
+                TokenKind::MinusMinus => {
+                    self.advance()?;
+                    expr = Expr::PostDec(Box::new(expr), loc);
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
     }
 
     /// 単項式をパース
@@ -1493,7 +1673,7 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Sizeof(Box::new(expr), loc))
                 }
             }
-            TokenKind::Ident(id) if *id == self.kw.kw_alignof => {
+            TokenKind::Ident(id) if *id == self.kw.kw_alignof || *id == self.kw.kw_alignof2 || *id == self.kw.kw_alignof3 => {
                 self.advance()?;
                 self.expect(&TokenKind::LParen)?;
                 let type_name = self.parse_type_name()?;
@@ -1620,9 +1800,16 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 self.advance()?;
-                let expr = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
-                Ok(expr)
+                // GCC拡張: ステートメント式 ({ ... })
+                if self.check(&TokenKind::LBrace) {
+                    let stmt = self.parse_compound_stmt()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(Expr::StmtExpr(stmt, loc))
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(expr)
+                }
             }
             _ => Err(CompileError::Parse {
                 loc,
@@ -1745,6 +1932,8 @@ impl<'a> Parser<'a> {
             || id == self.kw.kw_inline3
             || id == self.kw.kw_sizeof
             || id == self.kw.kw_alignof
+            || id == self.kw.kw_alignof2
+            || id == self.kw.kw_alignof3
     }
 
     fn is_type_start(&self) -> bool {
@@ -1757,8 +1946,10 @@ impl<'a> Parser<'a> {
                 || id == self.kw.kw_float
                 || id == self.kw.kw_double
                 || id == self.kw.kw_signed
+                || id == self.kw.kw_signed2
                 || id == self.kw.kw_unsigned
                 || id == self.kw.kw_bool
+                || id == self.kw.kw_bool2
                 || id == self.kw.kw_complex
                 || id == self.kw.kw_const
                 || id == self.kw.kw_volatile

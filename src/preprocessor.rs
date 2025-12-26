@@ -262,6 +262,10 @@ impl Preprocessor {
         // TinyCC方式: -Dオプションを#defineディレクティブとして処理
         // これにより関数マクロも正しく処理される
         let mut defines_source = String::new();
+
+        // _Pragma は C99 のオペレータだが、ヘッダー解析時は無視する
+        defines_source.push_str("#define _Pragma(x)\n");
+
         for (name, value) in &self.config.predefined {
             if let Some(val) = value {
                 defines_source.push_str(&format!("#define {} {}\n", name, val));
@@ -576,6 +580,12 @@ impl Preprocessor {
                 }
             }
 
+            // バックスラッシュ（インラインアセンブリマクロなどで使用される）
+            b'\\' => {
+                source.advance();
+                Ok(TokenKind::Backslash)
+            }
+
             _ => {
                 let loc = source.current_location();
                 source.advance();
@@ -660,16 +670,17 @@ impl Preprocessor {
     /// 識別子をスキャン（tinycc方式：キーワード変換しない）
     fn scan_identifier(&mut self) -> Result<TokenKind, CompileError> {
         let source = self.sources.last_mut().unwrap();
-        let start = source.pos;
+        let mut chars = Vec::new();
         while let Some(c) = source.peek() {
             if c.is_ascii_alphanumeric() || c == b'_' {
+                chars.push(c);
                 source.advance();
             } else {
                 break;
             }
         }
 
-        let text = std::str::from_utf8(&source.source[start..source.pos]).unwrap();
+        let text = std::str::from_utf8(&chars).unwrap();
 
         // すべて識別子として返す（キーワード判定は後段で行う）
         let interned = self.interner.intern(text);
@@ -1053,12 +1064,11 @@ impl Preprocessor {
                     }
                 }
                 if count == 0 {
-                    return Err(CompileError::Lex {
-                        loc: loc.clone(),
-                        kind: crate::error::LexError::InvalidEscape('x'),
-                    });
+                    // GCC互換: \x の後に16進数がない場合は文字 'x' として扱う
+                    Ok(b'x')
+                } else {
+                    Ok(value)
                 }
-                Ok(value)
             }
             Some(c @ b'0'..=b'7') => {
                 let mut value = (c - b'0') as u8;
@@ -1073,10 +1083,11 @@ impl Preprocessor {
                 }
                 Ok(value)
             }
-            Some(c) => Err(CompileError::Lex {
-                loc: loc.clone(),
-                kind: crate::error::LexError::InvalidEscape(c as char),
-            }),
+            Some(c) => {
+                // GCC互換: 未知のエスケープシーケンスは文字そのものとして扱う
+                source.advance();
+                Ok(c)
+            }
             None => Err(CompileError::Lex {
                 loc: loc.clone(),
                 kind: crate::error::LexError::UnterminatedString,
@@ -1896,6 +1907,56 @@ impl Preprocessor {
         Ok(())
     }
 
+    /// 行末までスキップ（ブロックコメントを正しく処理）
+    /// preprocess_skip内で使用するための静的メソッド
+    fn skip_to_eol_raw(source: &mut InputSource) {
+        loop {
+            match source.peek() {
+                Some(b'\n') | None => break,
+                Some(b'/') => {
+                    // コメントかどうかチェック
+                    if source.peek_n(1) == Some(b'*') {
+                        // ブロックコメントをスキップ
+                        source.advance(); // '/'
+                        source.advance(); // '*'
+                        loop {
+                            match (source.peek(), source.peek_n(1)) {
+                                (Some(b'*'), Some(b'/')) => {
+                                    source.advance();
+                                    source.advance();
+                                    break;
+                                }
+                                (Some(_), _) => { source.advance(); }
+                                (None, _) => break,
+                            }
+                        }
+                    } else if source.peek_n(1) == Some(b'/') {
+                        // 行コメント - 行末までスキップ
+                        while source.peek().is_some_and(|c| c != b'\n') {
+                            source.advance();
+                        }
+                        break;
+                    } else {
+                        source.advance();
+                    }
+                }
+                Some(b'\\') => {
+                    // 行継続
+                    source.advance();
+                    if source.peek() == Some(b'\n') {
+                        source.advance();
+                    } else if source.peek() == Some(b'\r') {
+                        source.advance();
+                        if source.peek() == Some(b'\n') {
+                            source.advance();
+                        }
+                    }
+                }
+                Some(_) => { source.advance(); }
+            }
+        }
+    }
+
     /// TinyCC方式: 条件が偽のブロックをスキップ
     /// トークナイザを使わず文字レベルでスキャンし、#else/#elif/#endif を見つけるまでスキップ
     /// 戻り値: 見つかったディレクティブ名 ("else", "elif", "endif")
@@ -2025,21 +2086,15 @@ impl Preprocessor {
                             }
                             "endif" => {
                                 if depth == 0 {
-                                    // 行末までスキップしてから戻る
-                                    while source.peek().is_some_and(|c| c != b'\n') {
-                                        source.advance();
-                                    }
+                                    // 行末までスキップしてから戻る（コメントを考慮）
+                                    Self::skip_to_eol_raw(source);
                                     return Ok("endif".to_string());
                                 }
                                 depth -= 1;
-                                while source.peek().is_some_and(|c| c != b'\n') {
-                                    source.advance();
-                                }
+                                Self::skip_to_eol_raw(source);
                             }
                             "else" if depth == 0 => {
-                                while source.peek().is_some_and(|c| c != b'\n') {
-                                    source.advance();
-                                }
+                                Self::skip_to_eol_raw(source);
                                 return Ok("else".to_string());
                             }
                             "elif" if depth == 0 => {
@@ -2047,10 +2102,8 @@ impl Preprocessor {
                                 return Ok("elif".to_string());
                             }
                             _ => {
-                                // その他のディレクティブは行末までスキップ
-                                while source.peek().is_some_and(|c| c != b'\n') {
-                                    source.advance();
-                                }
+                                // その他のディレクティブは行末までスキップ（コメントを考慮）
+                                Self::skip_to_eol_raw(source);
                             }
                         }
                         at_line_start = false;
@@ -2093,15 +2146,30 @@ impl Preprocessor {
 
         match &def.kind {
             MacroKind::Object => {
-                let expanded = self.expand_tokens(&def.body, &HashMap::new())?;
+                let empty = HashMap::new();
+                let expanded = self.expand_tokens(&def.body, &empty, &empty)?;
                 // 全トークンに no_expand を適用
                 let marked = self.mark_no_expand(expanded, &inherited_no_expand);
                 Ok(Some(marked))
             }
             MacroKind::Function { params, is_variadic } => {
-                let next = self.next_raw_token()?;
+                // C標準: 関数形式マクロの識別子と ( の間に空白（改行を含む）があっても良い
+                // 改行をスキップして ( を探す
+                let mut skipped_newlines = Vec::new();
+                let next = loop {
+                    let t = self.next_raw_token()?;
+                    if matches!(t.kind, TokenKind::Newline) {
+                        skipped_newlines.push(t);
+                    } else {
+                        break t;
+                    }
+                };
                 if !matches!(next.kind, TokenKind::LParen) {
+                    // ( がない場合、改行と次のトークンを戻す
                     self.lookahead.push(next);
+                    for t in skipped_newlines.into_iter().rev() {
+                        self.lookahead.push(t);
+                    }
                     return Ok(None);
                 }
 
@@ -2156,7 +2224,10 @@ impl Preprocessor {
                     }
                 }
 
-                let expanded = self.expand_tokens(&def.body, &arg_map)?;
+                // 引数をprescan（# や ## で使われない引数は先に展開される）
+                let prescanned_args = self.prescan_args(&arg_map)?;
+
+                let expanded = self.expand_tokens(&def.body, &arg_map, &prescanned_args)?;
                 // 全トークンに no_expand を適用
                 let marked = self.mark_no_expand(expanded, &inherited_no_expand);
                 Ok(Some(marked))
@@ -2218,8 +2289,72 @@ impl Preprocessor {
         Ok(args)
     }
 
+    /// マクロ引数をprescan（展開）する
+    /// C標準: # や ## で使われない引数は先に展開される
+    fn prescan_args(&mut self, args: &HashMap<InternedStr, Vec<Token>>) -> Result<HashMap<InternedStr, Vec<Token>>, CompileError> {
+        let mut prescanned = HashMap::new();
+        for (param, tokens) in args.iter() {
+            // 引数トークンを展開（再帰的マクロ展開）
+            let expanded = self.expand_token_list(tokens)?;
+            prescanned.insert(*param, expanded);
+        }
+        Ok(prescanned)
+    }
+
+    /// トークンリストを展開（引数prescan用）
+    /// マクロ展開を行うが、ソースからは読まない
+    fn expand_token_list(&mut self, tokens: &[Token]) -> Result<Vec<Token>, CompileError> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 既存のlookaheadを保存
+        let saved_lookahead = std::mem::take(&mut self.lookahead);
+
+        // トークンを先読みバッファに追加（逆順で追加すると正順で取り出せる）
+        // 終端マーカーとしてEofを追加（ソースからの読み込みを防ぐ）
+        self.lookahead.push(Token::new(TokenKind::Eof, SourceLocation::default()));
+        for token in tokens.iter().rev() {
+            self.lookahead.push(token.clone());
+        }
+
+        // トークンを1つずつ処理して結果を収集
+        let mut result = Vec::new();
+        while let Some(token) = self.lookahead.pop() {
+            // 終端マーカーに到達したら終了
+            if matches!(token.kind, TokenKind::Eof) {
+                break;
+            }
+
+            // 改行はスキップ
+            if matches!(token.kind, TokenKind::Newline) {
+                continue;
+            }
+
+            // マクロ展開を試みる
+            if let TokenKind::Ident(id) = token.kind {
+                if let Some(expanded) = self.try_expand_macro(id, &token)? {
+                    // 展開結果を逆順でlookaheadに戻す
+                    for t in expanded.into_iter().rev() {
+                        self.lookahead.push(t);
+                    }
+                    continue;
+                }
+            }
+
+            result.push(token);
+        }
+
+        // lookaheadを復元
+        self.lookahead = saved_lookahead;
+
+        Ok(result)
+    }
+
     /// トークン列を展開
-    fn expand_tokens(&mut self, tokens: &[Token], args: &HashMap<InternedStr, Vec<Token>>) -> Result<Vec<Token>, CompileError> {
+    /// raw_args: # や ## で使用（展開前の引数）
+    /// prescanned_args: 通常の置換で使用（展開済みの引数）
+    fn expand_tokens(&mut self, tokens: &[Token], raw_args: &HashMap<InternedStr, Vec<Token>>, prescanned_args: &HashMap<InternedStr, Vec<Token>>) -> Result<Vec<Token>, CompileError> {
         let mut result = Vec::new();
         let mut i = 0;
 
@@ -2229,7 +2364,8 @@ impl Preprocessor {
             match &token.kind {
                 TokenKind::Hash if i + 1 < tokens.len() => {
                     if let TokenKind::Ident(param_id) = tokens[i + 1].kind {
-                        if let Some(arg_tokens) = args.get(&param_id) {
+                        // # はraw引数を使用
+                        if let Some(arg_tokens) = raw_args.get(&param_id) {
                             let stringified = self.stringify_tokens(arg_tokens);
                             result.push(Token::new(
                                 TokenKind::StringLit(stringified.into_bytes()),
@@ -2255,11 +2391,11 @@ impl Preprocessor {
                     // 左辺のトークンを取得
                     let left = result.pop().unwrap();
 
-                    // 右辺のトークンを取得（パラメータの場合は展開）
+                    // 右辺のトークンを取得（## はraw引数を使用）
                     i += 1;
                     let right_token = &tokens[i];
                     let right_tokens = if let TokenKind::Ident(id) = right_token.kind {
-                        if let Some(arg_tokens) = args.get(&id) {
+                        if let Some(arg_tokens) = raw_args.get(&id) {
                             arg_tokens.clone()
                         } else {
                             vec![right_token.clone()]
@@ -2275,7 +2411,8 @@ impl Preprocessor {
                     continue;
                 }
                 TokenKind::Ident(id) => {
-                    if let Some(arg_tokens) = args.get(id) {
+                    // 通常の置換はprescanned引数を使用
+                    if let Some(arg_tokens) = prescanned_args.get(id) {
                         result.extend(arg_tokens.iter().cloned());
                     } else {
                         result.push(token.clone());

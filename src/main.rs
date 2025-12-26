@@ -6,9 +6,12 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 
+use std::ops::ControlFlow;
+
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    get_perl_config, CompileError, FileId, PPConfig, Parser, Preprocessor, SexpPrinter, TokenKind,
+    get_perl_config, CompileError, FileId, PPConfig, Parser, Preprocessor, SexpPrinter,
+    SourceLocation, TokenKind,
 };
 
 /// コマンドライン引数
@@ -46,6 +49,10 @@ struct Cli {
     /// GCC互換の出力形式 (-E と併用)
     #[arg(long = "gcc-format")]
     gcc_format: bool,
+
+    /// ストリーミングモード（逐次パース、エラー時にソースコード表示）
+    #[arg(long = "streaming")]
+    streaming: bool,
 }
 
 fn main() {
@@ -91,6 +98,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if cli.preprocess_only {
         // -E: プリプロセス結果のみ出力
         output_preprocessed(&mut pp, cli.output.as_ref(), cli.gcc_format)?;
+    } else if cli.streaming {
+        // --streaming: ストリーミングモード
+        run_streaming(&mut pp)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -119,6 +129,104 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// ストリーミングモードで実行
+fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    // parse_each でパースし、結果を収集
+    let mut decls = Vec::new();
+    let mut last_error: Option<(CompileError, SourceLocation)> = None;
+
+    parser.parse_each(|result, loc| {
+        match result {
+            Ok(decl) => {
+                decls.push(decl);
+                ControlFlow::Continue(())
+            }
+            Err(e) => {
+                last_error = Some((e, loc.clone()));
+                ControlFlow::Break(())
+            }
+        }
+    });
+
+    // 成功した宣言を出力
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let mut printer = SexpPrinter::new(&mut handle, parser.interner());
+
+    for decl in &decls {
+        printer.print_external_decl(decl)?;
+        printer.writeln()?;
+    }
+    drop(printer);
+    drop(handle);
+
+    // エラーがあった場合、詳細を表示
+    if let Some((error, _decl_start_loc)) = last_error {
+        // エラー内の実際の位置を使う
+        let error_loc = error.loc();
+
+        eprintln!("\n=== Parse Error ===");
+        eprintln!("Location: {}:{}:{}",
+            pp.files().get_path(error_loc.file_id).display(),
+            error_loc.line,
+            error_loc.column);
+        eprintln!("Error: {}", format_error(&error, pp));
+
+        // ソースコードのコンテキストを表示
+        show_source_context(pp, error_loc);
+
+        return Err("Parse failed".into());
+    }
+
+    eprintln!("\nSuccessfully parsed {} declarations", decls.len());
+    Ok(())
+}
+
+/// エラー箇所のソースコードコンテキストを表示
+fn show_source_context(pp: &Preprocessor, loc: &SourceLocation) {
+    let path = pp.files().get_path(loc.file_id);
+
+    // ファイルを読み込み
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Could not read source file: {}", e);
+            return;
+        }
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let target_line = loc.line as usize;
+
+    // エラー行の前後2行を表示
+    let start = target_line.saturating_sub(3);
+    let end = (target_line + 2).min(lines.len());
+
+    eprintln!("\nSource context:");
+    eprintln!("{}:{}:{}", path.display(), loc.line, loc.column);
+    eprintln!("{}", "-".repeat(60));
+
+    for i in start..end {
+        let line_num = i + 1;
+        let marker = if line_num == target_line as usize { ">>>" } else { "   " };
+        if i < lines.len() {
+            eprintln!("{} {:4} | {}", marker, line_num, lines[i]);
+
+            // エラー行の場合、カラム位置を矢印で示す
+            if line_num == target_line as usize && loc.column > 0 {
+                let spaces = " ".repeat(loc.column as usize + 7);
+                eprintln!("{}^", spaces);
+            }
+        }
+    }
+    eprintln!("{}", "-".repeat(60));
 }
 
 /// エラーをファイル名付きでフォーマット

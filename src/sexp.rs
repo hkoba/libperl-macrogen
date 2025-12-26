@@ -31,6 +31,11 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
         self.pretty = pretty;
     }
 
+    /// 改行を出力
+    pub fn writeln(&mut self) -> Result<()> {
+        writeln!(self.writer)
+    }
+
     /// 翻訳単位を出力
     pub fn print_translation_unit(&mut self, tu: &TranslationUnit) -> Result<()> {
         self.write_open("translation-unit")?;
@@ -45,7 +50,7 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
     }
 
     /// 外部宣言を出力
-    fn print_external_decl(&mut self, decl: &ExternalDecl) -> Result<()> {
+    pub fn print_external_decl(&mut self, decl: &ExternalDecl) -> Result<()> {
         match decl {
             ExternalDecl::FunctionDef(func) => self.print_function_def(func),
             ExternalDecl::Declaration(decl) => self.print_declaration(decl),
@@ -116,6 +121,18 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
             TypeSpec::Unsigned => self.write_atom("unsigned"),
             TypeSpec::Bool => self.write_atom("_Bool"),
             TypeSpec::Complex => self.write_atom("_Complex"),
+            TypeSpec::Float16 => self.write_atom("_Float16"),
+            TypeSpec::Float32 => self.write_atom("_Float32"),
+            TypeSpec::Float64 => self.write_atom("_Float64"),
+            TypeSpec::Float128 => self.write_atom("_Float128"),
+            TypeSpec::Float32x => self.write_atom("_Float32x"),
+            TypeSpec::Float64x => self.write_atom("_Float64x"),
+            TypeSpec::Int128 => self.write_atom("__int128"),
+            TypeSpec::TypeofExpr(expr) => {
+                self.write_open("typeof")?;
+                self.print_expr(expr)?;
+                self.write_close()
+            }
             TypeSpec::Struct(s) => self.print_struct_spec("struct", s),
             TypeSpec::Union(s) => self.print_struct_spec("union", s),
             TypeSpec::Enum(e) => self.print_enum_spec(e),
@@ -595,6 +612,11 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.write_open(",")?;
                 self.print_expr(lhs)?;
                 self.print_expr(rhs)?;
+                self.write_close()
+            }
+            Expr::StmtExpr(stmt, _) => {
+                self.write_open("stmt-expr")?;
+                self.print_compound_stmt(stmt)?;
                 self.write_close()
             }
         }

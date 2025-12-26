@@ -73,6 +73,17 @@ pub enum TypeSpec {
     Unsigned,
     Bool,
     Complex,
+    // GCC拡張浮動小数点型
+    Float16,
+    Float32,
+    Float64,
+    Float128,
+    Float32x,
+    Float64x,
+    // GCC拡張: 128ビット整数
+    Int128,
+    // GCC拡張: __typeof__(expr)
+    TypeofExpr(Box<Expr>),
     Struct(StructSpec),
     Union(StructSpec),
     Enum(EnumSpec),
@@ -376,6 +387,9 @@ pub enum Expr {
         rhs: Box<Expr>,
         loc: SourceLocation,
     },
+
+    // GCC拡張: ステートメント式 ({ ... })
+    StmtExpr(CompoundStmt, SourceLocation),
 }
 
 impl Expr {
@@ -411,6 +425,7 @@ impl Expr {
             Expr::Conditional { loc, .. } => loc,
             Expr::Assign { loc, .. } => loc,
             Expr::Comma { loc, .. } => loc,
+            Expr::StmtExpr(_, loc) => loc,
         }
     }
 }

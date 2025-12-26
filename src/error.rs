@@ -159,6 +159,15 @@ impl fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 impl CompileError {
+    /// エラーが発生した位置を取得
+    pub fn loc(&self) -> &SourceLocation {
+        match self {
+            CompileError::Lex { loc, .. } => loc,
+            CompileError::Preprocess { loc, .. } => loc,
+            CompileError::Parse { loc, .. } => loc,
+        }
+    }
+
     /// ファイル名を解決してエラーメッセージをフォーマット
     pub fn format_with_files(&self, files: &FileRegistry) -> String {
         match self {
