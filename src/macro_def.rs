@@ -118,7 +118,17 @@ impl MacroTable {
     }
 
     /// マクロを定義（既存の定義があれば返す）
-    pub fn define(&mut self, def: MacroDef) -> Option<MacroDef> {
+    /// `__` で始まる builtin マクロは上書きされない
+    pub fn define(&mut self, def: MacroDef, interner: &crate::intern::StringInterner) -> Option<MacroDef> {
+        // 既存のマクロがbuiltinで、名前が __ で始まる場合は上書きしない
+        if let Some(existing) = self.macros.get(&def.name) {
+            if existing.is_builtin {
+                let name_str = interner.get(def.name);
+                if name_str.starts_with("__") {
+                    return None;
+                }
+            }
+        }
         self.macros.insert(def.name, def)
     }
 
@@ -212,8 +222,8 @@ mod tests {
         let loc = SourceLocation::new(FileId::default(), 1, 1);
 
         // 定義
-        assert!(table.define(MacroDef::object(foo, vec![], loc.clone())).is_none());
-        assert!(table.define(MacroDef::object(bar, vec![], loc.clone())).is_none());
+        assert!(table.define(MacroDef::object(foo, vec![], loc.clone()), &interner).is_none());
+        assert!(table.define(MacroDef::object(bar, vec![], loc.clone()), &interner).is_none());
         assert_eq!(table.len(), 2);
 
         // 検索
@@ -221,7 +231,7 @@ mod tests {
         assert!(table.get(foo).is_some());
 
         // 再定義
-        let old = table.define(MacroDef::object(foo, vec![], loc));
+        let old = table.define(MacroDef::object(foo, vec![], loc), &interner);
         assert!(old.is_some());
         assert_eq!(table.len(), 2);
 

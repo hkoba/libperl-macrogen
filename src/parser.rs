@@ -74,6 +74,9 @@ struct Keywords {
     kw_inline3: InternedStr,    // __inline__
     kw_attribute: InternedStr,  // __attribute__
     kw_attribute2: InternedStr, // __attribute
+    kw_asm: InternedStr,        // asm
+    kw_asm2: InternedStr,       // __asm
+    kw_asm3: InternedStr,       // __asm__
 }
 
 impl Keywords {
@@ -124,6 +127,9 @@ impl Keywords {
             kw_inline3: interner.intern("__inline__"),
             kw_attribute: interner.intern("__attribute__"),
             kw_attribute2: interner.intern("__attribute"),
+            kw_asm: interner.intern("asm"),
+            kw_asm2: interner.intern("__asm"),
+            kw_asm3: interner.intern("__asm__"),
         }
     }
 }
@@ -133,10 +139,15 @@ impl<'a> Parser<'a> {
     pub fn new(pp: &'a mut Preprocessor) -> Result<Self> {
         let kw = Keywords::new(pp.interner_mut());
         let current = pp.next_token()?;
+
+        // GCC builtin types を事前登録
+        let mut typedefs = HashSet::new();
+        typedefs.insert(pp.interner_mut().intern("__builtin_va_list"));
+
         Ok(Self {
             pp,
             current,
-            typedefs: HashSet::new(),
+            typedefs,
             kw,
         })
     }
@@ -1789,12 +1800,20 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// __attribute__ があればスキップ
+    /// __attribute__ / __asm__ があればスキップ（複数連続も対応）
     fn try_skip_attribute(&mut self) -> Result<()> {
-        if let Some(id) = self.current_ident() {
-            if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
-                self.skip_attribute()?;
+        loop {
+            if let Some(id) = self.current_ident() {
+                if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
+                    self.skip_attribute()?;
+                    continue;
+                }
+                if id == self.kw.kw_asm || id == self.kw.kw_asm2 || id == self.kw.kw_asm3 {
+                    self.try_skip_asm_label()?;
+                    continue;
+                }
             }
+            break;
         }
         Ok(())
     }
@@ -1823,6 +1842,20 @@ impl<'a> Parser<'a> {
         // 外側の ) を期待
         self.expect(&TokenKind::RParen)?;
 
+        Ok(())
+    }
+
+    /// __asm__(label) があればスキップ
+    fn try_skip_asm_label(&mut self) -> Result<()> {
+        if let Some(id) = self.current_ident() {
+            if id == self.kw.kw_asm || id == self.kw.kw_asm2 || id == self.kw.kw_asm3 {
+                self.advance()?; // asm / __asm / __asm__
+                if self.check(&TokenKind::LParen) {
+                    self.advance()?; // (
+                    self.skip_balanced_parens()?; // 内容をスキップして ) を消費
+                }
+            }
+        }
         Ok(())
     }
 

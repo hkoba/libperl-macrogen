@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::intern::{InternedStr, StringInterner};
 use crate::source::SourceLocation;
 
@@ -402,6 +404,8 @@ pub struct Token {
     pub loc: SourceLocation,
     /// このトークンの直前にあったコメント群
     pub leading_comments: Vec<Comment>,
+    /// マクロ展開禁止リスト（自己参照マクロの無限再帰防止用）
+    pub no_expand: HashSet<InternedStr>,
 }
 
 impl Token {
@@ -411,6 +415,7 @@ impl Token {
             kind,
             loc,
             leading_comments: Vec::new(),
+            no_expand: HashSet::new(),
         }
     }
 
@@ -420,6 +425,17 @@ impl Token {
             kind,
             loc,
             leading_comments: comments,
+            no_expand: HashSet::new(),
+        }
+    }
+
+    /// マクロ展開禁止リストを継承した新しいトークンを作成
+    pub fn with_no_expand(kind: TokenKind, loc: SourceLocation, no_expand: HashSet<InternedStr>) -> Self {
+        Self {
+            kind,
+            loc,
+            leading_comments: Vec::new(),
+            no_expand,
         }
     }
 }

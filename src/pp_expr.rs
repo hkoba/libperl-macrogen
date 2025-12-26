@@ -511,7 +511,7 @@ mod tests {
         let _ = defined; // 登録だけ
 
         // FOO を定義
-        macros.define(MacroDef::object(foo, vec![], SourceLocation::default()));
+        macros.define(MacroDef::object(foo, vec![], SourceLocation::default()), &interner);
 
         // defined(FOO)
         let tokens = vec![

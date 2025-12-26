@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    CompileError, PPConfig, Parser, Preprocessor, SexpPrinter, TokenKind,
+    get_perl_config, CompileError, FileId, PPConfig, Parser, Preprocessor, SexpPrinter, TokenKind,
 };
 
 /// コマンドライン引数
@@ -38,6 +38,14 @@ struct Cli {
     /// プリプロセッサデバッグ出力
     #[arg(long = "debug-pp")]
     debug_pp: bool,
+
+    /// Perl Config.pm から設定を自動取得
+    #[arg(long = "auto")]
+    auto: bool,
+
+    /// GCC互換の出力形式 (-E と併用)
+    #[arg(long = "gcc-format")]
+    gcc_format: bool,
 }
 
 fn main() {
@@ -51,10 +59,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // プリプロセッサ設定
-    let config = PPConfig {
-        include_paths: cli.include,
-        predefined: parse_defines(&cli.define),
-        debug_pp: cli.debug_pp,
+    let config = if cli.auto {
+        // --auto: Perl Config.pm から設定を取得
+        if !cli.include.is_empty() {
+            return Err("--auto cannot be used with -I options".into());
+        }
+        let perl_cfg = get_perl_config()?;
+        // 追加の -D オプションがあればマージ
+        let mut defines = perl_cfg.defines;
+        defines.extend(parse_defines(&cli.define));
+        PPConfig {
+            include_paths: perl_cfg.include_paths,
+            predefined: defines,
+            debug_pp: cli.debug_pp,
+        }
+    } else {
+        // 従来通り CLI 引数から
+        PPConfig {
+            include_paths: cli.include,
+            predefined: parse_defines(&cli.define),
+            debug_pp: cli.debug_pp,
+        }
     };
 
     // プリプロセッサを初期化してファイルを処理
@@ -65,7 +90,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.preprocess_only {
         // -E: プリプロセス結果のみ出力
-        output_preprocessed(&mut pp, cli.output.as_ref())?;
+        output_preprocessed(&mut pp, cli.output.as_ref(), cli.gcc_format)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -105,6 +130,7 @@ fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
 fn output_preprocessed(
     pp: &mut Preprocessor,
     output: Option<&PathBuf>,
+    gcc_format: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut out: Box<dyn Write> = if let Some(path) = output {
         Box::new(BufWriter::new(File::create(path)?))
@@ -112,8 +138,26 @@ fn output_preprocessed(
         Box::new(io::stdout().lock())
     };
 
-    let mut last_line = 0u32;
-    let mut last_file = None;
+    if gcc_format {
+        output_gcc_format(pp, &mut out)
+    } else {
+        output_debug_format(pp, &mut out)
+    }
+}
+
+/// GCC互換形式で出力（diff比較用）
+/// 行マーカーはファイル変更時と文の開始時のみ出力（文中のマクロ展開は無視）
+fn output_gcc_format(
+    pp: &mut Preprocessor,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_file: Option<FileId> = None;
+    let mut last_output_line = 0u32;
+    let mut need_space = false;
+    let mut at_statement_start = true;
+    let mut brace_depth = 0i32;
+    let mut pending_block_end = false;
+    let mut file_stack: Vec<FileId> = Vec::new();
 
     loop {
         let token = match pp.next_token() {
@@ -125,19 +169,173 @@ fn output_preprocessed(
             break;
         }
 
-        // ファイルまたは行が変わったら # line ディレクティブを出力
-        let current_file = Some(token.loc.file_id);
-        if current_file != last_file || token.loc.line != last_line + 1 {
-            if token.loc.line != last_line || current_file != last_file {
-                let path = pp.files().get_path(token.loc.file_id);
-                writeln!(out, "\n# {} \"{}\"", token.loc.line, path.display())?;
+        let current_file = token.loc.file_id;
+        let current_line = token.loc.line;
+
+        // 文の開始時のみファイル/行の変更をチェック（ブレース更新前）
+        if at_statement_start && brace_depth == 0 {
+            if last_file != Some(current_file) {
+                // ファイル変更
+                if need_space {
+                    writeln!(out)?;
+                }
+
+                // GCCフラグを決定
+                let flag = if last_file.is_none() {
+                    "" // 最初のファイル
+                } else if file_stack.contains(&current_file) {
+                    // 以前のファイルに戻る
+                    while file_stack.last() != Some(&current_file) {
+                        file_stack.pop();
+                    }
+                    " 2"
+                } else {
+                    // 新しいファイルに入る
+                    if let Some(prev) = last_file {
+                        file_stack.push(prev);
+                    }
+                    " 1"
+                };
+
+                let path = pp.files().get_path(current_file);
+                writeln!(out, "# {} \"{}\"{}", current_line, path.display(), flag)?;
+                last_file = Some(current_file);
+                last_output_line = current_line;
+                need_space = false;
+            } else if current_line > last_output_line {
+                // 同一ファイル内で行が進んだ
+                let gap = current_line - last_output_line;
+                if gap <= 8 {
+                    // 小さいギャップは空行で埋める
+                    if need_space {
+                        writeln!(out)?;
+                    }
+                    for _ in 1..gap {
+                        writeln!(out)?;
+                    }
+                    need_space = false;
+                } else {
+                    // 大きいギャップはディレクティブを使う
+                    if need_space {
+                        writeln!(out)?;
+                    }
+                    let path = pp.files().get_path(current_file);
+                    writeln!(out, "# {} \"{}\"", current_line, path.display())?;
+                    need_space = false;
+                }
+                last_output_line = current_line;
             }
+            at_statement_start = false;
         }
-        last_line = token.loc.line;
-        last_file = current_file;
+
+        // 前のトークンがブロック終了で、次がセミコロンでない場合は改行
+        // （関数定義の終わり）
+        if pending_block_end && !matches!(token.kind, TokenKind::Semi) {
+            writeln!(out)?;
+            last_output_line += 1;
+            need_space = false;
+            at_statement_start = true;
+        }
+        pending_block_end = false;
+
+        // ブレース深度を更新
+        let was_in_block = brace_depth > 0;
+        match token.kind {
+            TokenKind::LBrace => brace_depth += 1,
+            TokenKind::RBrace => brace_depth -= 1,
+            _ => {}
+        }
+
+        // トークン間のスペース（セミコロン、カンマ、閉じ括弧の前は不要）
+        if need_space && !matches!(token.kind, TokenKind::Semi | TokenKind::Comma | TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) {
+            write!(out, " ")?;
+        }
+
+        // 開き括弧の後はスペース不要
+        let suppress_next_space = matches!(token.kind, TokenKind::LParen | TokenKind::LBracket);
 
         // トークンを出力
-        write!(out, "{} ", token.kind.format(pp.interner()))?;
+        write!(out, "{}", token.kind.format(pp.interner()))?;
+        need_space = !suppress_next_space;
+
+        // トップレベルのセミコロンで改行
+        if brace_depth == 0 && matches!(token.kind, TokenKind::Semi) {
+            writeln!(out)?;
+            last_output_line += 1;
+            need_space = false;
+            at_statement_start = true;
+        }
+        // トップレベルに戻った閉じブレースをマーク
+        if brace_depth == 0 && was_in_block && matches!(token.kind, TokenKind::RBrace) {
+            pending_block_end = true;
+        }
+    }
+
+    if need_space {
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// デバッグ用詳細形式で出力（行追跡あり）
+fn output_debug_format(
+    pp: &mut Preprocessor,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_line = 0u32;
+    let mut last_file = None;
+    let mut need_space = false;
+
+    loop {
+        let token = match pp.next_token() {
+            Ok(t) => t,
+            Err(e) => return Err(format_error(&e, pp).into()),
+        };
+
+        if matches!(token.kind, TokenKind::Eof) {
+            break;
+        }
+
+        let current_file = Some(token.loc.file_id);
+        let current_line = token.loc.line;
+
+        // ファイルが変わった場合、または行が大きく変わった場合はディレクティブを出力
+        if current_file != last_file {
+            // ファイル変更
+            if last_file.is_some() {
+                writeln!(out)?;
+            }
+            let path = pp.files().get_path(token.loc.file_id);
+            writeln!(out, "# {} \"{}\"", current_line, path.display())?;
+            last_line = current_line;
+            last_file = current_file;
+            need_space = false;
+        } else if current_line > last_line {
+            // 行が進んだ
+            let gap = current_line - last_line;
+            if gap <= 8 {
+                // 小さいギャップは空行で埋める
+                for _ in 0..gap {
+                    writeln!(out)?;
+                }
+            } else {
+                // 大きいギャップはディレクティブを使う
+                writeln!(out)?;
+                let path = pp.files().get_path(token.loc.file_id);
+                writeln!(out, "# {} \"{}\"", current_line, path.display())?;
+            }
+            last_line = current_line;
+            need_space = false;
+        }
+
+        // トークン間のスペース
+        if need_space {
+            write!(out, " ")?;
+        }
+
+        // トークンを出力
+        write!(out, "{}", token.kind.format(pp.interner()))?;
+        need_space = true;
     }
 
     writeln!(out)?;

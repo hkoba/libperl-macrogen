@@ -222,8 +222,6 @@ pub struct Preprocessor {
     sources: Vec<InputSource>,
     /// 条件コンパイルスタック
     cond_stack: Vec<CondState>,
-    /// 現在展開中のマクロ（再帰検出用）
-    expanding: HashSet<InternedStr>,
     /// 先読みトークンバッファ
     lookahead: Vec<Token>,
     /// 収集中のコメント
@@ -232,6 +230,8 @@ pub struct Preprocessor {
     cond_active: bool,
     /// スペースをトークンとして返すかどうか（TinyCC の PARSE_FLAG_SPACES 相当）
     return_spaces: bool,
+    /// コマンドラインマクロを定義中かどうか（is_builtin フラグ用）
+    defining_builtin: bool,
 }
 
 impl Preprocessor {
@@ -244,11 +244,11 @@ impl Preprocessor {
             config,
             sources: Vec::new(),
             cond_stack: Vec::new(),
-            expanding: HashSet::new(),
             lookahead: Vec::new(),
             pending_comments: Vec::new(),
             cond_active: true,
             return_spaces: false,
+            defining_builtin: false,
         };
 
         // 事前定義マクロを登録
@@ -276,6 +276,9 @@ impl Preprocessor {
             let input = InputSource::from_file(defines_source.into_bytes(), file_id);
             self.sources.push(input);
 
+            // コマンドラインマクロは builtin としてマーク
+            self.defining_builtin = true;
+
             // ディレクティブを処理
             loop {
                 match self.next_raw_token() {
@@ -295,6 +298,8 @@ impl Preprocessor {
                     Err(_) => break,
                 }
             }
+
+            self.defining_builtin = false;
 
             // 仮想ファイルソースをポップ
             self.sources.pop();
@@ -1348,10 +1353,10 @@ impl Preprocessor {
             body,
             def_loc: loc,
             leading_comments: std::mem::take(&mut self.pending_comments),
-            is_builtin: false,
+            is_builtin: self.defining_builtin,
         };
 
-        self.macros.define(def);
+        self.macros.define(def, &self.interner);
         Ok(())
     }
 
@@ -2072,7 +2077,8 @@ impl Preprocessor {
 
     /// マクロ展開を試みる
     fn try_expand_macro(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
-        if self.expanding.contains(&id) {
+        // トークン自体が展開禁止リストにこのマクロを持っている場合は展開しない
+        if token.no_expand.contains(&id) {
             return Ok(None);
         }
 
@@ -2081,12 +2087,16 @@ impl Preprocessor {
             None => return Ok(None),
         };
 
+        // 展開元トークンの no_expand を継承し、現在のマクロを追加
+        let mut inherited_no_expand = token.no_expand.clone();
+        inherited_no_expand.insert(id);
+
         match &def.kind {
             MacroKind::Object => {
-                self.expanding.insert(id);
                 let expanded = self.expand_tokens(&def.body, &HashMap::new())?;
-                self.expanding.remove(&id);
-                Ok(Some(expanded))
+                // 全トークンに no_expand を適用
+                let marked = self.mark_no_expand(expanded, &inherited_no_expand);
+                Ok(Some(marked))
             }
             MacroKind::Function { params, is_variadic } => {
                 let next = self.next_raw_token()?;
@@ -2146,12 +2156,21 @@ impl Preprocessor {
                     }
                 }
 
-                self.expanding.insert(id);
                 let expanded = self.expand_tokens(&def.body, &arg_map)?;
-                self.expanding.remove(&id);
-                Ok(Some(expanded))
+                // 全トークンに no_expand を適用
+                let marked = self.mark_no_expand(expanded, &inherited_no_expand);
+                Ok(Some(marked))
             }
         }
+    }
+
+    /// トークン列に no_expand セットを適用
+    fn mark_no_expand(&self, tokens: Vec<Token>, no_expand: &HashSet<InternedStr>) -> Vec<Token> {
+        tokens.into_iter().map(|mut t| {
+            // 既存の no_expand と新しい no_expand をマージ
+            t.no_expand.extend(no_expand.iter().cloned());
+            t
+        }).collect()
     }
 
     /// マクロ引数を収集
