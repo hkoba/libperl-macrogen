@@ -10,8 +10,8 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    get_perl_config, CompileError, FileId, PPConfig, Parser, Preprocessor, SexpPrinter,
-    SourceLocation, TokenKind, TypedSexpPrinter,
+    get_perl_config, CompileError, FieldsDict, FileId, PPConfig, Parser,
+    Preprocessor, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -57,6 +57,14 @@ struct Cli {
     /// 型注釈付きS-expression出力
     #[arg(long = "typed-sexp")]
     typed_sexp: bool,
+
+    /// 構造体フィールド辞書をダンプ
+    #[arg(long = "dump-fields-dict")]
+    dump_fields_dict: bool,
+
+    /// フィールド辞書収集対象ディレクトリ（複数指定可）
+    #[arg(long = "fields-dir")]
+    fields_dir: Vec<PathBuf>,
 }
 
 fn main() {
@@ -108,6 +116,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.typed_sexp {
         // --typed-sexp: 型注釈付きS-expression出力
         run_typed_sexp(&mut pp, cli.output.as_ref())?;
+    } else if cli.dump_fields_dict {
+        // --dump-fields-dict: 構造体フィールド辞書をダンプ
+        run_dump_fields_dict(&mut pp, &cli.fields_dir)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -152,7 +163,7 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
     let mut last_error: Option<(CompileError, SourceLocation)> = None;
 
     // parse_each でパースし、即座に出力
-    parser.parse_each(|result, loc, interner| {
+    parser.parse_each(|result, loc, _path, interner| {
         match result {
             Ok(decl) => {
                 let mut printer = SexpPrinter::new(&mut handle, interner);
@@ -195,6 +206,49 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
     }
 
     eprintln!("\nSuccessfully parsed {} declarations", count);
+    Ok(())
+}
+
+/// 構造体フィールド辞書をダンプ
+fn run_dump_fields_dict(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+    // フィールド辞書を作成
+    let mut fields_dict = FieldsDict::new();
+
+    // 収集対象ディレクトリを設定
+    for dir in fields_dirs {
+        fields_dict.add_target_dir(&dir.to_string_lossy());
+    }
+
+    // デフォルトで /usr/lib64/perl5/CORE を対象に
+    if fields_dirs.is_empty() {
+        fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
+    }
+
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    // パースしながらフィールド情報を収集
+    parser.parse_each(|result, _loc, path, _interner| {
+        if let Ok(ref decl) = result {
+            fields_dict.collect_from_external_decl(decl, path);
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+
+    // 統計情報を表示
+    let stats = fields_dict.stats();
+    eprintln!("=== Fields Dictionary Stats ===");
+    eprintln!("Total fields: {}", stats.total_fields);
+    eprintln!("Unique fields (can infer struct): {}", stats.unique_fields);
+    eprintln!("Ambiguous fields: {}", stats.ambiguous_fields);
+    eprintln!();
+
+    // 一意なフィールドをダンプ
+    let interner = parser.interner();
+    println!("{}", fields_dict.dump_unique(interner));
+
     Ok(())
 }
 

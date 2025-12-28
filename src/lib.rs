@@ -5,6 +5,7 @@
 
 pub mod ast;
 pub mod error;
+pub mod fields_dict;
 pub mod intern;
 pub mod lexer;
 pub mod macro_def;
@@ -20,6 +21,7 @@ pub mod token;
 // 主要な型を再エクスポート
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
+pub use fields_dict::FieldsDict;
 pub use intern::{InternedStr, StringInterner};
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};

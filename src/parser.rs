@@ -57,18 +57,19 @@ impl<'a> Parser<'a> {
     /// コールバックが `ControlFlow::Break(())` を返すと処理を中断する。
     ///
     /// # Arguments
-    /// * `callback` - 各宣言のパース結果、開始位置、およびインターナーを受け取るクロージャ。
+    /// * `callback` - 各宣言のパース結果、開始位置、パス、およびインターナーを受け取るクロージャ。
     ///   `ControlFlow::Continue(())` を返すと次の宣言を処理、
     ///   `ControlFlow::Break(())` を返すと処理を中断。
     pub fn parse_each<F>(&mut self, mut callback: F)
     where
-        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &StringInterner) -> std::ops::ControlFlow<()>,
+        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &std::path::Path, &StringInterner) -> std::ops::ControlFlow<()>,
     {
         while !self.is_eof() {
             let loc = self.current.loc.clone();
             let result = self.parse_external_decl();
+            let path = self.pp.files().get_path(loc.file_id);
             let interner = self.pp.interner();
-            if callback(result, &loc, interner).is_break() {
+            if callback(result, &loc, path, interner).is_break() {
                 break;
             }
         }

@@ -32,7 +32,7 @@ impl SourceLocation {
 }
 
 /// ファイルレジストリ
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileRegistry {
     paths: Vec<PathBuf>,
     path_to_id: HashMap<PathBuf, FileId>,
