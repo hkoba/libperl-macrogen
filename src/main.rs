@@ -422,109 +422,7 @@ fn run_gen_rust_fns(
     // 5. RustCodeGen を作成
     let codegen = RustCodeGen::new(interner, &fields_dict);
 
-    // 6. 結果を収集（成功と失敗を分けて）
-    #[derive(Clone)]
-    enum GenResult {
-        Success(String, String), // (name, rust_code)
-        Failure(String, String), // (name, reason)
-    }
-
-    let mut results: Vec<GenResult> = Vec::new();
-
-    // 6a. マクロから関数を生成
-    // 引数のある関数マクロのみを対象とする
-    use tinycc_macro_bindgen::MacroKind;
-
-    let macros = pp.macros();
-    for (name, info) in analyzer.iter() {
-        // 対象ディレクトリ内かチェック
-        if !info.is_target {
-            continue;
-        }
-
-        let name_str = interner.get(*name).to_string();
-
-        // マクロ定義を取得
-        let def = match macros.get(*name) {
-            Some(d) => d,
-            None => {
-                results.push(GenResult::Failure(name_str.clone(), "macro definition not found".to_string()));
-                continue;
-            }
-        };
-
-        // オブジェクトマクロ（引数なし）はスキップ
-        if matches!(def.kind, MacroKind::Object) {
-            continue;
-        }
-
-        // Expressionマクロのみ処理
-        if info.category != MacroCategory::Expression {
-            results.push(GenResult::Failure(
-                name_str.clone(),
-                format!("not an expression macro (category: {:?})", info.category),
-            ));
-            continue;
-        }
-
-        // マクロ本体をパース（展開済みトークンも取得）
-        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
-        let expr = match parse_result {
-            Ok(e) => e,
-            Err(e) => {
-                let expanded_str = expanded.iter()
-                    .map(|t| t.kind.format(interner))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                results.push(GenResult::Failure(
-                    name_str.clone(),
-                    format!("parse error: {} | expanded: {}", e, expanded_str),
-                ));
-                continue;
-            }
-        };
-
-        // bindingsから戻り値型を取得（あれば優先）
-        let mut info_with_bindings = info.clone();
-        if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
-            if let Some(ref ret_ty) = rust_fn.ret_ty {
-                info_with_bindings.return_type = Some(ret_ty.clone());
-            }
-        }
-
-        // Rust関数を生成
-        let rust_code = codegen.macro_to_rust_fn(def, &info_with_bindings, &expr);
-        results.push(GenResult::Success(name_str, rust_code));
-    }
-
-    // 6b. inline関数からRust関数を生成
-    for (name, decl, _path) in &inline_functions {
-        if let ExternalDecl::FunctionDef(func_def) = decl {
-            match codegen.inline_fn_to_rust(func_def) {
-                Ok(rust_code) => {
-                    results.push(GenResult::Success(name.clone(), rust_code));
-                }
-                Err(e) => {
-                    results.push(GenResult::Failure(name.clone(), e));
-                }
-            }
-        }
-    }
-
-    // 7. 結果を名前順にソート
-    results.sort_by(|a, b| {
-        let name_a = match a {
-            GenResult::Success(n, _) => n,
-            GenResult::Failure(n, _) => n,
-        };
-        let name_b = match b {
-            GenResult::Success(n, _) => n,
-            GenResult::Failure(n, _) => n,
-        };
-        name_a.cmp(name_b)
-    });
-
-    // 8. 出力
+    // 6. 出力先を準備
     let mut out: Box<dyn Write> = if let Some(path) = output {
         Box::new(BufWriter::new(File::create(path)?))
     } else {
@@ -541,22 +439,117 @@ fn run_gen_rust_fns(
     writeln!(out, "use std::ffi::{{c_char, c_int, c_uint, c_long, c_ulong, c_void}};")?;
     writeln!(out)?;
 
-    // 統計
-    let success_count = results.iter().filter(|r| matches!(r, GenResult::Success(_, _))).count();
-    let failure_count = results.iter().filter(|r| matches!(r, GenResult::Failure(_, _))).count();
-    eprintln!("Generated {} functions, {} failures", success_count, failure_count);
+    // 統計用カウンタ
+    let mut macro_success = 0usize;
+    let mut macro_failure = 0usize;
+    let mut inline_success = 0usize;
+    let mut inline_failure = 0usize;
 
-    // 関数を出力
-    for result in &results {
-        match result {
-            GenResult::Success(_name, rust_code) => {
-                writeln!(out, "{}", rust_code)?;
+    // ==================== マクロ関数の出力 ====================
+    writeln!(out, "// ==================== Macro Functions ====================")?;
+    writeln!(out)?;
+
+    // マクロ名を収集してソート
+    use tinycc_macro_bindgen::MacroKind;
+    let macros = pp.macros();
+
+    let mut macro_names: Vec<_> = analyzer.iter()
+        .filter(|(_, info)| info.is_target)
+        .map(|(name, _)| *name)
+        .collect();
+    macro_names.sort_by_key(|name| interner.get(*name));
+
+    // マクロを順次出力
+    for name in macro_names {
+        let info = match analyzer.get_info(name) {
+            Some(i) => i,
+            None => continue,
+        };
+
+        let name_str = interner.get(name).to_string();
+
+        // マクロ定義を取得
+        let def = match macros.get(name) {
+            Some(d) => d,
+            None => {
+                writeln!(out, "// FAILED: {} - macro definition not found", name_str)?;
+                macro_failure += 1;
+                continue;
             }
-            GenResult::Failure(name, reason) => {
-                writeln!(out, "// FAILED: {} - {}", name, reason)?;
+        };
+
+        // オブジェクトマクロ（引数なし）はスキップ
+        if matches!(def.kind, MacroKind::Object) {
+            continue;
+        }
+
+        // Expressionマクロのみ処理
+        if info.category != MacroCategory::Expression {
+            writeln!(out, "// FAILED: {} - not an expression macro (category: {:?})", name_str, info.category)?;
+            macro_failure += 1;
+            continue;
+        }
+
+        // マクロ本体をパース（展開済みトークンも取得）
+        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
+        let expr = match parse_result {
+            Ok(e) => e,
+            Err(e) => {
+                let expanded_str = expanded.iter()
+                    .map(|t| t.kind.format(interner))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                writeln!(out, "// FAILED: {} - parse error: {} | expanded: {}", name_str, e, expanded_str)?;
+                macro_failure += 1;
+                continue;
+            }
+        };
+
+        // bindingsから戻り値型を取得（あれば優先）
+        let mut info_with_bindings = info.clone();
+        if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
+            if let Some(ref ret_ty) = rust_fn.ret_ty {
+                info_with_bindings.return_type = Some(ret_ty.clone());
+            }
+        }
+
+        // Rust関数を生成して出力
+        let rust_code = codegen.macro_to_rust_fn(def, &info_with_bindings, &expr);
+        writeln!(out, "{}", rust_code)?;
+        macro_success += 1;
+    }
+
+    // ==================== inline関数の出力 ====================
+    writeln!(out)?;
+    writeln!(out, "// ==================== Inline Functions ====================")?;
+    writeln!(out)?;
+
+    // inline関数を名前順にソート
+    let mut inline_functions = inline_functions;
+    inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // inline関数を順次出力
+    for (name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            match codegen.inline_fn_to_rust(func_def) {
+                Ok(rust_code) => {
+                    writeln!(out, "{}", rust_code)?;
+                    inline_success += 1;
+                }
+                Err(e) => {
+                    writeln!(out, "// FAILED: {} - {}", name, e)?;
+                    inline_failure += 1;
+                }
             }
         }
     }
+
+    // 統計を出力
+    eprintln!("Macro functions: {} success, {} failures", macro_success, macro_failure);
+    eprintln!("Inline functions: {} success, {} failures", inline_success, inline_failure);
+    eprintln!("Total: {} success, {} failures",
+        macro_success + inline_success,
+        macro_failure + inline_failure);
 
     out.flush()?;
     Ok(())
