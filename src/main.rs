@@ -313,7 +313,8 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
 
     // マクロ解析
     let interner = pp.interner();
-    let mut analyzer = MacroAnalyzer::new(interner, &fields_dict);
+    let files = pp.files();
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
     analyzer.analyze(pp.macros());
 
     // 統計情報を出力

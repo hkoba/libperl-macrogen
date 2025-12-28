@@ -4,14 +4,18 @@
 //! - Def-Use chain の構築
 //! - マクロ展開結果の分類（式/文/その他）
 //! - 戻り値型の推論
+//! - マクロ本体のパースとAST生成
 
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::Expr;
+use crate::error::Result;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroTable};
+use crate::parser::parse_expression_from_tokens;
+use crate::source::{FileRegistry, SourceLocation};
 use crate::token::{Token, TokenKind};
-use crate::source::SourceLocation;
 
 /// マクロ展開結果の分類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +53,8 @@ pub struct MacroInfo {
 pub struct MacroAnalyzer<'a> {
     /// 文字列インターナー
     interner: &'a StringInterner,
+    /// ファイルレジストリ
+    files: &'a FileRegistry,
     /// マクロ情報（マクロ名 -> 解析結果）
     info: HashMap<InternedStr, MacroInfo>,
     /// フィールド辞書（型推論用）
@@ -59,9 +65,14 @@ pub struct MacroAnalyzer<'a> {
 
 impl<'a> MacroAnalyzer<'a> {
     /// 新しい解析器を作成
-    pub fn new(interner: &'a StringInterner, fields_dict: &'a FieldsDict) -> Self {
+    pub fn new(
+        interner: &'a StringInterner,
+        files: &'a FileRegistry,
+        fields_dict: &'a FieldsDict,
+    ) -> Self {
         Self {
             interner,
+            files,
             info: HashMap::new(),
             fields_dict,
             target_dirs: vec!["/usr/lib64/perl5/CORE".to_string()],
@@ -551,6 +562,37 @@ impl<'a> MacroAnalyzer<'a> {
         self.info.iter().filter(|(_, info)| {
             info.category == MacroCategory::Expression && info.is_target
         })
+    }
+
+    /// マクロ本体をパースしてASTを取得
+    ///
+    /// 式マクロの本体をC言語の式としてパースし、AST（抽象構文木）を返す。
+    /// オブジェクトマクロは再帰的に展開され、関数マクロは識別子として残る。
+    ///
+    /// # Arguments
+    /// * `def` - パース対象のマクロ定義
+    /// * `macros` - マクロテーブル（再帰展開用）
+    ///
+    /// # Returns
+    /// パースが成功した場合は `Ok(Expr)`、失敗した場合は `Err`
+    pub fn parse_macro_body(&self, def: &MacroDef, macros: &MacroTable) -> Result<Expr> {
+        // 1. マクロ本体を再帰的に展開（オブジェクトマクロのみ）
+        let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+
+        // 2. トークン列をパース
+        // 注: インターナーとファイルレジストリはクローンが必要
+        // （パーサーが可変参照を要求するため）
+        let interner = self.interner.clone();
+        let files = self.files.clone();
+
+        parse_expression_from_tokens(expanded, interner, files)
+    }
+
+    /// 展開済みマクロ本体を取得
+    ///
+    /// デバッグや中間結果の確認用。
+    pub fn get_expanded_body(&self, def: &MacroDef, macros: &MacroTable) -> Vec<Token> {
+        self.expand_macro_body(def, macros, &mut HashSet::new())
     }
 
     /// 統計情報をダンプ

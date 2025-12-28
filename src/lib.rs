@@ -14,11 +14,13 @@ pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
 pub mod preprocessor;
+pub mod rust_codegen;
 pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
 pub mod source;
 pub mod token;
+pub mod token_source;
 
 // 主要な型を再エクスポート
 pub use ast::*;
@@ -26,16 +28,18 @@ pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Re
 pub use fields_dict::FieldsDict;
 pub use intern::{InternedStr, StringInterner};
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
+pub use rust_codegen::RustCodeGen;
 pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
-pub use parser::Parser;
+pub use parser::{parse_expression_from_tokens, Parser};
 pub use perl_config::{get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{PPConfig, Preprocessor};
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
+pub use token_source::{TokenSlice, TokenSource};
 
 #[cfg(test)]
 mod tests {

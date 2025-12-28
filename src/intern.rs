@@ -12,7 +12,7 @@ impl InternedStr {
 }
 
 /// 文字列インターナー
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct StringInterner {
     strings: Vec<String>,
     map: HashMap<String, InternedStr>,

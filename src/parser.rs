@@ -9,46 +9,24 @@ use crate::error::{CompileError, ParseError, Result};
 use crate::intern::{InternedStr, StringInterner};
 use crate::preprocessor::Preprocessor;
 use crate::token::{Token, TokenKind};
+use crate::token_source::TokenSource;
 
 /// パーサー
-pub struct Parser<'a> {
-    pp: &'a mut Preprocessor,
+///
+/// 汎用のトークンソースからC言語をパースする。
+/// `S` は `TokenSource` トレイトを実装する任意の型。
+pub struct Parser<'a, S: TokenSource> {
+    source: &'a mut S,
     current: Token,
     /// typedef名のセット
     typedefs: HashSet<InternedStr>,
 }
 
-impl<'a> Parser<'a> {
-    /// 新しいパーサーを作成
+/// Preprocessor 専用の後方互換コンストラクタ
+impl<'a> Parser<'a, Preprocessor> {
+    /// 新しいパーサーを作成（Preprocessor専用）
     pub fn new(pp: &'a mut Preprocessor) -> Result<Self> {
-        let current = pp.next_token()?;
-
-        // GCC builtin types を事前登録
-        let mut typedefs = HashSet::new();
-        typedefs.insert(pp.interner_mut().intern("__builtin_va_list"));
-
-        Ok(Self {
-            pp,
-            current,
-            typedefs,
-        })
-    }
-
-    /// StringInterner への参照を取得
-    pub fn interner(&self) -> &crate::intern::StringInterner {
-        self.pp.interner()
-    }
-
-    /// 翻訳単位をパース
-    pub fn parse(&mut self) -> Result<TranslationUnit> {
-        let mut decls = Vec::new();
-
-        while !self.is_eof() {
-            let decl = self.parse_external_decl()?;
-            decls.push(decl);
-        }
-
-        Ok(TranslationUnit { decls })
+        Self::from_source(pp)
     }
 
     /// ストリーミング形式でパース
@@ -67,12 +45,54 @@ impl<'a> Parser<'a> {
         while !self.is_eof() {
             let loc = self.current.loc.clone();
             let result = self.parse_external_decl();
-            let path = self.pp.files().get_path(loc.file_id);
-            let interner = self.pp.interner();
+            let path = self.source.files().get_path(loc.file_id);
+            let interner = self.source.interner();
             if callback(result, &loc, path, interner).is_break() {
                 break;
             }
         }
+    }
+}
+
+/// 汎用のトークンソースに対するパーサー実装
+impl<'a, S: TokenSource> Parser<'a, S> {
+    /// トークンソースからパーサーを作成
+    pub fn from_source(source: &'a mut S) -> Result<Self> {
+        let current = source.next_token()?;
+
+        // GCC builtin types を事前登録
+        let mut typedefs = HashSet::new();
+        typedefs.insert(source.interner_mut().intern("__builtin_va_list"));
+
+        Ok(Self {
+            source,
+            current,
+            typedefs,
+        })
+    }
+
+    /// StringInterner への参照を取得
+    pub fn interner(&self) -> &crate::intern::StringInterner {
+        self.source.interner()
+    }
+
+    /// 翻訳単位をパース
+    pub fn parse(&mut self) -> Result<TranslationUnit> {
+        let mut decls = Vec::new();
+
+        while !self.is_eof() {
+            let decl = self.parse_external_decl()?;
+            decls.push(decl);
+        }
+
+        Ok(TranslationUnit { decls })
+    }
+
+    /// 式のみをパース
+    ///
+    /// マクロ本体など、式だけをパースしたい場合に使用
+    pub fn parse_expr_only(&mut self) -> Result<Expr> {
+        self.parse_expr()
     }
 
     /// 外部宣言をパース
@@ -1743,7 +1763,7 @@ impl<'a> Parser<'a> {
     // ==================== ユーティリティ ====================
 
     fn advance(&mut self) -> Result<Token> {
-        let old = std::mem::replace(&mut self.current, self.pp.next_token()?);
+        let old = std::mem::replace(&mut self.current, self.source.next_token()?);
         Ok(old)
     }
 
@@ -1937,6 +1957,29 @@ impl<'a> Parser<'a> {
         self.advance()?; // 最後の )
         Ok(())
     }
+}
+
+// ==================== ヘルパー関数 ====================
+
+use crate::source::FileRegistry;
+use crate::token_source::TokenSlice;
+
+/// トークン列から式をパース
+///
+/// マクロ本体などのトークン列を式としてパースする際に使用。
+///
+/// # Arguments
+/// * `tokens` - パースするトークン列
+/// * `interner` - 文字列インターナー
+/// * `files` - ファイルレジストリ
+pub fn parse_expression_from_tokens(
+    tokens: Vec<Token>,
+    interner: StringInterner,
+    files: FileRegistry,
+) -> Result<Expr> {
+    let mut source = TokenSlice::new(tokens, interner, files);
+    let mut parser = Parser::from_source(&mut source)?;
+    parser.parse_expr_only()
 }
 
 #[cfg(test)]

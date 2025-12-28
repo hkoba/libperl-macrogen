@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{CompileError, PPError};
+use crate::token_source::TokenSource;
 use crate::intern::{InternedStr, StringInterner};
 use crate::lexer::Lexer;
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
@@ -2592,6 +2593,27 @@ impl Preprocessor {
             tokens.push(token);
         }
         Ok(tokens)
+    }
+}
+
+/// TokenSource trait の実装
+///
+/// Parser がプリプロセッサをトークンソースとして使用できるようにする
+impl TokenSource for Preprocessor {
+    fn next_token(&mut self) -> crate::error::Result<Token> {
+        Preprocessor::next_token(self)
+    }
+
+    fn interner(&self) -> &StringInterner {
+        &self.interner
+    }
+
+    fn interner_mut(&mut self) -> &mut StringInterner {
+        &mut self.interner
+    }
+
+    fn files(&self) -> &FileRegistry {
+        &self.files
     }
 }
 
