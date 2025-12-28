@@ -9,7 +9,7 @@ use crate::error::{CompileError, ParseError, Result};
 use crate::intern::{InternedStr, StringInterner};
 use crate::preprocessor::Preprocessor;
 use crate::token::{Token, TokenKind};
-use crate::token_source::TokenSource;
+use crate::token_source::{TokenSliceRef, TokenSource};
 
 /// パーサー
 ///
@@ -1997,6 +1997,28 @@ pub fn parse_expression_from_tokens(
 ) -> Result<Expr> {
     let mut source = TokenSlice::new(tokens, interner, files);
     let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs)?;
+    parser.parse_expr_only()
+}
+
+/// トークン列から式をパース（参照ベース版）
+///
+/// `parse_expression_from_tokens` の参照ベース版。
+/// interner, files, typedefs をクローンせずに借用することで、
+/// 高頻度の呼び出し時のオーバーヘッドを削減する。
+///
+/// # Arguments
+/// * `tokens` - パースするトークン列
+/// * `interner` - 文字列インターナーへの参照
+/// * `files` - ファイルレジストリへの参照
+/// * `typedefs` - typedef名のセットへの参照
+pub fn parse_expression_from_tokens_ref(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<Expr> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
     parser.parse_expr_only()
 }
 

@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
-use crate::parser::parse_expression_from_tokens;
+use crate::parser::parse_expression_from_tokens_ref;
 use crate::source::{FileRegistry, SourceLocation};
 use crate::token::{Token, TokenKind};
 
@@ -680,14 +680,13 @@ impl<'a> MacroAnalyzer<'a> {
         // 1. マクロ本体を再帰的に展開（オブジェクトマクロのみ）
         let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
 
-        // 2. トークン列をパース
-        // 注: インターナーとファイルレジストリはクローンが必要
-        // （パーサーが可変参照を要求するため）
-        let interner = self.interner.clone();
-        let files = self.files.clone();
-        let typedefs = self.typedefs.clone();
-
-        let result = parse_expression_from_tokens(expanded.clone(), interner, files, typedefs);
+        // 2. トークン列をパース（参照ベースでクローンを回避）
+        let result = parse_expression_from_tokens_ref(
+            expanded.clone(),
+            &self.interner,
+            &self.files,
+            &self.typedefs,
+        );
         (expanded, result)
     }
 

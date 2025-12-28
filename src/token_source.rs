@@ -92,6 +92,86 @@ impl TokenSource for TokenSlice {
     }
 }
 
+/// 参照ベースのトークンスライス（クローンなし）
+///
+/// マクロ本体のパース時など、既存の interner/files を借用して使う場合に使用。
+/// これにより高コストなクローン操作を回避できる。
+pub struct TokenSliceRef<'a> {
+    tokens: Vec<Token>,
+    pos: usize,
+    interner: &'a StringInterner,
+    files: &'a FileRegistry,
+    eof_loc: SourceLocation,
+}
+
+impl<'a> TokenSliceRef<'a> {
+    /// 新しい TokenSliceRef を作成
+    pub fn new(
+        tokens: Vec<Token>,
+        interner: &'a StringInterner,
+        files: &'a FileRegistry,
+    ) -> Self {
+        let eof_loc = tokens.last()
+            .map(|t| t.loc.clone())
+            .unwrap_or_default();
+
+        Self {
+            tokens,
+            pos: 0,
+            interner,
+            files,
+            eof_loc,
+        }
+    }
+
+    /// 次のトークンを取得
+    pub fn next_token(&mut self) -> Result<Token> {
+        if self.pos < self.tokens.len() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Ok(token)
+        } else {
+            Ok(Token::new(TokenKind::Eof, self.eof_loc.clone()))
+        }
+    }
+
+    /// StringInterner への参照を取得
+    pub fn interner(&self) -> &StringInterner {
+        self.interner
+    }
+
+    /// FileRegistry への参照を取得
+    pub fn files(&self) -> &FileRegistry {
+        self.files
+    }
+}
+
+impl<'a> TokenSource for TokenSliceRef<'a> {
+    fn next_token(&mut self) -> Result<Token> {
+        if self.pos < self.tokens.len() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            Ok(token)
+        } else {
+            Ok(Token::new(TokenKind::Eof, self.eof_loc.clone()))
+        }
+    }
+
+    fn interner(&self) -> &StringInterner {
+        self.interner
+    }
+
+    fn interner_mut(&mut self) -> &mut StringInterner {
+        // TokenSliceRef は読み取り専用なので interner_mut() は呼ばれない
+        // from_source_with_typedefs() 経由で使用すること
+        panic!("interner_mut() called on TokenSliceRef - use from_source_with_typedefs()")
+    }
+
+    fn files(&self) -> &FileRegistry {
+        self.files
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

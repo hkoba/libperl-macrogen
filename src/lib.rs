@@ -32,14 +32,14 @@ pub use rust_codegen::RustCodeGen;
 pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
-pub use parser::{parse_expression_from_tokens, Parser};
+pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, Parser};
 pub use perl_config::{get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{PPConfig, Preprocessor};
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
-pub use token_source::{TokenSlice, TokenSource};
+pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 
 #[cfg(test)]
 mod tests {
