@@ -71,9 +71,25 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         })
     }
 
+    /// トークンソースからパーサーを作成（既存のtypedef情報を引き継ぐ）
+    pub fn from_source_with_typedefs(source: &'a mut S, typedefs: HashSet<InternedStr>) -> Result<Self> {
+        let current = source.next_token()?;
+
+        Ok(Self {
+            source,
+            current,
+            typedefs,
+        })
+    }
+
     /// StringInterner への参照を取得
     pub fn interner(&self) -> &crate::intern::StringInterner {
         self.source.interner()
+    }
+
+    /// typedef名のセットを取得
+    pub fn typedefs(&self) -> &HashSet<InternedStr> {
+        &self.typedefs
     }
 
     /// 翻訳単位をパース
@@ -1972,13 +1988,15 @@ use crate::token_source::TokenSlice;
 /// * `tokens` - パースするトークン列
 /// * `interner` - 文字列インターナー
 /// * `files` - ファイルレジストリ
+/// * `typedefs` - typedef名のセット（キャスト式の型名判定に使用）
 pub fn parse_expression_from_tokens(
     tokens: Vec<Token>,
     interner: StringInterner,
     files: FileRegistry,
+    typedefs: HashSet<InternedStr>,
 ) -> Result<Expr> {
     let mut source = TokenSlice::new(tokens, interner, files);
-    let mut parser = Parser::from_source(&mut source)?;
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs)?;
     parser.parse_expr_only()
 }
 

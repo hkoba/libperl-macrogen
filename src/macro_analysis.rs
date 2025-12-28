@@ -61,6 +61,8 @@ pub struct MacroAnalyzer<'a> {
     fields_dict: &'a FieldsDict,
     /// 対象ディレクトリ
     target_dirs: Vec<String>,
+    /// typedef名のセット（パース時のキャスト式判定用）
+    typedefs: HashSet<InternedStr>,
 }
 
 impl<'a> MacroAnalyzer<'a> {
@@ -76,7 +78,13 @@ impl<'a> MacroAnalyzer<'a> {
             info: HashMap::new(),
             fields_dict,
             target_dirs: vec!["/usr/lib64/perl5/CORE".to_string()],
+            typedefs: HashSet::new(),
         }
+    }
+
+    /// typedef名のセットを設定
+    pub fn set_typedefs(&mut self, typedefs: HashSet<InternedStr>) {
+        self.typedefs = typedefs;
     }
 
     /// 対象ディレクトリを設定
@@ -677,8 +685,9 @@ impl<'a> MacroAnalyzer<'a> {
         // （パーサーが可変参照を要求するため）
         let interner = self.interner.clone();
         let files = self.files.clone();
+        let typedefs = self.typedefs.clone();
 
-        let result = parse_expression_from_tokens(expanded.clone(), interner, files);
+        let result = parse_expression_from_tokens(expanded.clone(), interner, files, typedefs);
         (expanded, result)
     }
 

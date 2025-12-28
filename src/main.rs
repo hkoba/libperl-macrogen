@@ -317,6 +317,9 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
         std::ops::ControlFlow::Continue(())
     });
 
+    // パース中に収集したtypedef名を取得（マクロパース時のキャスト式判定用）
+    let typedefs = parser.typedefs().clone();
+
     // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
     // set_unique_field_type を使って既存の登録を上書き
     {
@@ -335,6 +338,7 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
     let interner = pp.interner();
     let files = pp.files();
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
     // 統計情報を出力
@@ -393,6 +397,9 @@ fn run_gen_rust_fns(
         std::ops::ControlFlow::Continue(())
     });
 
+    // パース中に収集したtypedef名を取得（マクロパース時のキャスト式判定用）
+    let typedefs = parser.typedefs().clone();
+
     // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
     {
         let interner = pp.interner_mut();
@@ -409,6 +416,7 @@ fn run_gen_rust_fns(
     let interner = pp.interner();
     let files = pp.files();
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
     // 5. RustCodeGen を作成
@@ -583,6 +591,9 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
         std::ops::ControlFlow::Continue(())
     });
 
+    // パース中に収集したtypedef名を取得（マクロパース時のキャスト式判定用）
+    let typedefs = parser.typedefs().clone();
+
     eprintln!("Found {} inline functions", inline_count);
 
     // sv_any, sv_refcnt, sv_flags を登録
@@ -601,6 +612,7 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
     let interner = pp.interner();
     let files = pp.files();
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
     // RustCodeGen
