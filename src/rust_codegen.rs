@@ -2,7 +2,10 @@
 //!
 //! C言語のマクロ関数をRust関数に変換する。
 
-use crate::ast::{AssignOp, BinOp, Expr, TypeName, TypeSpec};
+use crate::ast::{
+    AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl,
+    Expr, ForInit, FunctionDef, ParamDecl, Stmt, TypeName, TypeSpec,
+};
 use crate::fields_dict::FieldsDict;
 use crate::intern::StringInterner;
 use crate::macro_analysis::MacroInfo;
@@ -322,6 +325,291 @@ impl<'a> RustCodeGen<'a> {
             String::new()
         }
     }
+
+    // ==================== Inline Function Conversion ====================
+
+    /// インライン関数をRust関数に変換
+    pub fn inline_fn_to_rust(&self, func: &FunctionDef) -> Result<String, String> {
+        // 関数名を取得
+        let name = func.declarator.name
+            .map(|id| self.interner.get(id).to_string())
+            .ok_or_else(|| "anonymous function".to_string())?;
+
+        // パラメータリストを取得
+        let params = self.extract_fn_params(&func.declarator.derived)?;
+
+        // 戻り値型を取得
+        let ret_ty = self.extract_return_type(&func.specs, &func.declarator.derived);
+
+        // 関数本体を変換
+        let body = self.compound_stmt_to_rust(&func.body, 1);
+
+        Ok(format!(
+            "#[inline]\npub unsafe fn {}({}) -> {} {{\n{}}}\n",
+            name, params, ret_ty, body
+        ))
+    }
+
+    /// 関数パラメータを抽出してフォーマット
+    fn extract_fn_params(&self, derived: &[DerivedDecl]) -> Result<String, String> {
+        for d in derived {
+            if let DerivedDecl::Function(param_list) = d {
+                let params: Vec<String> = param_list.params.iter()
+                    .filter_map(|p| self.param_decl_to_rust(p))
+                    .collect();
+                return Ok(params.join(", "));
+            }
+        }
+        Ok(String::new())
+    }
+
+    /// パラメータ宣言をRust形式に変換
+    fn param_decl_to_rust(&self, param: &ParamDecl) -> Option<String> {
+        let name = param.declarator.as_ref()
+            .and_then(|d| d.name)
+            .map(|id| self.interner.get(id).to_string())
+            .unwrap_or_else(|| "_".to_string());
+
+        let ty = self.decl_to_rust_type(&param.specs, param.declarator.as_ref());
+        Some(format!("{}: {}", name, ty))
+    }
+
+    /// 宣言からRust型を生成
+    fn decl_to_rust_type(&self, specs: &DeclSpecs, declarator: Option<&crate::ast::Declarator>) -> String {
+        let mut ptr_prefix = String::new();
+
+        // ポインタを処理
+        if let Some(decl) = declarator {
+            for derived in &decl.derived {
+                if let DerivedDecl::Pointer(quals) = derived {
+                    if quals.is_const {
+                        ptr_prefix.push_str("*const ");
+                    } else {
+                        ptr_prefix.push_str("*mut ");
+                    }
+                }
+            }
+        }
+
+        let base_ty = self.type_spec_to_rust(specs);
+        format!("{}{}", ptr_prefix, base_ty)
+    }
+
+    /// 戻り値型を抽出
+    fn extract_return_type(&self, specs: &DeclSpecs, derived: &[DerivedDecl]) -> String {
+        // void の場合
+        if specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Void)) {
+            // ポインタがあるか確認
+            let has_pointer = derived.iter().any(|d| {
+                if let DerivedDecl::Pointer(_) = d { true } else { false }
+            });
+            if !has_pointer {
+                return "()".to_string();
+            }
+        }
+
+        self.type_spec_to_rust(specs)
+    }
+
+    /// 複合文をRustに変換
+    fn compound_stmt_to_rust(&self, stmt: &CompoundStmt, indent: usize) -> String {
+        let mut result = String::new();
+
+        for item in &stmt.items {
+            match item {
+                BlockItem::Decl(decl) => {
+                    result.push_str(&self.decl_to_rust(decl, indent));
+                }
+                BlockItem::Stmt(s) => {
+                    result.push_str(&self.stmt_to_rust(s, indent));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// 宣言をRustに変換
+    fn decl_to_rust(&self, decl: &Declaration, indent: usize) -> String {
+        let indent_str = "    ".repeat(indent);
+        let mut result = String::new();
+
+        for init_decl in &decl.declarators {
+            let name = init_decl.declarator.name
+                .map(|id| self.interner.get(id).to_string())
+                .unwrap_or_else(|| "_".to_string());
+
+            let ty = self.decl_to_rust_type(&decl.specs, Some(&init_decl.declarator));
+
+            if let Some(ref init) = init_decl.init {
+                match init {
+                    crate::ast::Initializer::Expr(expr) => {
+                        let expr_str = self.expr_to_rust(expr);
+                        result.push_str(&format!("{}let mut {}: {} = {};\n", indent_str, name, ty, expr_str));
+                    }
+                    crate::ast::Initializer::List(_) => {
+                        result.push_str(&format!("{}let mut {}: {} = /* initializer list */;\n", indent_str, name, ty));
+                    }
+                }
+            } else {
+                result.push_str(&format!("{}let mut {}: {};\n", indent_str, name, ty));
+            }
+        }
+
+        result
+    }
+
+    /// 文をRustに変換
+    fn stmt_to_rust(&self, stmt: &Stmt, indent: usize) -> String {
+        let indent_str = "    ".repeat(indent);
+
+        match stmt {
+            Stmt::Compound(compound) => {
+                let inner = self.compound_stmt_to_rust(compound, indent + 1);
+                format!("{}{{\n{}{}}}\n", indent_str, inner, indent_str)
+            }
+
+            Stmt::Expr(Some(expr), _) => {
+                let expr_str = self.expr_to_rust(expr);
+                format!("{}{};\n", indent_str, expr_str)
+            }
+
+            Stmt::Expr(None, _) => {
+                // 空文
+                String::new()
+            }
+
+            Stmt::If { cond, then_stmt, else_stmt, .. } => {
+                let cond_str = self.expr_to_rust(cond);
+                let then_str = self.stmt_to_rust_block(then_stmt, indent);
+
+                if let Some(else_s) = else_stmt {
+                    let else_str = self.stmt_to_rust_block(else_s, indent);
+                    format!("{}if {} != 0 {} else {}\n", indent_str, cond_str, then_str, else_str)
+                } else {
+                    format!("{}if {} != 0 {}\n", indent_str, cond_str, then_str)
+                }
+            }
+
+            Stmt::While { cond, body, .. } => {
+                let cond_str = self.expr_to_rust(cond);
+                let body_str = self.stmt_to_rust_block(body, indent);
+                format!("{}while {} != 0 {}\n", indent_str, cond_str, body_str)
+            }
+
+            Stmt::DoWhile { body, cond, .. } => {
+                let cond_str = self.expr_to_rust(cond);
+                let body_str = self.stmt_to_rust_block(body, indent);
+                format!("{}loop {}\n{}if !({} != 0) {{ break; }}\n", indent_str, body_str, indent_str, cond_str)
+            }
+
+            Stmt::For { init, cond, step, body, .. } => {
+                let mut result = String::new();
+
+                // init
+                if let Some(init) = init {
+                    match init {
+                        ForInit::Expr(expr) => {
+                            result.push_str(&format!("{}{};\n", indent_str, self.expr_to_rust(expr)));
+                        }
+                        ForInit::Decl(decl) => {
+                            result.push_str(&self.decl_to_rust(decl, indent));
+                        }
+                    }
+                }
+
+                // while loop
+                let cond_str = cond.as_ref()
+                    .map(|c| format!("{} != 0", self.expr_to_rust(c)))
+                    .unwrap_or_else(|| "true".to_string());
+
+                result.push_str(&format!("{}while {} {{\n", indent_str, cond_str));
+
+                // body
+                if let Stmt::Compound(compound) = body.as_ref() {
+                    result.push_str(&self.compound_stmt_to_rust(compound, indent + 1));
+                } else {
+                    result.push_str(&self.stmt_to_rust(body, indent + 1));
+                }
+
+                // step
+                if let Some(step) = step {
+                    result.push_str(&format!("{}    {};\n", indent_str, self.expr_to_rust(step)));
+                }
+
+                result.push_str(&format!("{}}}\n", indent_str));
+                result
+            }
+
+            Stmt::Return(Some(expr), _) => {
+                let expr_str = self.expr_to_rust(expr);
+                format!("{}return {};\n", indent_str, expr_str)
+            }
+
+            Stmt::Return(None, _) => {
+                format!("{}return;\n", indent_str)
+            }
+
+            Stmt::Break(_) => {
+                format!("{}break;\n", indent_str)
+            }
+
+            Stmt::Continue(_) => {
+                format!("{}continue;\n", indent_str)
+            }
+
+            Stmt::Goto(label, _) => {
+                let label_str = self.interner.get(*label);
+                format!("{}/* goto {} */\n", indent_str, label_str)
+            }
+
+            Stmt::Label { name, stmt, .. } => {
+                let name_str = self.interner.get(*name);
+                let stmt_str = self.stmt_to_rust(stmt, indent);
+                format!("{}/* label: {} */\n{}", indent_str, name_str, stmt_str)
+            }
+
+            Stmt::Switch { expr, body, .. } => {
+                let expr_str = self.expr_to_rust(expr);
+                let body_str = self.stmt_to_rust(body, indent);
+                format!("{}match {} {{\n{}{}    _ => {{}}\n{}}}\n",
+                    indent_str, expr_str, body_str, indent_str, indent_str)
+            }
+
+            Stmt::Case { expr, stmt, .. } => {
+                let expr_str = self.expr_to_rust(expr);
+                let stmt_str = self.stmt_to_rust(stmt, indent + 1);
+                format!("{}    {} => {{\n{}{}}}\n", indent_str, expr_str, stmt_str, indent_str)
+            }
+
+            Stmt::Default { stmt, .. } => {
+                let stmt_str = self.stmt_to_rust(stmt, indent + 1);
+                format!("{}    _ => {{\n{}{}}}\n", indent_str, stmt_str, indent_str)
+            }
+
+            Stmt::Asm { .. } => {
+                format!("{}/* asm */\n", indent_str)
+            }
+        }
+    }
+
+    /// 文をブロック形式に変換（if/while等のbody用）
+    fn stmt_to_rust_block(&self, stmt: &Stmt, indent: usize) -> String {
+        match stmt {
+            Stmt::Compound(compound) => {
+                let inner = self.compound_stmt_to_rust(compound, indent + 1);
+                let indent_str = "    ".repeat(indent);
+                format!("{{\n{}{}}}", inner, indent_str)
+            }
+            _ => {
+                let inner = self.stmt_to_rust(stmt, indent + 1);
+                let indent_str = "    ".repeat(indent);
+                format!("{{\n{}{}}}", inner, indent_str)
+            }
+        }
+    }
+
+    // ==================== Helper Functions ====================
 
     /// 文字をエスケープ
     fn escape_char(&self, c: char) -> String {

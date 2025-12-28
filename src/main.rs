@@ -497,12 +497,18 @@ fn run_gen_rust_fns(
         results.push(GenResult::Success(name_str, rust_code));
     }
 
-    // 6b. inline関数からRust関数を生成（今は未実装でFailureとして記録）
-    for (name, _decl, _path) in &inline_functions {
-        results.push(GenResult::Failure(
-            name.clone(),
-            "inline function conversion not yet implemented".to_string(),
-        ));
+    // 6b. inline関数からRust関数を生成
+    for (name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            match codegen.inline_fn_to_rust(func_def) {
+                Ok(rust_code) => {
+                    results.push(GenResult::Success(name.clone(), rust_code));
+                }
+                Err(e) => {
+                    results.push(GenResult::Failure(name.clone(), e));
+                }
+            }
+        }
     }
 
     // 7. 結果を名前順にソート
