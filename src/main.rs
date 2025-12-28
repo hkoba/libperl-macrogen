@@ -138,14 +138,26 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
         Err(e) => return Err(format_error(&e, pp).into()),
     };
 
-    // parse_each でパースし、結果を収集
-    let mut decls = Vec::new();
+    // ストリーミング出力用
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let mut count = 0usize;
     let mut last_error: Option<(CompileError, SourceLocation)> = None;
 
-    parser.parse_each(|result, loc| {
+    // parse_each でパースし、即座に出力
+    parser.parse_each(|result, loc, interner| {
         match result {
             Ok(decl) => {
-                decls.push(decl);
+                let mut printer = SexpPrinter::new(&mut handle, interner);
+                if let Err(e) = printer.print_external_decl(&decl) {
+                    eprintln!("Output error: {}", e);
+                    return ControlFlow::Break(());
+                }
+                if let Err(e) = printer.writeln() {
+                    eprintln!("Output error: {}", e);
+                    return ControlFlow::Break(());
+                }
+                count += 1;
                 ControlFlow::Continue(())
             }
             Err(e) => {
@@ -155,16 +167,6 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
         }
     });
 
-    // 成功した宣言を出力
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let mut printer = SexpPrinter::new(&mut handle, parser.interner());
-
-    for decl in &decls {
-        printer.print_external_decl(decl)?;
-        printer.writeln()?;
-    }
-    drop(printer);
     drop(handle);
 
     // エラーがあった場合、詳細を表示
@@ -185,7 +187,7 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
         return Err("Parse failed".into());
     }
 
-    eprintln!("\nSuccessfully parsed {} declarations", decls.len());
+    eprintln!("\nSuccessfully parsed {} declarations", count);
     Ok(())
 }
 

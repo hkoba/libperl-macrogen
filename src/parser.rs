@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::ast::*;
 use crate::error::{CompileError, ParseError, Result};
-use crate::intern::InternedStr;
+use crate::intern::{InternedStr, StringInterner};
 use crate::preprocessor::Preprocessor;
 use crate::token::{Token, TokenKind};
 
@@ -57,17 +57,18 @@ impl<'a> Parser<'a> {
     /// コールバックが `ControlFlow::Break(())` を返すと処理を中断する。
     ///
     /// # Arguments
-    /// * `callback` - 各宣言のパース結果と開始位置を受け取るクロージャ。
+    /// * `callback` - 各宣言のパース結果、開始位置、およびインターナーを受け取るクロージャ。
     ///   `ControlFlow::Continue(())` を返すと次の宣言を処理、
     ///   `ControlFlow::Break(())` を返すと処理を中断。
     pub fn parse_each<F>(&mut self, mut callback: F)
     where
-        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation) -> std::ops::ControlFlow<()>,
+        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &StringInterner) -> std::ops::ControlFlow<()>,
     {
         while !self.is_eof() {
             let loc = self.current.loc.clone();
             let result = self.parse_external_decl();
-            if callback(result, &loc).is_break() {
+            let interner = self.pp.interner();
+            if callback(result, &loc, interner).is_break() {
                 break;
             }
         }

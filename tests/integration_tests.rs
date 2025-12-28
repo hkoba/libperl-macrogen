@@ -71,7 +71,7 @@ fn parse_streaming(source: &str) -> (Vec<ExternalDecl>, Option<String>) {
     let mut decls = Vec::new();
     let mut error = None;
 
-    parser.parse_each(|result, _loc| {
+    parser.parse_each(|result, _loc, _interner| {
         match result {
             Ok(decl) => {
                 decls.push(decl);
