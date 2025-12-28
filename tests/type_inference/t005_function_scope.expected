@@ -1,0 +1,11 @@
+
+(function-def
+  (decl-specs int)
+  (declarator add (function (param
+    (decl-specs int)
+    (declarator a)) (param
+    (decl-specs int)
+    (declarator b)))) (compound-stmt (declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator sum) (init (+ (ident a) :type int (ident b) :type int) :type int))) (return (ident sum) :type int)))

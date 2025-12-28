@@ -1,0 +1,11 @@
+
+(function-def
+  (decl-specs int)
+  (declarator square (function (param
+    (decl-specs int)
+    (declarator n)))) (compound-stmt (return (* (ident n) :type int (ident n) :type int) :type int)))
+
+(declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator x) (init (call (ident square) :type (function int (int)) (int 5) :type int) :type int)))

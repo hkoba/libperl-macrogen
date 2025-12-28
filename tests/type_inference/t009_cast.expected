@@ -1,0 +1,11 @@
+
+(declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator x) (init (int 1) :type int)))
+
+(declaration
+  (decl-specs long)
+  (init-declarator
+    (declarator y) (init (cast (type-name
+    (decl-specs long)) (ident x) :type int) :type long)))

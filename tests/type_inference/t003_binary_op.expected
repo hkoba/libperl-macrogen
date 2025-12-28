@@ -1,0 +1,5 @@
+
+(declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator x) (init (+ (int 1) :type int (int 2) :type int) :type int)))

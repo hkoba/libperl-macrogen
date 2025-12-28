@@ -1,0 +1,17 @@
+
+(declaration
+  (decl-specs (struct Point (member
+    (decl-specs int)
+    (declarator x)) (member
+    (decl-specs int)
+    (declarator y)))))
+
+(declaration
+  (decl-specs (struct Point))
+  (init-declarator
+    (declarator p)))
+
+(declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator a) (init (member (ident p) :type struct Point x) :type int)))

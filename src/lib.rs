@@ -12,6 +12,7 @@ pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
 pub mod preprocessor;
+pub mod semantic;
 pub mod sexp;
 pub mod source;
 pub mod token;
@@ -25,7 +26,8 @@ pub use macro_def::{MacroDef, MacroKind, MacroTable};
 pub use parser::Parser;
 pub use perl_config::{get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{PPConfig, Preprocessor};
-pub use sexp::SexpPrinter;
+pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
+pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 

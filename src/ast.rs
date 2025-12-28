@@ -91,7 +91,7 @@ pub enum TypeSpec {
 }
 
 /// 型修飾子
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TypeQualifiers {
     pub is_const: bool,
     pub is_volatile: bool,

@@ -1,0 +1,13 @@
+
+(declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator x) (init (int 1) :type int)))
+
+(function-def
+  (decl-specs int)
+  (declarator test (function (param
+    (decl-specs void)))) (compound-stmt (declaration
+  (decl-specs int)
+  (init-declarator
+    (declarator x) (init (int 2) :type int))) (return (ident x) :type int)))
