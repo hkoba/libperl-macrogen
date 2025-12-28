@@ -459,13 +459,18 @@ fn run_gen_rust_fns(
             continue;
         }
 
-        // マクロ本体をパース
-        let expr = match analyzer.parse_macro_body(def, macros) {
+        // マクロ本体をパース（展開済みトークンも取得）
+        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
+        let expr = match parse_result {
             Ok(e) => e,
             Err(e) => {
+                let expanded_str = expanded.iter()
+                    .map(|t| t.kind.format(interner))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 results.push(GenResult::Failure(
                     name_str.clone(),
-                    format!("parse error: {}", e),
+                    format!("parse error: {} | expanded: {}", e, expanded_str),
                 ));
                 continue;
             }
@@ -638,10 +643,17 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
             continue;
         }
 
-        let expr = match analyzer.parse_macro_body(def, macros) {
+        // マクロ本体をパース（展開済みトークンも取得）
+        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
+        let expr = match parse_result {
             Ok(e) => e,
             Err(e) => {
+                let expanded_str = expanded.iter()
+                    .map(|t| t.kind.format(interner))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("// FAILED: {} - parse error: {}", name_str, e);
+                println!("//   expanded: {}", expanded_str);
                 failure_count += 1;
                 continue;
             }

@@ -665,8 +665,10 @@ impl<'a> MacroAnalyzer<'a> {
     /// * `macros` - マクロテーブル（再帰展開用）
     ///
     /// # Returns
+    /// `(展開済みトークン列, パース結果)`
     /// パースが成功した場合は `Ok(Expr)`、失敗した場合は `Err`
-    pub fn parse_macro_body(&self, def: &MacroDef, macros: &MacroTable) -> Result<Expr> {
+    /// 展開済みトークン列は成功・失敗に関わらず常に返される
+    pub fn parse_macro_body(&self, def: &MacroDef, macros: &MacroTable) -> (Vec<Token>, Result<Expr>) {
         // 1. マクロ本体を再帰的に展開（オブジェクトマクロのみ）
         let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
 
@@ -676,14 +678,8 @@ impl<'a> MacroAnalyzer<'a> {
         let interner = self.interner.clone();
         let files = self.files.clone();
 
-        parse_expression_from_tokens(expanded, interner, files)
-    }
-
-    /// 展開済みマクロ本体を取得
-    ///
-    /// デバッグや中間結果の確認用。
-    pub fn get_expanded_body(&self, def: &MacroDef, macros: &MacroTable) -> Vec<Token> {
-        self.expand_macro_body(def, macros, &mut HashSet::new())
+        let result = parse_expression_from_tokens(expanded.clone(), interner, files);
+        (expanded, result)
     }
 
     /// 統計情報をダンプ
