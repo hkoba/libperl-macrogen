@@ -10,8 +10,9 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    get_perl_config, CompileError, FieldsDict, FileId, MacroAnalyzer, PPConfig, Parser,
-    Preprocessor, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
+    get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer,
+    MacroCategory, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
+    SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -73,6 +74,18 @@ struct Cli {
     /// マクロ関数を解析（Def-Use chain、カテゴリ分類、型推論）
     #[arg(long = "analyze-macros")]
     analyze_macros: bool,
+
+    /// マクロとinline関数からRust関数を生成
+    #[arg(long = "gen-rust-fns")]
+    gen_rust_fns: bool,
+
+    /// Rustバインディングファイル（--gen-rust-fns用）
+    #[arg(long = "bindings")]
+    bindings: Option<PathBuf>,
+
+    /// デバッグ: マクロ変換を即座に出力
+    #[arg(long = "debug-macro-gen")]
+    debug_macro_gen: bool,
 }
 
 fn main() {
@@ -138,6 +151,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.analyze_macros {
         // --analyze-macros: マクロ関数を解析
         run_analyze_macros(&mut pp, &cli.fields_dir)?;
+    } else if cli.gen_rust_fns {
+        // --gen-rust-fns: マクロとinline関数からRust関数を生成
+        let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
+        run_gen_rust_fns(&mut pp, &bindings, cli.output.as_ref())?;
+    } else if cli.debug_macro_gen {
+        // --debug-macro-gen: デバッグ用即時出力モード
+        run_debug_macro_gen(&mut pp)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -323,6 +343,317 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
     // Def-Use chain を出力
     println!("{}", analyzer.dump_def_use());
 
+    Ok(())
+}
+
+/// マクロとinline関数からRust関数を生成
+fn run_gen_rust_fns(
+    pp: &mut Preprocessor,
+    bindings_path: &PathBuf,
+    output: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Rustバインディングをパースして型情報を取得
+    let rust_decls = RustDeclDict::parse_file(bindings_path)?;
+    eprintln!("Loaded {} functions, {} structs, {} types from bindings",
+        rust_decls.fns.len(), rust_decls.structs.len(), rust_decls.types.len());
+
+    // 2. フィールド辞書を作成
+    let mut fields_dict = FieldsDict::new();
+    fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
+
+    // 3. パースしてフィールド辞書を構築 & inline関数を収集
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    let mut inline_functions: Vec<(String, ExternalDecl, String)> = Vec::new(); // (name, decl, path)
+
+    parser.parse_each(|result, _loc, path, interner| {
+        if let Ok(ref decl) = result {
+            // フィールド辞書を収集
+            fields_dict.collect_from_external_decl(decl, path);
+
+            // inline関数を収集（対象ディレクトリ内のみ）
+            let path_str = path.to_string_lossy();
+            if path_str.contains("/usr/lib64/perl5/CORE") {
+                if let ExternalDecl::FunctionDef(func_def) = decl {
+                    if func_def.specs.is_inline {
+                        if let Some(name) = func_def.declarator.name {
+                            inline_functions.push((
+                                interner.get(name).to_string(),
+                                decl.clone(),
+                                path_str.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+
+    // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
+    {
+        let interner = pp.interner_mut();
+        let sv = interner.intern("sv");
+        let sv_any = interner.intern("sv_any");
+        let sv_refcnt = interner.intern("sv_refcnt");
+        let sv_flags = interner.intern("sv_flags");
+        fields_dict.set_unique_field_type(sv_any, sv);
+        fields_dict.set_unique_field_type(sv_refcnt, sv);
+        fields_dict.set_unique_field_type(sv_flags, sv);
+    }
+
+    // 4. マクロ解析
+    let interner = pp.interner();
+    let files = pp.files();
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.analyze(pp.macros());
+
+    // 5. RustCodeGen を作成
+    let codegen = RustCodeGen::new(interner, &fields_dict);
+
+    // 6. 結果を収集（成功と失敗を分けて）
+    #[derive(Clone)]
+    enum GenResult {
+        Success(String, String), // (name, rust_code)
+        Failure(String, String), // (name, reason)
+    }
+
+    let mut results: Vec<GenResult> = Vec::new();
+
+    // 6a. マクロから関数を生成
+    // 引数のある関数マクロのみを対象とする
+    use tinycc_macro_bindgen::MacroKind;
+
+    let macros = pp.macros();
+    for (name, info) in analyzer.iter() {
+        // 対象ディレクトリ内かチェック
+        if !info.is_target {
+            continue;
+        }
+
+        let name_str = interner.get(*name).to_string();
+
+        // マクロ定義を取得
+        let def = match macros.get(*name) {
+            Some(d) => d,
+            None => {
+                results.push(GenResult::Failure(name_str.clone(), "macro definition not found".to_string()));
+                continue;
+            }
+        };
+
+        // オブジェクトマクロ（引数なし）はスキップ
+        if matches!(def.kind, MacroKind::Object) {
+            continue;
+        }
+
+        // Expressionマクロのみ処理
+        if info.category != MacroCategory::Expression {
+            results.push(GenResult::Failure(
+                name_str.clone(),
+                format!("not an expression macro (category: {:?})", info.category),
+            ));
+            continue;
+        }
+
+        // マクロ本体をパース
+        let expr = match analyzer.parse_macro_body(def, macros) {
+            Ok(e) => e,
+            Err(e) => {
+                results.push(GenResult::Failure(
+                    name_str.clone(),
+                    format!("parse error: {}", e),
+                ));
+                continue;
+            }
+        };
+
+        // bindingsから戻り値型を取得（あれば優先）
+        let mut info_with_bindings = info.clone();
+        if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
+            if let Some(ref ret_ty) = rust_fn.ret_ty {
+                info_with_bindings.return_type = Some(ret_ty.clone());
+            }
+        }
+
+        // Rust関数を生成
+        let rust_code = codegen.macro_to_rust_fn(def, &info_with_bindings, &expr);
+        results.push(GenResult::Success(name_str, rust_code));
+    }
+
+    // 6b. inline関数からRust関数を生成（今は未実装でFailureとして記録）
+    for (name, _decl, _path) in &inline_functions {
+        results.push(GenResult::Failure(
+            name.clone(),
+            "inline function conversion not yet implemented".to_string(),
+        ));
+    }
+
+    // 7. 結果を名前順にソート
+    results.sort_by(|a, b| {
+        let name_a = match a {
+            GenResult::Success(n, _) => n,
+            GenResult::Failure(n, _) => n,
+        };
+        let name_b = match b {
+            GenResult::Success(n, _) => n,
+            GenResult::Failure(n, _) => n,
+        };
+        name_a.cmp(name_b)
+    });
+
+    // 8. 出力
+    let mut out: Box<dyn Write> = if let Some(path) = output {
+        Box::new(BufWriter::new(File::create(path)?))
+    } else {
+        Box::new(io::stdout().lock())
+    };
+
+    // ヘッダーコメント
+    writeln!(out, "// Auto-generated Rust functions from C macros and inline functions")?;
+    writeln!(out, "// Source: samples/wrapper.h with types from samples/bindings.rs")?;
+    writeln!(out)?;
+    writeln!(out, "#![allow(non_snake_case)]")?;
+    writeln!(out, "#![allow(unused)]")?;
+    writeln!(out)?;
+    writeln!(out, "use std::ffi::{{c_char, c_int, c_uint, c_long, c_ulong, c_void}};")?;
+    writeln!(out)?;
+
+    // 統計
+    let success_count = results.iter().filter(|r| matches!(r, GenResult::Success(_, _))).count();
+    let failure_count = results.iter().filter(|r| matches!(r, GenResult::Failure(_, _))).count();
+    eprintln!("Generated {} functions, {} failures", success_count, failure_count);
+
+    // 関数を出力
+    for result in &results {
+        match result {
+            GenResult::Success(_name, rust_code) => {
+                writeln!(out, "{}", rust_code)?;
+            }
+            GenResult::Failure(name, reason) => {
+                writeln!(out, "// FAILED: {} - {}", name, reason)?;
+            }
+        }
+    }
+
+    out.flush()?;
+    Ok(())
+}
+
+/// デバッグ: マクロ変換を即座に出力
+fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
+    // フィールド辞書を作成
+    let mut fields_dict = FieldsDict::new();
+    fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
+
+    // パースしてフィールド辞書を構築
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    let mut inline_count = 0usize;
+
+    parser.parse_each(|result, _loc, path, interner| {
+        if let Ok(ref decl) = result {
+            fields_dict.collect_from_external_decl(decl, path);
+
+            // inline関数を即座に出力
+            let path_str = path.to_string_lossy();
+            if path_str.contains("/usr/lib64/perl5/CORE") {
+                if let ExternalDecl::FunctionDef(func_def) = decl {
+                    if func_def.specs.is_inline {
+                        if let Some(name) = func_def.declarator.name {
+                            let name_str = interner.get(name);
+                            println!("// INLINE: {} (from {})", name_str, path_str);
+                            inline_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+
+    eprintln!("Found {} inline functions", inline_count);
+
+    // sv_any, sv_refcnt, sv_flags を登録
+    {
+        let interner = pp.interner_mut();
+        let sv = interner.intern("sv");
+        let sv_any = interner.intern("sv_any");
+        let sv_refcnt = interner.intern("sv_refcnt");
+        let sv_flags = interner.intern("sv_flags");
+        fields_dict.set_unique_field_type(sv_any, sv);
+        fields_dict.set_unique_field_type(sv_refcnt, sv);
+        fields_dict.set_unique_field_type(sv_flags, sv);
+    }
+
+    // マクロ解析
+    let interner = pp.interner();
+    let files = pp.files();
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.analyze(pp.macros());
+
+    // RustCodeGen
+    let codegen = RustCodeGen::new(interner, &fields_dict);
+
+    // マクロを即座に出力（名前順ではない）
+    // 引数のある関数マクロのみを対象とする
+    use tinycc_macro_bindgen::MacroKind;
+
+    let macros = pp.macros();
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
+    let mut skipped_object_macros = 0usize;
+
+    for (name, info) in analyzer.iter() {
+        if !info.is_target {
+            continue;
+        }
+
+        let name_str = interner.get(*name);
+
+        let def = match macros.get(*name) {
+            Some(d) => d,
+            None => {
+                println!("// FAILED: {} - macro not found", name_str);
+                failure_count += 1;
+                continue;
+            }
+        };
+
+        // オブジェクトマクロ（引数なし）はスキップ
+        if matches!(def.kind, MacroKind::Object) {
+            skipped_object_macros += 1;
+            continue;
+        }
+
+        if info.category != MacroCategory::Expression {
+            println!("// FAILED: {} - category: {:?}", name_str, info.category);
+            failure_count += 1;
+            continue;
+        }
+
+        let expr = match analyzer.parse_macro_body(def, macros) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("// FAILED: {} - parse error: {}", name_str, e);
+                failure_count += 1;
+                continue;
+            }
+        };
+
+        let rust_code = codegen.macro_to_rust_fn(def, info, &expr);
+        println!("{}", rust_code);
+        success_count += 1;
+    }
+
+    eprintln!("Macros: {} success, {} failures (skipped {} object macros)",
+        success_count, failure_count, skipped_object_macros);
     Ok(())
 }
 

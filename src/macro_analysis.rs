@@ -541,10 +541,18 @@ impl<'a> MacroAnalyzer<'a> {
     }
 
     /// 位置が対象ディレクトリ内かチェック
-    fn is_target_location(&self, _loc: &SourceLocation) -> bool {
-        // TODO: ファイルパスを取得して判定
-        // 今は全てを対象とする
-        true
+    fn is_target_location(&self, loc: &SourceLocation) -> bool {
+        let path = self.files.get_path(loc.file_id);
+        let path_str = path.to_string_lossy();
+
+        // 対象ディレクトリのいずれかに含まれるかチェック
+        for target_dir in &self.target_dirs {
+            if path_str.contains(target_dir) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// 解析結果を取得
