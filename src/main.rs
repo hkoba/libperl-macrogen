@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    get_perl_config, CompileError, FieldsDict, FileId, PPConfig, Parser,
+    get_perl_config, CompileError, FieldsDict, FileId, MacroAnalyzer, PPConfig, Parser,
     Preprocessor, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
@@ -69,6 +69,10 @@ struct Cli {
     /// Rustバインディングファイルから宣言を抽出
     #[arg(long = "parse-rust-bindings")]
     parse_rust_bindings: Option<PathBuf>,
+
+    /// マクロ関数を解析（Def-Use chain、カテゴリ分類、型推論）
+    #[arg(long = "analyze-macros")]
+    analyze_macros: bool,
 }
 
 fn main() {
@@ -131,6 +135,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
         run_dump_fields_dict(&mut pp, &cli.fields_dir)?;
+    } else if cli.analyze_macros {
+        // --analyze-macros: マクロ関数を解析
+        run_analyze_macros(&mut pp, &cli.fields_dir)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -260,6 +267,60 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Resul
     // 一意なフィールドをダンプ
     let interner = parser.interner();
     println!("{}", fields_dict.dump_unique(interner));
+
+    Ok(())
+}
+
+/// マクロ関数を解析
+fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+    // フィールド辞書を作成（パースしながら収集）
+    let mut fields_dict = FieldsDict::new();
+
+    // 収集対象ディレクトリを設定
+    for dir in fields_dirs {
+        fields_dict.add_target_dir(&dir.to_string_lossy());
+    }
+    if fields_dirs.is_empty() {
+        fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
+    }
+
+    // パースしてフィールド辞書を構築
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    parser.parse_each(|result, _loc, path, _interner| {
+        if let Ok(ref decl) = result {
+            fields_dict.collect_from_external_decl(decl, path);
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+
+    // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
+    // set_unique_field_type を使って既存の登録を上書き
+    {
+        let interner = pp.interner_mut();
+        let sv = interner.intern("sv");
+        let sv_any = interner.intern("sv_any");
+        let sv_refcnt = interner.intern("sv_refcnt");
+        let sv_flags = interner.intern("sv_flags");
+
+        fields_dict.set_unique_field_type(sv_any, sv);
+        fields_dict.set_unique_field_type(sv_refcnt, sv);
+        fields_dict.set_unique_field_type(sv_flags, sv);
+    }
+
+    // マクロ解析
+    let interner = pp.interner();
+    let mut analyzer = MacroAnalyzer::new(interner, &fields_dict);
+    analyzer.analyze(pp.macros());
+
+    // 統計情報を出力
+    eprintln!("{}", analyzer.dump_stats());
+
+    // Def-Use chain を出力
+    println!("{}", analyzer.dump_def_use());
 
     Ok(())
 }

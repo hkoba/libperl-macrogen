@@ -113,6 +113,22 @@ impl FieldsDict {
         }
     }
 
+    /// フィールド名と構造体名を手動で登録
+    pub fn add_field(&mut self, field_name: InternedStr, struct_name: InternedStr) {
+        self.field_to_structs
+            .entry(field_name)
+            .or_insert_with(HashSet::new)
+            .insert(struct_name);
+    }
+
+    /// フィールドを一意な構造体型で上書き登録
+    /// 既存の登録をすべて破棄し、指定した型のみを設定する
+    pub fn set_unique_field_type(&mut self, field_name: InternedStr, struct_name: InternedStr) {
+        let mut set = HashSet::new();
+        set.insert(struct_name);
+        self.field_to_structs.insert(field_name, set);
+    }
+
     /// フィールド名から構造体名を検索
     pub fn lookup(&self, field_name: InternedStr) -> Option<&HashSet<InternedStr>> {
         self.field_to_structs.get(&field_name)
