@@ -225,41 +225,64 @@ impl<'a> RustCodeGen<'a> {
     }
 
     /// 型指定子をRust型に変換
-    fn type_spec_to_rust(&self, specs: &crate::ast::DeclSpecs) -> &'static str {
+    fn type_spec_to_rust(&self, specs: &crate::ast::DeclSpecs) -> String {
         // unsigned があるかどうかをチェック
         let is_unsigned = specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Unsigned));
 
         // 基本型を探す
         for spec in &specs.type_specs {
             match spec {
-                TypeSpec::Void => return "c_void",
+                TypeSpec::Void => return "c_void".to_string(),
                 TypeSpec::Char => {
-                    return if is_unsigned { "c_uchar" } else { "c_char" };
+                    return if is_unsigned { "c_uchar" } else { "c_char" }.to_string();
                 }
                 TypeSpec::Short => {
-                    return if is_unsigned { "c_ushort" } else { "c_short" };
+                    return if is_unsigned { "c_ushort" } else { "c_short" }.to_string();
                 }
                 TypeSpec::Int => {
-                    return if is_unsigned { "c_uint" } else { "c_int" };
+                    return if is_unsigned { "c_uint" } else { "c_int" }.to_string();
                 }
                 TypeSpec::Long => {
-                    return if is_unsigned { "c_ulong" } else { "c_long" };
+                    return if is_unsigned { "c_ulong" } else { "c_long" }.to_string();
                 }
-                TypeSpec::Float => return "c_float",
-                TypeSpec::Double => return "c_double",
-                TypeSpec::Bool => return "bool",
+                TypeSpec::Float => return "c_float".to_string(),
+                TypeSpec::Double => return "c_double".to_string(),
+                TypeSpec::Bool => return "bool".to_string(),
                 TypeSpec::Signed | TypeSpec::Unsigned => continue,
+                // typedef名はそのまま出力
+                TypeSpec::TypedefName(id) => {
+                    return self.interner.get(*id).to_string();
+                }
+                // struct/union/enum
+                TypeSpec::Struct(s) => {
+                    if let Some(name) = s.name {
+                        return self.interner.get(name).to_string();
+                    }
+                    return "/* anonymous struct */".to_string();
+                }
+                TypeSpec::Union(s) => {
+                    if let Some(name) = s.name {
+                        return self.interner.get(name).to_string();
+                    }
+                    return "/* anonymous union */".to_string();
+                }
+                TypeSpec::Enum(e) => {
+                    if let Some(name) = e.name {
+                        return self.interner.get(name).to_string();
+                    }
+                    return "/* anonymous enum */".to_string();
+                }
                 _ => continue,
             }
         }
 
         // unsigned/signed だけの場合は int
         if is_unsigned {
-            "c_uint"
+            "c_uint".to_string()
         } else if specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Signed)) {
-            "c_int"
+            "c_int".to_string()
         } else {
-            "/* unknown type */"
+            "/* unknown type */".to_string()
         }
     }
 
