@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
     get_perl_config, CompileError, FileId, PPConfig, Parser, Preprocessor, SexpPrinter,
-    SourceLocation, TokenKind,
+    SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -53,6 +53,10 @@ struct Cli {
     /// ストリーミングモード（逐次パース、エラー時にソースコード表示）
     #[arg(long = "streaming")]
     streaming: bool,
+
+    /// 型注釈付きS-expression出力
+    #[arg(long = "typed-sexp")]
+    typed_sexp: bool,
 }
 
 fn main() {
@@ -101,6 +105,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.streaming {
         // --streaming: ストリーミングモード
         run_streaming(&mut pp)?;
+    } else if cli.typed_sexp {
+        // --typed-sexp: 型注釈付きS-expression出力
+        run_typed_sexp(&mut pp, cli.output.as_ref())?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -188,6 +195,40 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
     }
 
     eprintln!("\nSuccessfully parsed {} declarations", count);
+    Ok(())
+}
+
+/// 型注釈付きS-expression出力モードで実行
+fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    let tu = match parser.parse() {
+        Ok(tu) => tu,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    // 出力
+    if let Some(output_path) = output {
+        let file = File::create(output_path)?;
+        let mut writer = BufWriter::new(file);
+        let mut printer = TypedSexpPrinter::new(&mut writer, pp.interner());
+        for decl in &tu.decls {
+            printer.print_external_decl(decl)?;
+        }
+        writer.flush()?;
+    } else {
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
+        for decl in &tu.decls {
+            printer.print_external_decl(decl)?;
+        }
+        handle.flush()?;
+    }
+
     Ok(())
 }
 
