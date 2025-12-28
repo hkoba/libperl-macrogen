@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
     get_perl_config, CompileError, FieldsDict, FileId, PPConfig, Parser,
-    Preprocessor, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
+    Preprocessor, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -19,8 +19,8 @@ use tinycc_macro_bindgen::{
 #[command(name = "tinycc-macro-bindgen")]
 #[command(version, about = "C to Rust macro bindgen tool")]
 struct Cli {
-    /// 入力Cファイル
-    input: PathBuf,
+    /// 入力Cファイル（--parse-rust-bindings使用時は不要）
+    input: Option<PathBuf>,
 
     /// インクルードパス (-I)
     #[arg(short = 'I', long = "include")]
@@ -65,6 +65,10 @@ struct Cli {
     /// フィールド辞書収集対象ディレクトリ（複数指定可）
     #[arg(long = "fields-dir")]
     fields_dir: Vec<PathBuf>,
+
+    /// Rustバインディングファイルから宣言を抽出
+    #[arg(long = "parse-rust-bindings")]
+    parse_rust_bindings: Option<PathBuf>,
 }
 
 fn main() {
@@ -76,6 +80,14 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // --parse-rust-bindings: Rustファイルのみ処理（プリプロセッサ不要）
+    if let Some(ref rust_file) = cli.parse_rust_bindings {
+        return run_parse_rust_bindings(rust_file);
+    }
+
+    // 入力ファイルが必要
+    let input = cli.input.ok_or("Input file is required")?;
 
     // プリプロセッサ設定
     let config = if cli.auto {
@@ -103,7 +115,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // プリプロセッサを初期化してファイルを処理
     let mut pp = Preprocessor::new(config);
-    if let Err(e) = pp.process_file(&cli.input) {
+    if let Err(e) = pp.process_file(&input) {
         return Err(format_error(&e, &pp).into());
     }
 
@@ -282,6 +294,25 @@ fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(),
         }
         handle.flush()?;
     }
+
+    Ok(())
+}
+
+/// Rustバインディングファイルから宣言を抽出
+fn run_parse_rust_bindings(rust_file: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let dict = RustDeclDict::parse_file(rust_file)?;
+
+    // 統計情報を表示
+    let stats = dict.stats();
+    eprintln!("=== Rust Declarations Stats ===");
+    eprintln!("Constants: {}", stats.const_count);
+    eprintln!("Type aliases: {}", stats.type_count);
+    eprintln!("Functions: {}", stats.fn_count);
+    eprintln!("Structs: {}", stats.struct_count);
+    eprintln!();
+
+    // ダンプ
+    println!("{}", dict.dump());
 
     Ok(())
 }

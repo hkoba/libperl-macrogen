@@ -246,6 +246,8 @@ name = "tinycc-macro-bindgen"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "quote",
+ "syn",
  "tempfile",
 ]
 
