@@ -415,6 +415,10 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.print_stmt(stmt)?;
                 self.write_close()
             }
+            Stmt::Asm { .. } => {
+                self.write_open("asm")?;
+                self.write_close()
+            }
         }
     }
 

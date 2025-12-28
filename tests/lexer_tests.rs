@@ -136,16 +136,27 @@ fn test_identifiers() {
 }
 
 #[test]
-fn test_keywords_as_identifiers() {
-    // TinyCC style: keywords are returned as identifiers
-    let (tokens, interner) = tokenize(b"int void return if while for");
+fn test_keywords() {
+    // Keywords are returned as keyword tokens
+    let (tokens, _interner) = tokenize(b"int void return if while for");
     assert_eq!(tokens.len(), 6);
-    assert_eq!(get_ident(&tokens[0], &interner), Some("int"));
-    assert_eq!(get_ident(&tokens[1], &interner), Some("void"));
-    assert_eq!(get_ident(&tokens[2], &interner), Some("return"));
-    assert_eq!(get_ident(&tokens[3], &interner), Some("if"));
-    assert_eq!(get_ident(&tokens[4], &interner), Some("while"));
-    assert_eq!(get_ident(&tokens[5], &interner), Some("for"));
+    assert!(matches!(tokens[0].kind, TokenKind::KwInt));
+    assert!(matches!(tokens[1].kind, TokenKind::KwVoid));
+    assert!(matches!(tokens[2].kind, TokenKind::KwReturn));
+    assert!(matches!(tokens[3].kind, TokenKind::KwIf));
+    assert!(matches!(tokens[4].kind, TokenKind::KwWhile));
+    assert!(matches!(tokens[5].kind, TokenKind::KwFor));
+}
+
+#[test]
+fn test_gcc_extension_keywords() {
+    let (tokens, _interner) = tokenize(b"inline __inline __inline__ __attribute__ typeof");
+    assert_eq!(tokens.len(), 5);
+    assert!(matches!(tokens[0].kind, TokenKind::KwInline));
+    assert!(matches!(tokens[1].kind, TokenKind::KwInline2));
+    assert!(matches!(tokens[2].kind, TokenKind::KwInline3));
+    assert!(matches!(tokens[3].kind, TokenKind::KwAttribute2));
+    assert!(matches!(tokens[4].kind, TokenKind::KwTypeof));
 }
 
 #[test]
@@ -161,13 +172,13 @@ fn test_line_comments() {
 
 #[test]
 fn test_block_comments() {
-    let (tokens, interner) = tokenize(b"/* block comment */ int");
-    // Identifier with leading block comment
+    let (tokens, _interner) = tokenize(b"/* block comment */ int");
+    // Keyword with leading block comment
     assert!(tokens.len() >= 1);
-    let ident = &tokens[0];
-    assert_eq!(get_ident(ident, &interner), Some("int"));
-    assert_eq!(ident.leading_comments.len(), 1);
-    assert!(ident.leading_comments[0].text.contains("block comment"));
+    let kw = &tokens[0];
+    assert!(matches!(kw.kind, TokenKind::KwInt));
+    assert_eq!(kw.leading_comments.len(), 1);
+    assert!(kw.leading_comments[0].text.contains("block comment"));
 }
 
 #[test]

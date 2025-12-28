@@ -365,8 +365,16 @@ impl<'a> PPExprEvaluator<'a> {
             self.advance();
         }
 
+        // 識別子またはキーワードを受け入れる
+        // キーワードも #define で定義される可能性があるため
         let name = match self.current_kind() {
-            Some(TokenKind::Ident(id)) => *id,
+            Some(TokenKind::Ident(id)) => Some(*id),
+            Some(kind) if kind.is_keyword() => {
+                // キーワードの名前を取得して検索
+                // インターンされていなければマクロとして定義されていない
+                let kw_name = kind.format(self.interner);
+                self.interner.lookup(&kw_name)
+            }
             _ => return Err(self.error("expected identifier after 'defined'")),
         };
         self.advance();
@@ -378,7 +386,11 @@ impl<'a> PPExprEvaluator<'a> {
             self.advance();
         }
 
-        Ok(if self.macros.is_defined(name) { 1 } else { 0 })
+        // nameがNoneの場合、マクロは定義されていない
+        Ok(match name {
+            Some(n) if self.macros.is_defined(n) => 1,
+            _ => 0,
+        })
     }
 }
 

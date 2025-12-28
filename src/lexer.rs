@@ -276,7 +276,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// 識別子をスキャン（tinycc方式：キーワード変換しない）
+    /// 識別子またはキーワードをスキャン
     fn scan_identifier(&mut self) -> Result<TokenKind> {
         let start = self.pos;
         while let Some(c) = self.peek() {
@@ -289,9 +289,13 @@ impl<'a> Lexer<'a> {
 
         let text = std::str::from_utf8(&self.source[start..self.pos]).unwrap();
 
-        // すべて識別子として返す（キーワード判定は後段で行う）
-        let interned = self.interner.intern(text);
-        Ok(TokenKind::Ident(interned))
+        // キーワードなら対応するTokenKindを返す
+        if let Some(kw) = TokenKind::from_keyword(text) {
+            Ok(kw)
+        } else {
+            let interned = self.interner.intern(text);
+            Ok(TokenKind::Ident(interned))
+        }
     }
 
     /// 数値リテラルをスキャン
@@ -953,35 +957,38 @@ mod tests {
     }
 
     #[test]
-    fn test_identifiers_including_keywords() {
-        // tinycc方式: キーワードも識別子として返す
+    fn test_keywords_and_identifiers() {
+        // キーワードはTokenKind::Kw*として返し、識別子はTokenKind::Identとして返す
         let mut interner = StringInterner::new();
-
-        let ident_ids: Vec<InternedStr> = {
-            let mut lexer = Lexer::new(
-                b"int if else while for return struct foo",
-                FileId::default(),
-                &mut interner,
-            );
-
-            let mut ids = Vec::new();
-            loop {
-                let token = lexer.next_token().unwrap();
-                if matches!(token.kind, TokenKind::Eof) {
-                    break;
-                }
-                if let TokenKind::Ident(id) = token.kind {
-                    ids.push(id);
-                }
-            }
-            ids
-        };
-
-        let idents: Vec<&str> = ident_ids.iter().map(|id| interner.get(*id)).collect();
-        assert_eq!(
-            idents,
-            vec!["int", "if", "else", "while", "for", "return", "struct", "foo"]
+        let mut lexer = Lexer::new(
+            b"int if else while for return struct foo",
+            FileId::default(),
+            &mut interner,
         );
+
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token().unwrap();
+            if matches!(token.kind, TokenKind::Eof) {
+                break;
+            }
+            tokens.push(token.kind);
+        }
+
+        // キーワードはキーワードトークンとして返される
+        assert!(matches!(tokens[0], TokenKind::KwInt));
+        assert!(matches!(tokens[1], TokenKind::KwIf));
+        assert!(matches!(tokens[2], TokenKind::KwElse));
+        assert!(matches!(tokens[3], TokenKind::KwWhile));
+        assert!(matches!(tokens[4], TokenKind::KwFor));
+        assert!(matches!(tokens[5], TokenKind::KwReturn));
+        assert!(matches!(tokens[6], TokenKind::KwStruct));
+        // 識別子は識別子トークンとして返される
+        if let TokenKind::Ident(id) = tokens[7] {
+            assert_eq!(interner.get(id), "foo");
+        } else {
+            panic!("Expected Ident for 'foo'");
+        }
     }
 
     #[test]

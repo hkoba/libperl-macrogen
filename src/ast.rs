@@ -276,6 +276,10 @@ pub enum Stmt {
         stmt: Box<Stmt>,
         loc: SourceLocation,
     },
+    /// asm文
+    Asm {
+        loc: SourceLocation,
+    },
 }
 
 /// for文の初期化部

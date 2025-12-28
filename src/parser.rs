@@ -16,163 +16,11 @@ pub struct Parser<'a> {
     current: Token,
     /// typedef名のセット
     typedefs: HashSet<InternedStr>,
-    /// キーワードのインターン済みID
-    kw: Keywords,
-}
-
-/// キーワードのインターン済みID
-struct Keywords {
-    // ストレージクラス
-    kw_auto: InternedStr,
-    kw_extern: InternedStr,
-    kw_register: InternedStr,
-    kw_static: InternedStr,
-    kw_typedef: InternedStr,
-    // 型指定子
-    kw_void: InternedStr,
-    kw_char: InternedStr,
-    kw_short: InternedStr,
-    kw_int: InternedStr,
-    kw_long: InternedStr,
-    kw_float: InternedStr,
-    kw_double: InternedStr,
-    kw_signed: InternedStr,
-    kw_signed2: InternedStr,    // __signed__
-    kw_unsigned: InternedStr,
-    kw_bool: InternedStr,
-    kw_bool2: InternedStr,      // bool (C23/GCC)
-    kw_complex: InternedStr,
-    // 型修飾子
-    kw_const: InternedStr,
-    kw_volatile: InternedStr,
-    kw_restrict: InternedStr,
-    kw_restrict2: InternedStr, // __restrict
-    kw_restrict3: InternedStr, // __restrict__
-    kw_atomic: InternedStr,
-    // 構造体・共用体・列挙
-    kw_struct: InternedStr,
-    kw_union: InternedStr,
-    kw_enum: InternedStr,
-    // 制御フロー
-    kw_if: InternedStr,
-    kw_else: InternedStr,
-    kw_switch: InternedStr,
-    kw_case: InternedStr,
-    kw_default: InternedStr,
-    kw_while: InternedStr,
-    kw_do: InternedStr,
-    kw_for: InternedStr,
-    kw_goto: InternedStr,
-    kw_continue: InternedStr,
-    kw_break: InternedStr,
-    kw_return: InternedStr,
-    // その他
-    kw_inline: InternedStr,
-    kw_sizeof: InternedStr,
-    kw_alignof: InternedStr,
-    // GCC拡張
-    kw_extension: InternedStr,
-    kw_inline2: InternedStr,    // __inline
-    kw_inline3: InternedStr,    // __inline__
-    kw_attribute: InternedStr,  // __attribute__
-    kw_attribute2: InternedStr, // __attribute
-    kw_asm: InternedStr,        // asm
-    kw_asm2: InternedStr,       // __asm
-    kw_asm3: InternedStr,       // __asm__
-    kw_alignof2: InternedStr,   // __alignof
-    kw_alignof3: InternedStr,   // __alignof__
-    kw_typeof: InternedStr,     // typeof (C23)
-    kw_typeof2: InternedStr,    // __typeof
-    kw_typeof3: InternedStr,    // __typeof__
-    // GCC拡張浮動小数点型
-    kw_float16: InternedStr,
-    kw_float32: InternedStr,
-    kw_float64: InternedStr,
-    kw_float128: InternedStr,
-    kw_float32x: InternedStr,
-    kw_float64x: InternedStr,
-    // GCC拡張: 128ビット整数
-    kw_int128: InternedStr,
-    // C11/GCC: thread-local storage
-    kw_thread_local: InternedStr,   // _Thread_local
-    kw_thread: InternedStr,         // __thread (GCC)
-}
-
-impl Keywords {
-    fn new(interner: &mut crate::intern::StringInterner) -> Self {
-        Self {
-            kw_auto: interner.intern("auto"),
-            kw_extern: interner.intern("extern"),
-            kw_register: interner.intern("register"),
-            kw_static: interner.intern("static"),
-            kw_typedef: interner.intern("typedef"),
-            kw_void: interner.intern("void"),
-            kw_char: interner.intern("char"),
-            kw_short: interner.intern("short"),
-            kw_int: interner.intern("int"),
-            kw_long: interner.intern("long"),
-            kw_float: interner.intern("float"),
-            kw_double: interner.intern("double"),
-            kw_signed: interner.intern("signed"),
-            kw_signed2: interner.intern("__signed__"),
-            kw_unsigned: interner.intern("unsigned"),
-            kw_bool: interner.intern("_Bool"),
-            kw_bool2: interner.intern("bool"),
-            kw_complex: interner.intern("_Complex"),
-            kw_const: interner.intern("const"),
-            kw_volatile: interner.intern("volatile"),
-            kw_restrict: interner.intern("restrict"),
-            kw_restrict2: interner.intern("__restrict"),
-            kw_restrict3: interner.intern("__restrict__"),
-            kw_atomic: interner.intern("_Atomic"),
-            kw_struct: interner.intern("struct"),
-            kw_union: interner.intern("union"),
-            kw_enum: interner.intern("enum"),
-            kw_if: interner.intern("if"),
-            kw_else: interner.intern("else"),
-            kw_switch: interner.intern("switch"),
-            kw_case: interner.intern("case"),
-            kw_default: interner.intern("default"),
-            kw_while: interner.intern("while"),
-            kw_do: interner.intern("do"),
-            kw_for: interner.intern("for"),
-            kw_goto: interner.intern("goto"),
-            kw_continue: interner.intern("continue"),
-            kw_break: interner.intern("break"),
-            kw_return: interner.intern("return"),
-            kw_inline: interner.intern("inline"),
-            kw_sizeof: interner.intern("sizeof"),
-            kw_alignof: interner.intern("_Alignof"),
-            kw_extension: interner.intern("__extension__"),
-            kw_inline2: interner.intern("__inline"),
-            kw_inline3: interner.intern("__inline__"),
-            kw_attribute: interner.intern("__attribute__"),
-            kw_attribute2: interner.intern("__attribute"),
-            kw_asm: interner.intern("asm"),
-            kw_asm2: interner.intern("__asm"),
-            kw_asm3: interner.intern("__asm__"),
-            kw_alignof2: interner.intern("__alignof"),
-            kw_alignof3: interner.intern("__alignof__"),
-            kw_typeof: interner.intern("typeof"),
-            kw_typeof2: interner.intern("__typeof"),
-            kw_typeof3: interner.intern("__typeof__"),
-            kw_float16: interner.intern("_Float16"),
-            kw_float32: interner.intern("_Float32"),
-            kw_float64: interner.intern("_Float64"),
-            kw_float128: interner.intern("_Float128"),
-            kw_float32x: interner.intern("_Float32x"),
-            kw_float64x: interner.intern("_Float64x"),
-            kw_int128: interner.intern("__int128"),
-            kw_thread_local: interner.intern("_Thread_local"),
-            kw_thread: interner.intern("__thread"),
-        }
-    }
 }
 
 impl<'a> Parser<'a> {
     /// 新しいパーサーを作成
     pub fn new(pp: &'a mut Preprocessor) -> Result<Self> {
-        let kw = Keywords::new(pp.interner_mut());
         let current = pp.next_token()?;
 
         // GCC builtin types を事前登録
@@ -183,7 +31,6 @@ impl<'a> Parser<'a> {
             pp,
             current,
             typedefs,
-            kw,
         })
     }
 
@@ -316,123 +163,165 @@ impl<'a> Parser<'a> {
         let mut specs = DeclSpecs::default();
 
         loop {
-            if let Some(id) = self.current_ident() {
+            match &self.current.kind {
                 // GCC拡張: __extension__ は無視（TinyCC方式）
-                if id == self.kw.kw_extension {
+                TokenKind::KwExtension => {
                     self.advance()?;
                     continue;
+                }
                 // C11/GCC: _Thread_local, __thread は無視（TinyCC方式）
-                } else if id == self.kw.kw_thread_local || id == self.kw.kw_thread {
+                TokenKind::KwThreadLocal | TokenKind::KwThread => {
                     self.advance()?;
                     continue;
-                } else if id == self.kw.kw_typedef {
+                }
+                // ストレージクラス
+                TokenKind::KwTypedef => {
                     specs.storage = Some(StorageClass::Typedef);
                     self.advance()?;
-                } else if id == self.kw.kw_extern {
+                }
+                TokenKind::KwExtern => {
                     specs.storage = Some(StorageClass::Extern);
                     self.advance()?;
-                } else if id == self.kw.kw_static {
+                }
+                TokenKind::KwStatic => {
                     specs.storage = Some(StorageClass::Static);
                     self.advance()?;
-                } else if id == self.kw.kw_auto {
+                }
+                TokenKind::KwAuto => {
                     specs.storage = Some(StorageClass::Auto);
                     self.advance()?;
-                } else if id == self.kw.kw_register {
+                }
+                TokenKind::KwRegister => {
                     specs.storage = Some(StorageClass::Register);
                     self.advance()?;
-                } else if id == self.kw.kw_inline || id == self.kw.kw_inline2 || id == self.kw.kw_inline3 {
+                }
+                // inline
+                TokenKind::KwInline | TokenKind::KwInline2 | TokenKind::KwInline3 => {
                     specs.is_inline = true;
                     self.advance()?;
-                } else if id == self.kw.kw_const {
+                }
+                // 型修飾子
+                TokenKind::KwConst | TokenKind::KwConst2 | TokenKind::KwConst3 => {
                     specs.qualifiers.is_const = true;
                     self.advance()?;
-                } else if id == self.kw.kw_volatile {
+                }
+                TokenKind::KwVolatile | TokenKind::KwVolatile2 | TokenKind::KwVolatile3 => {
                     specs.qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
+                }
+                TokenKind::KwRestrict | TokenKind::KwRestrict2 | TokenKind::KwRestrict3 => {
                     specs.qualifiers.is_restrict = true;
                     self.advance()?;
-                } else if id == self.kw.kw_atomic {
+                }
+                TokenKind::KwAtomic => {
                     specs.qualifiers.is_atomic = true;
                     self.advance()?;
-                } else if id == self.kw.kw_void {
+                }
+                // 型指定子
+                TokenKind::KwVoid => {
                     specs.type_specs.push(TypeSpec::Void);
                     self.advance()?;
-                } else if id == self.kw.kw_char {
+                }
+                TokenKind::KwChar => {
                     specs.type_specs.push(TypeSpec::Char);
                     self.advance()?;
-                } else if id == self.kw.kw_short {
+                }
+                TokenKind::KwShort => {
                     specs.type_specs.push(TypeSpec::Short);
                     self.advance()?;
-                } else if id == self.kw.kw_int {
+                }
+                TokenKind::KwInt => {
                     specs.type_specs.push(TypeSpec::Int);
                     self.advance()?;
-                } else if id == self.kw.kw_long {
+                }
+                TokenKind::KwLong => {
                     specs.type_specs.push(TypeSpec::Long);
                     self.advance()?;
-                } else if id == self.kw.kw_float {
+                }
+                TokenKind::KwFloat => {
                     specs.type_specs.push(TypeSpec::Float);
                     self.advance()?;
-                } else if id == self.kw.kw_double {
+                }
+                TokenKind::KwDouble => {
                     specs.type_specs.push(TypeSpec::Double);
                     self.advance()?;
-                } else if id == self.kw.kw_signed || id == self.kw.kw_signed2 {
+                }
+                TokenKind::KwSigned | TokenKind::KwSigned2 => {
                     specs.type_specs.push(TypeSpec::Signed);
                     self.advance()?;
-                } else if id == self.kw.kw_unsigned {
+                }
+                TokenKind::KwUnsigned => {
                     specs.type_specs.push(TypeSpec::Unsigned);
                     self.advance()?;
-                } else if id == self.kw.kw_bool || id == self.kw.kw_bool2 {
+                }
+                TokenKind::KwBool | TokenKind::KwBool2 => {
                     specs.type_specs.push(TypeSpec::Bool);
                     self.advance()?;
-                } else if id == self.kw.kw_complex {
+                }
+                TokenKind::KwComplex => {
                     specs.type_specs.push(TypeSpec::Complex);
                     self.advance()?;
-                } else if id == self.kw.kw_float16 {
+                }
+                // GCC拡張浮動小数点型
+                TokenKind::KwFloat16 => {
                     specs.type_specs.push(TypeSpec::Float16);
                     self.advance()?;
-                } else if id == self.kw.kw_float32 {
+                }
+                TokenKind::KwFloat32 => {
                     specs.type_specs.push(TypeSpec::Float32);
                     self.advance()?;
-                } else if id == self.kw.kw_float64 {
+                }
+                TokenKind::KwFloat64 => {
                     specs.type_specs.push(TypeSpec::Float64);
                     self.advance()?;
-                } else if id == self.kw.kw_float128 {
+                }
+                TokenKind::KwFloat128 => {
                     specs.type_specs.push(TypeSpec::Float128);
                     self.advance()?;
-                } else if id == self.kw.kw_float32x {
+                }
+                TokenKind::KwFloat32x => {
                     specs.type_specs.push(TypeSpec::Float32x);
                     self.advance()?;
-                } else if id == self.kw.kw_float64x {
+                }
+                TokenKind::KwFloat64x => {
                     specs.type_specs.push(TypeSpec::Float64x);
                     self.advance()?;
-                } else if id == self.kw.kw_int128 {
+                }
+                // GCC拡張: 128ビット整数
+                TokenKind::KwInt128 => {
                     specs.type_specs.push(TypeSpec::Int128);
                     self.advance()?;
-                } else if id == self.kw.kw_typeof || id == self.kw.kw_typeof2 || id == self.kw.kw_typeof3 {
-                    // GCC拡張/C23: typeof(expr) または typeof(type)
+                }
+                // typeof
+                TokenKind::KwTypeof | TokenKind::KwTypeof2 | TokenKind::KwTypeof3 => {
                     self.advance()?;
                     self.expect(&TokenKind::LParen)?;
                     let expr = self.parse_expr()?;
                     self.expect(&TokenKind::RParen)?;
                     specs.type_specs.push(TypeSpec::TypeofExpr(Box::new(expr)));
-                } else if id == self.kw.kw_struct {
+                }
+                // 構造体・共用体・列挙
+                TokenKind::KwStruct => {
                     specs.type_specs.push(self.parse_struct_or_union(true)?);
-                } else if id == self.kw.kw_union {
+                }
+                TokenKind::KwUnion => {
                     specs.type_specs.push(self.parse_struct_or_union(false)?);
-                } else if id == self.kw.kw_enum {
+                }
+                TokenKind::KwEnum => {
                     specs.type_specs.push(self.parse_enum()?);
-                } else if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
-                    // GCC拡張: __attribute__((...)) をスキップ
+                }
+                // GCC拡張: __attribute__((...)) をスキップ
+                TokenKind::KwAttribute | TokenKind::KwAttribute2 => {
                     self.skip_attribute()?;
-                } else if self.typedefs.contains(&id) {
+                }
+                // typedef名
+                TokenKind::Ident(id) if self.typedefs.contains(id) => {
+                    let id = *id;
                     specs.type_specs.push(TypeSpec::TypedefName(id));
                     self.advance()?;
-                } else {
-                    break;
                 }
-            } else {
-                break;
+                // それ以外はループ終了
+                _ => break,
             }
         }
 
@@ -594,13 +483,9 @@ impl<'a> Parser<'a> {
             derived = inner.derived;
             inner.name
         } else if let Some(id) = self.current_ident() {
-            // キーワードでない識別子のみ
-            if !self.is_keyword(id) {
-                self.advance()?;
-                Some(id)
-            } else {
-                None
-            }
+            // 識別子（キーワードはTokenKind::Kw*なのでここには来ない）
+            self.advance()?;
+            Some(id)
         } else {
             None
         };
@@ -629,24 +514,24 @@ impl<'a> Parser<'a> {
 
         // static と型修飾子
         loop {
-            if let Some(id) = self.current_ident() {
-                if id == self.kw.kw_static {
+            match &self.current.kind {
+                TokenKind::KwStatic => {
                     is_static = true;
                     self.advance()?;
-                } else if id == self.kw.kw_const {
+                }
+                TokenKind::KwConst | TokenKind::KwConst2 | TokenKind::KwConst3 => {
                     qualifiers.is_const = true;
                     self.advance()?;
-                } else if id == self.kw.kw_volatile {
+                }
+                TokenKind::KwVolatile | TokenKind::KwVolatile2 | TokenKind::KwVolatile3 => {
                     qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
+                }
+                TokenKind::KwRestrict | TokenKind::KwRestrict2 | TokenKind::KwRestrict3 => {
                     qualifiers.is_restrict = true;
                     self.advance()?;
-                } else {
-                    break;
                 }
-            } else {
-                break;
+                _ => break,
             }
         }
 
@@ -726,24 +611,24 @@ impl<'a> Parser<'a> {
         let mut qualifiers = TypeQualifiers::default();
 
         loop {
-            if let Some(id) = self.current_ident() {
-                if id == self.kw.kw_const {
+            match &self.current.kind {
+                TokenKind::KwConst | TokenKind::KwConst2 | TokenKind::KwConst3 => {
                     qualifiers.is_const = true;
                     self.advance()?;
-                } else if id == self.kw.kw_volatile {
+                }
+                TokenKind::KwVolatile | TokenKind::KwVolatile2 | TokenKind::KwVolatile3 => {
                     qualifiers.is_volatile = true;
                     self.advance()?;
-                } else if id == self.kw.kw_restrict || id == self.kw.kw_restrict2 || id == self.kw.kw_restrict3 {
+                }
+                TokenKind::KwRestrict | TokenKind::KwRestrict2 | TokenKind::KwRestrict3 => {
                     qualifiers.is_restrict = true;
                     self.advance()?;
-                } else if id == self.kw.kw_atomic {
+                }
+                TokenKind::KwAtomic => {
                     qualifiers.is_atomic = true;
                     self.advance()?;
-                } else {
-                    break;
                 }
-            } else {
-                break;
+                _ => break,
             }
         }
 
@@ -879,7 +764,9 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Star) || self.check(&TokenKind::LParen) || self.check(&TokenKind::LBracket) {
                 Some(self.parse_declarator()?)
             } else if let Some(id) = self.current_ident() {
-                if !self.is_keyword(id) && !self.typedefs.contains(&id) {
+                // 識別子（キーワードはTokenKind::Kw*なのでここには来ない）
+                // typedef名でなければ宣言子
+                if !self.typedefs.contains(&id) {
                     Some(self.parse_declarator()?)
                 } else {
                     None
@@ -998,47 +885,36 @@ impl<'a> Parser<'a> {
     fn parse_stmt(&mut self) -> Result<Stmt> {
         let loc = self.current.loc.clone();
 
-        // ラベル文のチェック
-        if let Some(id) = self.current_ident() {
-            if id == self.kw.kw_case {
-                return self.parse_case_stmt();
-            } else if id == self.kw.kw_default {
-                return self.parse_default_stmt();
-            }
-
-            // 通常のラベル（identifier :）
-            // 2トークン先読みが必要だが、簡略化
-        }
-
-        if self.check(&TokenKind::LBrace) {
-            return Ok(Stmt::Compound(self.parse_compound_stmt()?));
-        }
-
-        if let Some(id) = self.current_ident() {
-            if id == self.kw.kw_if {
-                return self.parse_if_stmt();
-            } else if id == self.kw.kw_switch {
-                return self.parse_switch_stmt();
-            } else if id == self.kw.kw_while {
-                return self.parse_while_stmt();
-            } else if id == self.kw.kw_do {
-                return self.parse_do_while_stmt();
-            } else if id == self.kw.kw_for {
-                return self.parse_for_stmt();
-            } else if id == self.kw.kw_goto {
+        // キーワードに基づく文のパース
+        match &self.current.kind {
+            // ラベル文
+            TokenKind::KwCase => return self.parse_case_stmt(),
+            TokenKind::KwDefault => return self.parse_default_stmt(),
+            // 複合文
+            TokenKind::LBrace => return Ok(Stmt::Compound(self.parse_compound_stmt()?)),
+            // 制御フロー文
+            TokenKind::KwIf => return self.parse_if_stmt(),
+            TokenKind::KwSwitch => return self.parse_switch_stmt(),
+            TokenKind::KwWhile => return self.parse_while_stmt(),
+            TokenKind::KwDo => return self.parse_do_while_stmt(),
+            TokenKind::KwFor => return self.parse_for_stmt(),
+            TokenKind::KwGoto => {
                 self.advance()?;
                 let name = self.expect_ident()?;
                 self.expect(&TokenKind::Semi)?;
                 return Ok(Stmt::Goto(name, loc));
-            } else if id == self.kw.kw_continue {
+            }
+            TokenKind::KwContinue => {
                 self.advance()?;
                 self.expect(&TokenKind::Semi)?;
                 return Ok(Stmt::Continue(loc));
-            } else if id == self.kw.kw_break {
+            }
+            TokenKind::KwBreak => {
                 self.advance()?;
                 self.expect(&TokenKind::Semi)?;
                 return Ok(Stmt::Break(loc));
-            } else if id == self.kw.kw_return {
+            }
+            TokenKind::KwReturn => {
                 self.advance()?;
                 let expr = if self.check(&TokenKind::Semi) {
                     None
@@ -1048,6 +924,11 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Semi)?;
                 return Ok(Stmt::Return(expr, loc));
             }
+            // __asm__ 文
+            TokenKind::KwAsm | TokenKind::KwAsm2 | TokenKind::KwAsm3 => {
+                return self.parse_asm_stmt();
+            }
+            _ => {}
         }
 
         // 式文
@@ -1083,13 +964,9 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::RParen)?;
         let then_stmt = Box::new(self.parse_stmt()?);
 
-        let else_stmt = if let Some(id) = self.current_ident() {
-            if id == self.kw.kw_else {
-                self.advance()?;
-                Some(Box::new(self.parse_stmt()?))
-            } else {
-                None
-            }
+        let else_stmt = if matches!(self.current.kind, TokenKind::KwElse) {
+            self.advance()?;
+            Some(Box::new(self.parse_stmt()?))
         } else {
             None
         };
@@ -1128,7 +1005,17 @@ impl<'a> Parser<'a> {
         let loc = self.current.loc.clone();
         self.advance()?; // do
         let body = Box::new(self.parse_stmt()?);
-        self.expect_kw(self.kw.kw_while)?;
+        // expect 'while' keyword
+        if !matches!(self.current.kind, TokenKind::KwWhile) {
+            return Err(CompileError::Parse {
+                loc: self.current.loc.clone(),
+                kind: ParseError::UnexpectedToken {
+                    expected: "while".to_string(),
+                    found: self.current.kind.clone(),
+                },
+            });
+        }
+        self.advance()?;
         self.expect(&TokenKind::LParen)?;
         let cond = Box::new(self.parse_expr()?);
         self.expect(&TokenKind::RParen)?;
@@ -1199,6 +1086,26 @@ impl<'a> Parser<'a> {
         let stmt = Box::new(self.parse_stmt()?);
 
         Ok(Stmt::Default { stmt, loc })
+    }
+
+    fn parse_asm_stmt(&mut self) -> Result<Stmt> {
+        let loc = self.current.loc.clone();
+        self.advance()?; // asm / __asm / __asm__
+
+        // volatile / __volatile__ はスキップ
+        while matches!(
+            self.current.kind,
+            TokenKind::KwVolatile | TokenKind::KwVolatile2 | TokenKind::KwVolatile3
+        ) {
+            self.advance()?;
+        }
+
+        // 括弧内をスキップ
+        self.expect(&TokenKind::LParen)?;
+        self.skip_balanced_parens()?;
+
+        self.expect(&TokenKind::Semi)?;
+        Ok(Stmt::Asm { loc })
     }
 
     // ==================== 式のパース ====================
@@ -1663,7 +1570,7 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_cast_expr()?;
                 Ok(Expr::LogNot(Box::new(expr), loc))
             }
-            TokenKind::Ident(id) if *id == self.kw.kw_sizeof => {
+            TokenKind::KwSizeof => {
                 self.advance()?;
                 if self.check(&TokenKind::LParen) {
                     self.advance()?; // (
@@ -1683,7 +1590,7 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Sizeof(Box::new(expr), loc))
                 }
             }
-            TokenKind::Ident(id) if *id == self.kw.kw_alignof || *id == self.kw.kw_alignof2 || *id == self.kw.kw_alignof3 => {
+            TokenKind::KwAlignof | TokenKind::KwAlignof2 | TokenKind::KwAlignof3 => {
                 self.advance()?;
                 self.expect(&TokenKind::LParen)?;
                 let type_name = self.parse_type_name()?;
@@ -1691,7 +1598,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Alignof(Box::new(type_name), loc))
             }
             // GCC拡張: __extension__ は無視して続行（TinyCC方式）
-            TokenKind::Ident(id) if *id == self.kw.kw_extension => {
+            TokenKind::KwExtension => {
                 self.advance()?;
                 self.parse_unary_expr()
             }
@@ -1852,22 +1759,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_kw(&mut self, kw: InternedStr) -> Result<Token> {
-        if let Some(id) = self.current_ident() {
-            if id == kw {
-                return self.advance();
-            }
-        }
-        let kw_str = self.pp.interner().get(kw);
-        Err(CompileError::Parse {
-            loc: self.current.loc.clone(),
-            kind: ParseError::UnexpectedToken {
-                expected: kw_str.to_string(),
-                found: self.current.kind.clone(),
-            },
-        })
-    }
-
     fn expect_ident(&mut self) -> Result<InternedStr> {
         if let TokenKind::Ident(id) = self.current.kind {
             self.advance()?;
@@ -1899,122 +1790,80 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn is_keyword(&self, id: InternedStr) -> bool {
-        id == self.kw.kw_auto
-            || id == self.kw.kw_extern
-            || id == self.kw.kw_register
-            || id == self.kw.kw_static
-            || id == self.kw.kw_typedef
-            || id == self.kw.kw_void
-            || id == self.kw.kw_char
-            || id == self.kw.kw_short
-            || id == self.kw.kw_int
-            || id == self.kw.kw_long
-            || id == self.kw.kw_float
-            || id == self.kw.kw_double
-            || id == self.kw.kw_signed
-            || id == self.kw.kw_unsigned
-            || id == self.kw.kw_bool
-            || id == self.kw.kw_complex
-            || id == self.kw.kw_const
-            || id == self.kw.kw_volatile
-            || id == self.kw.kw_restrict
-            || id == self.kw.kw_restrict2
-            || id == self.kw.kw_restrict3
-            || id == self.kw.kw_atomic
-            || id == self.kw.kw_struct
-            || id == self.kw.kw_union
-            || id == self.kw.kw_enum
-            || id == self.kw.kw_if
-            || id == self.kw.kw_else
-            || id == self.kw.kw_switch
-            || id == self.kw.kw_case
-            || id == self.kw.kw_default
-            || id == self.kw.kw_while
-            || id == self.kw.kw_do
-            || id == self.kw.kw_for
-            || id == self.kw.kw_goto
-            || id == self.kw.kw_continue
-            || id == self.kw.kw_break
-            || id == self.kw.kw_return
-            || id == self.kw.kw_inline
-            || id == self.kw.kw_inline2
-            || id == self.kw.kw_inline3
-            || id == self.kw.kw_sizeof
-            || id == self.kw.kw_alignof
-            || id == self.kw.kw_alignof2
-            || id == self.kw.kw_alignof3
-    }
-
     fn is_type_start(&self) -> bool {
-        if let Some(id) = self.current_ident() {
-            id == self.kw.kw_void
-                || id == self.kw.kw_char
-                || id == self.kw.kw_short
-                || id == self.kw.kw_int
-                || id == self.kw.kw_long
-                || id == self.kw.kw_float
-                || id == self.kw.kw_double
-                || id == self.kw.kw_signed
-                || id == self.kw.kw_signed2
-                || id == self.kw.kw_unsigned
-                || id == self.kw.kw_bool
-                || id == self.kw.kw_bool2
-                || id == self.kw.kw_complex
-                || id == self.kw.kw_const
-                || id == self.kw.kw_volatile
-                || id == self.kw.kw_restrict
-                || id == self.kw.kw_restrict2
-                || id == self.kw.kw_restrict3
-                || id == self.kw.kw_atomic
-                || id == self.kw.kw_struct
-                || id == self.kw.kw_union
-                || id == self.kw.kw_enum
-                || self.typedefs.contains(&id)
-        } else {
-            false
+        match &self.current.kind {
+            // 型指定子キーワード
+            TokenKind::KwVoid
+            | TokenKind::KwChar
+            | TokenKind::KwShort
+            | TokenKind::KwInt
+            | TokenKind::KwLong
+            | TokenKind::KwFloat
+            | TokenKind::KwDouble
+            | TokenKind::KwSigned
+            | TokenKind::KwSigned2
+            | TokenKind::KwUnsigned
+            | TokenKind::KwBool
+            | TokenKind::KwBool2
+            | TokenKind::KwComplex
+            | TokenKind::KwFloat16
+            | TokenKind::KwFloat32
+            | TokenKind::KwFloat64
+            | TokenKind::KwFloat128
+            | TokenKind::KwFloat32x
+            | TokenKind::KwFloat64x
+            | TokenKind::KwInt128 => true,
+            // 型修飾子キーワード
+            TokenKind::KwConst
+            | TokenKind::KwConst2
+            | TokenKind::KwConst3
+            | TokenKind::KwVolatile
+            | TokenKind::KwVolatile2
+            | TokenKind::KwVolatile3
+            | TokenKind::KwRestrict
+            | TokenKind::KwRestrict2
+            | TokenKind::KwRestrict3
+            | TokenKind::KwAtomic => true,
+            // 構造体・共用体・列挙
+            TokenKind::KwStruct | TokenKind::KwUnion | TokenKind::KwEnum => true,
+            // typeof
+            TokenKind::KwTypeof | TokenKind::KwTypeof2 | TokenKind::KwTypeof3 => true,
+            // typedef名
+            TokenKind::Ident(id) => self.typedefs.contains(id),
+            _ => false,
         }
     }
 
-    fn is_type_start_after_lparen(&self) -> bool {
-        // sizeof の後に ( がある場合、その次のトークンが型かどうかを判定
-        // 実際には現在のトークンが ( なので、その次を見る必要があるが、
-        // ここでは現在のトークンをチェックする（advance後に呼ばれる前提）
-        // Note: 実際には sizeof ( の後、advance()前に呼ばれる
-        // つまり current は ( なので判定できない
-        // -> parse_type_name を try して失敗したら式として処理する方式に変更が必要
-        // 簡易実装: 数値リテラルなら式、それ以外は型と仮定
-        // TODO: より正確な実装
-        self.is_type_start()
-    }
-
     fn is_declaration_start(&self) -> bool {
-        if let Some(id) = self.current_ident() {
-            id == self.kw.kw_typedef
-                || id == self.kw.kw_extern
-                || id == self.kw.kw_static
-                || id == self.kw.kw_auto
-                || id == self.kw.kw_register
-                || self.is_type_start()
-        } else {
-            false
+        match &self.current.kind {
+            // ストレージクラス
+            TokenKind::KwTypedef
+            | TokenKind::KwExtern
+            | TokenKind::KwStatic
+            | TokenKind::KwAuto
+            | TokenKind::KwRegister => true,
+            // inline
+            TokenKind::KwInline | TokenKind::KwInline2 | TokenKind::KwInline3 => true,
+            // GCC拡張
+            TokenKind::KwExtension => true,
+            // thread-local
+            TokenKind::KwThreadLocal | TokenKind::KwThread => true,
+            _ => self.is_type_start(),
         }
     }
 
     /// __attribute__ / __asm__ があればスキップ（複数連続も対応）
     fn try_skip_attribute(&mut self) -> Result<()> {
         loop {
-            if let Some(id) = self.current_ident() {
-                if id == self.kw.kw_attribute || id == self.kw.kw_attribute2 {
+            match &self.current.kind {
+                TokenKind::KwAttribute | TokenKind::KwAttribute2 => {
                     self.skip_attribute()?;
-                    continue;
                 }
-                if id == self.kw.kw_asm || id == self.kw.kw_asm2 || id == self.kw.kw_asm3 {
+                TokenKind::KwAsm | TokenKind::KwAsm2 | TokenKind::KwAsm3 => {
                     self.try_skip_asm_label()?;
-                    continue;
                 }
+                _ => break,
             }
-            break;
         }
         Ok(())
     }
@@ -2048,13 +1897,14 @@ impl<'a> Parser<'a> {
 
     /// __asm__(label) があればスキップ
     fn try_skip_asm_label(&mut self) -> Result<()> {
-        if let Some(id) = self.current_ident() {
-            if id == self.kw.kw_asm || id == self.kw.kw_asm2 || id == self.kw.kw_asm3 {
-                self.advance()?; // asm / __asm / __asm__
-                if self.check(&TokenKind::LParen) {
-                    self.advance()?; // (
-                    self.skip_balanced_parens()?; // 内容をスキップして ) を消費
-                }
+        if matches!(
+            self.current.kind,
+            TokenKind::KwAsm | TokenKind::KwAsm2 | TokenKind::KwAsm3
+        ) {
+            self.advance()?; // asm / __asm / __asm__
+            if self.check(&TokenKind::LParen) {
+                self.advance()?; // (
+                self.skip_balanced_parens()?; // 内容をスキップして ) を消費
             }
         }
         Ok(())

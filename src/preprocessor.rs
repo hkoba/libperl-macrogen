@@ -667,7 +667,7 @@ impl Preprocessor {
         }
     }
 
-    /// 識別子をスキャン（tinycc方式：キーワード変換しない）
+    /// 識別子またはキーワードをスキャン
     fn scan_identifier(&mut self) -> Result<TokenKind, CompileError> {
         let source = self.sources.last_mut().unwrap();
         let mut chars = Vec::new();
@@ -682,9 +682,13 @@ impl Preprocessor {
 
         let text = std::str::from_utf8(&chars).unwrap();
 
-        // すべて識別子として返す（キーワード判定は後段で行う）
-        let interned = self.interner.intern(text);
-        Ok(TokenKind::Ident(interned))
+        // キーワードなら対応するTokenKindを返す
+        if let Some(kw) = TokenKind::from_keyword(text) {
+            Ok(kw)
+        } else {
+            let interned = self.interner.intern(text);
+            Ok(TokenKind::Ident(interned))
+        }
     }
 
     /// 数値リテラルをスキャン
@@ -1228,6 +1232,11 @@ impl Preprocessor {
                 let name = self.interner.get(*id).to_string();
                 self.process_directive_by_name(&name, loc)?;
             }
+            // プリプロセッサディレクティブはキーワードトークンとして返される可能性がある
+            // キーワード名を文字列に変換してディレクティブとして処理
+            TokenKind::KwIf => self.process_directive_by_name("if", loc)?,
+            TokenKind::KwElse => self.process_directive_by_name("else", loc)?,
+            TokenKind::KwFor => self.process_directive_by_name("for", loc)?,  // エラーになる
             TokenKind::IntLit(_) => {
                 // #line または # 123 "file" 形式
                 self.skip_to_eol()?;
@@ -2609,6 +2618,11 @@ mod tests {
         })
     }
 
+    /// キーワードがトークン列に含まれるかチェック
+    fn has_keyword(tokens: &[Token], kind: TokenKind) -> bool {
+        tokens.iter().any(|t| std::mem::discriminant(&t.kind) == std::mem::discriminant(&kind))
+    }
+
     #[test]
     fn test_simple_tokens() {
         let file = create_temp_file("int x;");
@@ -2618,8 +2632,8 @@ mod tests {
         let tokens = pp.collect_tokens().unwrap();
         // int, x, ; の3トークン
         assert_eq!(tokens.len(), 3);
-        // tinycc方式: キーワードも識別子として返される
-        assert!(has_ident(&pp, &tokens, "int"));
+        // キーワードはキーワードトークンとして返される
+        assert!(has_keyword(&tokens, TokenKind::KwInt));
         assert!(has_ident(&pp, &tokens, "x"));
     }
 
@@ -2650,7 +2664,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(has_ident(&pp, &tokens, "int"));
+        assert!(has_keyword(&tokens, TokenKind::KwInt));
     }
 
     #[test]
@@ -2660,7 +2674,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(has_ident(&pp, &tokens, "int"));
+        assert!(has_keyword(&tokens, TokenKind::KwInt));
     }
 
     #[test]
@@ -2673,7 +2687,7 @@ mod tests {
         // UNDEFINED は定義されていないので、int x は出力されない
         assert!(!has_ident(&pp, &tokens, "x"));
         // float y は出力される
-        assert!(has_ident(&pp, &tokens, "float"));
+        assert!(has_keyword(&tokens, TokenKind::KwFloat));
         assert!(has_ident(&pp, &tokens, "y"));
     }
 
@@ -2684,7 +2698,7 @@ mod tests {
         pp.process_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
-        assert!(has_ident(&pp, &tokens, "int"));
+        assert!(has_keyword(&tokens, TokenKind::KwInt));
     }
 
     #[test]
@@ -2723,7 +2737,7 @@ mod tests {
         let tokens = pp.collect_tokens().unwrap();
         // A は定義されているが B は定義されていないので、float y が出力される
         assert!(!has_ident(&pp, &tokens, "x"));
-        assert!(has_ident(&pp, &tokens, "float"));
+        assert!(has_keyword(&tokens, TokenKind::KwFloat));
         assert!(has_ident(&pp, &tokens, "y"));
     }
 }

@@ -114,6 +114,44 @@ pub enum TokenKind {
     KwFloat128,
     KwFloat32x,
     KwFloat64x,
+    // GCC拡張: 128ビット整数
+    KwInt128,
+
+    // === GCC拡張キーワード（別名） ===
+    // inline variants
+    KwInline2,      // __inline
+    KwInline3,      // __inline__
+    // signed variants
+    KwSigned2,      // __signed__
+    // const variants
+    KwConst2,       // __const
+    KwConst3,       // __const__
+    // volatile variants
+    KwVolatile2,    // __volatile
+    KwVolatile3,    // __volatile__
+    // restrict variants
+    KwRestrict2,    // __restrict
+    KwRestrict3,    // __restrict__
+    // bool variant (C23)
+    KwBool2,        // bool
+    // alignof variants
+    KwAlignof2,     // __alignof
+    KwAlignof3,     // __alignof__
+    // typeof
+    KwTypeof,       // typeof (C23)
+    KwTypeof2,      // __typeof
+    KwTypeof3,      // __typeof__
+    // attribute
+    KwAttribute,    // __attribute
+    KwAttribute2,   // __attribute__
+    // asm
+    KwAsm,          // asm
+    KwAsm2,         // __asm
+    KwAsm3,         // __asm__
+    // __extension__
+    KwExtension,
+    // __thread (GCC style thread-local)
+    KwThread,
 
     // === 演算子 ===
     // 算術
@@ -229,21 +267,25 @@ impl TokenKind {
             "while" => Some(TokenKind::KwWhile),
             // その他
             "inline" => Some(TokenKind::KwInline),
-            "__inline" => Some(TokenKind::KwInline),
-            "__inline__" => Some(TokenKind::KwInline),
+            "__inline" => Some(TokenKind::KwInline2),
+            "__inline__" => Some(TokenKind::KwInline3),
             "sizeof" => Some(TokenKind::KwSizeof),
             // C99
             "_Bool" => Some(TokenKind::KwBool),
+            "bool" => Some(TokenKind::KwBool2),
             "_Complex" => Some(TokenKind::KwComplex),
             "_Imaginary" => Some(TokenKind::KwImaginary),
             // C11
             "_Alignas" => Some(TokenKind::KwAlignas),
             "_Alignof" => Some(TokenKind::KwAlignof),
+            "__alignof" => Some(TokenKind::KwAlignof2),
+            "__alignof__" => Some(TokenKind::KwAlignof3),
             "_Atomic" => Some(TokenKind::KwAtomic),
             "_Generic" => Some(TokenKind::KwGeneric),
             "_Noreturn" => Some(TokenKind::KwNoreturn),
             "_Static_assert" => Some(TokenKind::KwStaticAssert),
             "_Thread_local" => Some(TokenKind::KwThreadLocal),
+            "__thread" => Some(TokenKind::KwThread),
             // GCC拡張浮動小数点型
             "_Float16" => Some(TokenKind::KwFloat16),
             "_Float32" => Some(TokenKind::KwFloat32),
@@ -251,8 +293,108 @@ impl TokenKind {
             "_Float128" => Some(TokenKind::KwFloat128),
             "_Float32x" => Some(TokenKind::KwFloat32x),
             "_Float64x" => Some(TokenKind::KwFloat64x),
+            // GCC拡張: 128ビット整数
+            "__int128" => Some(TokenKind::KwInt128),
+            // GCC拡張: signed
+            "__signed__" => Some(TokenKind::KwSigned2),
+            // GCC拡張: const
+            "__const" => Some(TokenKind::KwConst2),
+            "__const__" => Some(TokenKind::KwConst3),
+            // GCC拡張: volatile
+            "__volatile" => Some(TokenKind::KwVolatile2),
+            "__volatile__" => Some(TokenKind::KwVolatile3),
+            // GCC拡張: restrict
+            "__restrict" => Some(TokenKind::KwRestrict2),
+            "__restrict__" => Some(TokenKind::KwRestrict3),
+            // GCC拡張: typeof
+            "typeof" => Some(TokenKind::KwTypeof),
+            "__typeof" => Some(TokenKind::KwTypeof2),
+            "__typeof__" => Some(TokenKind::KwTypeof3),
+            // GCC拡張: attribute
+            "__attribute" => Some(TokenKind::KwAttribute),
+            "__attribute__" => Some(TokenKind::KwAttribute2),
+            // GCC拡張: asm
+            "asm" => Some(TokenKind::KwAsm),
+            "__asm" => Some(TokenKind::KwAsm2),
+            "__asm__" => Some(TokenKind::KwAsm3),
+            // GCC拡張: extension
+            "__extension__" => Some(TokenKind::KwExtension),
             _ => None,
         }
+    }
+
+    /// キーワードトークンかどうかを判定
+    pub fn is_keyword(&self) -> bool {
+        matches!(
+            self,
+            TokenKind::KwAuto
+                | TokenKind::KwBreak
+                | TokenKind::KwCase
+                | TokenKind::KwChar
+                | TokenKind::KwConst
+                | TokenKind::KwConst2
+                | TokenKind::KwConst3
+                | TokenKind::KwContinue
+                | TokenKind::KwDefault
+                | TokenKind::KwDo
+                | TokenKind::KwDouble
+                | TokenKind::KwElse
+                | TokenKind::KwEnum
+                | TokenKind::KwExtern
+                | TokenKind::KwFloat
+                | TokenKind::KwFor
+                | TokenKind::KwGoto
+                | TokenKind::KwIf
+                | TokenKind::KwInline
+                | TokenKind::KwInline2
+                | TokenKind::KwInline3
+                | TokenKind::KwInt
+                | TokenKind::KwLong
+                | TokenKind::KwRegister
+                | TokenKind::KwRestrict
+                | TokenKind::KwRestrict2
+                | TokenKind::KwRestrict3
+                | TokenKind::KwReturn
+                | TokenKind::KwShort
+                | TokenKind::KwSigned
+                | TokenKind::KwSigned2
+                | TokenKind::KwSizeof
+                | TokenKind::KwStatic
+                | TokenKind::KwStruct
+                | TokenKind::KwSwitch
+                | TokenKind::KwTypedef
+                | TokenKind::KwUnion
+                | TokenKind::KwUnsigned
+                | TokenKind::KwVoid
+                | TokenKind::KwVolatile
+                | TokenKind::KwVolatile2
+                | TokenKind::KwVolatile3
+                | TokenKind::KwWhile
+                | TokenKind::KwBool
+                | TokenKind::KwBool2
+                | TokenKind::KwComplex
+                | TokenKind::KwImaginary
+                | TokenKind::KwAlignas
+                | TokenKind::KwAlignof
+                | TokenKind::KwAlignof2
+                | TokenKind::KwAlignof3
+                | TokenKind::KwAtomic
+                | TokenKind::KwGeneric
+                | TokenKind::KwNoreturn
+                | TokenKind::KwStaticAssert
+                | TokenKind::KwThreadLocal
+                | TokenKind::KwTypeof
+                | TokenKind::KwTypeof2
+                | TokenKind::KwTypeof3
+                | TokenKind::KwAttribute
+                | TokenKind::KwAttribute2
+                | TokenKind::KwAsm
+                | TokenKind::KwAsm2
+                | TokenKind::KwAsm3
+                | TokenKind::KwExtension
+                | TokenKind::KwThread
+                | TokenKind::KwInt128
+        )
     }
 
     /// トークンを文字列に変換
@@ -318,6 +460,30 @@ impl TokenKind {
             TokenKind::KwFloat128 => "_Float128".to_string(),
             TokenKind::KwFloat32x => "_Float32x".to_string(),
             TokenKind::KwFloat64x => "_Float64x".to_string(),
+            // GCC拡張キーワード（別名）
+            TokenKind::KwInline2 => "__inline".to_string(),
+            TokenKind::KwInline3 => "__inline__".to_string(),
+            TokenKind::KwSigned2 => "__signed__".to_string(),
+            TokenKind::KwConst2 => "__const".to_string(),
+            TokenKind::KwConst3 => "__const__".to_string(),
+            TokenKind::KwVolatile2 => "__volatile".to_string(),
+            TokenKind::KwVolatile3 => "__volatile__".to_string(),
+            TokenKind::KwRestrict2 => "__restrict".to_string(),
+            TokenKind::KwRestrict3 => "__restrict__".to_string(),
+            TokenKind::KwBool2 => "bool".to_string(),
+            TokenKind::KwAlignof2 => "__alignof".to_string(),
+            TokenKind::KwAlignof3 => "__alignof__".to_string(),
+            TokenKind::KwTypeof => "typeof".to_string(),
+            TokenKind::KwTypeof2 => "__typeof".to_string(),
+            TokenKind::KwTypeof3 => "__typeof__".to_string(),
+            TokenKind::KwAttribute => "__attribute".to_string(),
+            TokenKind::KwAttribute2 => "__attribute__".to_string(),
+            TokenKind::KwAsm => "asm".to_string(),
+            TokenKind::KwAsm2 => "__asm".to_string(),
+            TokenKind::KwAsm3 => "__asm__".to_string(),
+            TokenKind::KwExtension => "__extension__".to_string(),
+            TokenKind::KwThread => "__thread".to_string(),
+            TokenKind::KwInt128 => "__int128".to_string(),
             // 演算子
             TokenKind::Plus => "+".to_string(),
             TokenKind::Minus => "-".to_string(),
@@ -476,7 +642,34 @@ mod tests {
     #[test]
     fn test_inline_variants() {
         assert_eq!(TokenKind::from_keyword("inline"), Some(TokenKind::KwInline));
-        assert_eq!(TokenKind::from_keyword("__inline"), Some(TokenKind::KwInline));
-        assert_eq!(TokenKind::from_keyword("__inline__"), Some(TokenKind::KwInline));
+        assert_eq!(TokenKind::from_keyword("__inline"), Some(TokenKind::KwInline2));
+        assert_eq!(TokenKind::from_keyword("__inline__"), Some(TokenKind::KwInline3));
+    }
+
+    #[test]
+    fn test_gcc_extension_keywords() {
+        // const variants
+        assert_eq!(TokenKind::from_keyword("const"), Some(TokenKind::KwConst));
+        assert_eq!(TokenKind::from_keyword("__const"), Some(TokenKind::KwConst2));
+        assert_eq!(TokenKind::from_keyword("__const__"), Some(TokenKind::KwConst3));
+        // volatile variants
+        assert_eq!(TokenKind::from_keyword("volatile"), Some(TokenKind::KwVolatile));
+        assert_eq!(TokenKind::from_keyword("__volatile"), Some(TokenKind::KwVolatile2));
+        assert_eq!(TokenKind::from_keyword("__volatile__"), Some(TokenKind::KwVolatile3));
+        // restrict variants
+        assert_eq!(TokenKind::from_keyword("restrict"), Some(TokenKind::KwRestrict));
+        assert_eq!(TokenKind::from_keyword("__restrict"), Some(TokenKind::KwRestrict2));
+        assert_eq!(TokenKind::from_keyword("__restrict__"), Some(TokenKind::KwRestrict3));
+        // typeof variants
+        assert_eq!(TokenKind::from_keyword("typeof"), Some(TokenKind::KwTypeof));
+        assert_eq!(TokenKind::from_keyword("__typeof"), Some(TokenKind::KwTypeof2));
+        assert_eq!(TokenKind::from_keyword("__typeof__"), Some(TokenKind::KwTypeof3));
+        // attribute variants
+        assert_eq!(TokenKind::from_keyword("__attribute"), Some(TokenKind::KwAttribute));
+        assert_eq!(TokenKind::from_keyword("__attribute__"), Some(TokenKind::KwAttribute2));
+        // asm variants
+        assert_eq!(TokenKind::from_keyword("asm"), Some(TokenKind::KwAsm));
+        assert_eq!(TokenKind::from_keyword("__asm"), Some(TokenKind::KwAsm2));
+        assert_eq!(TokenKind::from_keyword("__asm__"), Some(TokenKind::KwAsm3));
     }
 }
