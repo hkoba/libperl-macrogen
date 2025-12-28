@@ -12,7 +12,7 @@ use crate::ast::Expr;
 use crate::error::Result;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
-use crate::macro_def::{MacroDef, MacroTable};
+use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::parser::parse_expression_from_tokens;
 use crate::source::{FileRegistry, SourceLocation};
 use crate::token::{Token, TokenKind};
@@ -95,8 +95,8 @@ impl<'a> MacroAnalyzer<'a> {
         // Phase 3: マクロカテゴリを分類
         self.classify_macros(macros);
 
-        // Phase 4: 式マクロの戻り値型を推論
-        self.infer_return_types(macros);
+        // Phase 4: 式マクロの戻り値型と引数の型を推論
+        self.infer_types(macros);
     }
 
     /// Phase 1: 使用関係を収集
@@ -268,8 +268,8 @@ impl<'a> MacroAnalyzer<'a> {
         paren_depth == 0 && brace_depth == 0 && bracket_depth == 0
     }
 
-    /// Phase 4: 戻り値型を推論
-    fn infer_return_types(&mut self, macros: &MacroTable) {
+    /// Phase 4: 戻り値型と引数の型を推論
+    fn infer_types(&mut self, macros: &MacroTable) {
         // トポロジカルソートで依存関係順に処理
         let order = self.topological_sort();
 
@@ -277,14 +277,112 @@ impl<'a> MacroAnalyzer<'a> {
             if let Some(def) = macros.get(name) {
                 if let Some(info) = self.info.get(&name) {
                     if info.category == MacroCategory::Expression && info.is_target {
-                        let return_type = self.infer_return_type(def, macros);
+                        // 展開したトークン列を取得（一度だけ）
+                        let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+
+                        // 戻り値型を推論
+                        let return_type = self.infer_type_from_tokens(&expanded, def, macros);
+
+                        // 引数の型を推論
+                        let param_types = match &def.kind {
+                            MacroKind::Function { params, .. } if !params.is_empty() => {
+                                self.infer_param_types_from_tokens(&expanded, params)
+                            }
+                            _ => HashMap::new(),
+                        };
+
                         if let Some(info) = self.info.get_mut(&name) {
                             info.return_type = return_type;
+                            info.param_types = param_types;
                         }
                     }
                 }
             }
         }
+    }
+
+    /// トークン列から引数の型を推論
+    fn infer_param_types_from_tokens(
+        &self,
+        tokens: &[Token],
+        params: &[InternedStr],
+    ) -> HashMap<InternedStr, String> {
+        let mut result = HashMap::new();
+
+        // パターン: (param)->field または param->field
+        // このパターンから param の型を推論
+        for (i, token) in tokens.iter().enumerate() {
+            if matches!(token.kind, TokenKind::Arrow) {
+                // 矢印の次がフィールド名
+                if i + 1 < tokens.len() {
+                    if let TokenKind::Ident(field_name) = tokens[i + 1].kind {
+                        // フィールド辞書から構造体型を取得
+                        if let Some(struct_name) = self.fields_dict.lookup_unique(field_name) {
+                            let struct_str = self.interner.get(struct_name);
+                            let ptr_type = format!("*mut {}", struct_str);
+
+                            // 矢印の前の識別子を探す
+                            // (param)-> の場合: RParen の前の Ident
+                            // param-> の場合: 直前の Ident
+                            if i > 0 {
+                                let prev_token = &tokens[i - 1];
+                                match &prev_token.kind {
+                                    TokenKind::RParen => {
+                                        // (param)-> パターン: 対応する LParen を探す
+                                        if let Some(param_id) = self.find_param_in_parens(tokens, i - 1, params) {
+                                            result.insert(param_id, ptr_type.clone());
+                                        }
+                                    }
+                                    TokenKind::Ident(id) => {
+                                        // param-> パターン
+                                        if params.contains(id) {
+                                            result.insert(*id, ptr_type.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// 括弧内の引数識別子を探す
+    fn find_param_in_parens(
+        &self,
+        tokens: &[Token],
+        rparen_idx: usize,
+        params: &[InternedStr],
+    ) -> Option<InternedStr> {
+        // 対応する LParen を探す
+        let mut depth = 1;
+        let mut i = rparen_idx;
+        while i > 0 {
+            i -= 1;
+            match &tokens[i].kind {
+                TokenKind::RParen => depth += 1,
+                TokenKind::LParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // LParen の後の識別子をチェック
+                        if i + 1 < rparen_idx {
+                            if let TokenKind::Ident(id) = &tokens[i + 1].kind {
+                                if params.contains(id) {
+                                    return Some(*id);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// トポロジカルソート（依存しないマクロから順に）
@@ -326,21 +424,6 @@ impl<'a> MacroAnalyzer<'a> {
         in_progress.remove(&name);
         visited.insert(name);
         result.push(name);
-    }
-
-    /// 単一マクロの戻り値型を推論
-    fn infer_return_type(&self, def: &MacroDef, macros: &MacroTable) -> Option<String> {
-        let body = &def.body;
-
-        if body.is_empty() {
-            return None;
-        }
-
-        // 展開したトークン列を解析
-        let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
-
-        // 型推論を試みる
-        self.infer_type_from_tokens(&expanded, def, macros)
     }
 
     /// トークン列から型を推論
