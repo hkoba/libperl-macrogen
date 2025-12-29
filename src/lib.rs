@@ -3,6 +3,7 @@
 //! C言語のヘッダーファイルからマクロとinline static関数を抽出し、
 //! Rustコードに変換するツール。
 
+pub mod apidoc;
 pub mod ast;
 pub mod call_type_infer;
 pub mod error;
@@ -25,6 +26,7 @@ pub mod token;
 pub mod token_source;
 
 // 主要な型を再エクスポート
+pub use apidoc::{ApidocArg, ApidocDict, ApidocEntry, ApidocFlags, ApidocStats, Nullability};
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use fields_dict::FieldsDict;
