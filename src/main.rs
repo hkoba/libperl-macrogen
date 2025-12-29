@@ -357,6 +357,9 @@ fn run_gen_rust_fns(
     bindings_path: &PathBuf,
     output: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use tinycc_macro_bindgen::MacroKind;
+
     // 1. Rustバインディングをパースして型情報を取得
     let rust_decls = RustDeclDict::parse_file(bindings_path)?;
     eprintln!("Loaded {} functions, {} structs, {} types from bindings",
@@ -413,17 +416,11 @@ fn run_gen_rust_fns(
         fields_dict.set_unique_field_type(sv_flags, sv);
     }
 
-    // 4. マクロ解析
+    // 4. RustCodeGen を作成
     let interner = pp.interner();
-    let files = pp.files();
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
-    analyzer.set_typedefs(typedefs);
-    analyzer.analyze(pp.macros());
-
-    // 5. RustCodeGen を作成（inline関数の型抽出に必要）
     let codegen = RustCodeGen::new(interner, &fields_dict);
 
-    // 6. 反復型推論コンテキストを作成
+    // 5. 反復型推論コンテキストを作成
     let mut infer_ctx = InferenceContext::new(interner);
 
     // bindings.rsから確定済み関数を読み込む
@@ -431,12 +428,77 @@ fn run_gen_rust_fns(
     let initial_confirmed = infer_ctx.confirmed_count();
     eprintln!("Initial confirmed functions: {}", initial_confirmed);
 
-    // 7. マクロ関数をpendingとして追加
-    use tinycc_macro_bindgen::MacroKind;
-    let macros = pp.macros();
+    // 6. inline関数を確定済みとして追加（型が既知のため）
+    // inline関数を名前順にソート
+    let mut inline_functions = inline_functions;
+    inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // マクロとパース結果を収集
-    use std::collections::HashMap;
+    for (_name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            // inline関数からFunctionSignatureを作成
+            if let Some(sig) = extract_inline_fn_signature(func_def, interner, &codegen) {
+                infer_ctx.add_confirmed(sig);
+            }
+        }
+    }
+
+    let after_inline = infer_ctx.confirmed_count();
+    eprintln!("After inline functions: {} confirmed (+{} inline)",
+        after_inline, after_inline - initial_confirmed);
+
+    // 7. 出力先を準備
+    let mut out: Box<dyn Write> = if let Some(path) = output {
+        Box::new(BufWriter::new(File::create(path)?))
+    } else {
+        Box::new(io::stdout().lock())
+    };
+
+    // ヘッダーコメント（型推論の統計は後で追加）
+    writeln!(out, "// Auto-generated Rust functions from C macros and inline functions")?;
+    writeln!(out, "// Source: samples/wrapper.h with types from samples/bindings.rs")?;
+    writeln!(out)?;
+    writeln!(out, "#![allow(non_snake_case)]")?;
+    writeln!(out, "#![allow(unused)]")?;
+    writeln!(out)?;
+    writeln!(out, "use std::ffi::{{c_char, c_int, c_uint, c_long, c_ulong, c_void}};")?;
+    writeln!(out)?;
+
+    // 統計用カウンタ
+    let mut inline_success = 0usize;
+    let mut inline_failure = 0usize;
+
+    // ==================== inline関数の出力（マクロより先） ====================
+    writeln!(out, "// ==================== Inline Functions ====================")?;
+    writeln!(out)?;
+
+    // inline関数を順次出力
+    for (name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            match codegen.inline_fn_to_rust(func_def) {
+                Ok(rust_code) => {
+                    writeln!(out, "{}", rust_code)?;
+                    inline_success += 1;
+                }
+                Err(e) => {
+                    writeln!(out, "// FAILED: {} - {}", name, e)?;
+                    inline_failure += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!("Inline functions: {} success, {} failures", inline_success, inline_failure);
+
+    // ==================== マクロ関数の処理 ====================
+
+    // 8. マクロ解析
+    let files = pp.files();
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.set_typedefs(typedefs);
+    analyzer.analyze(pp.macros());
+
+    // 9. マクロ関数をpendingとして追加
+    let macros = pp.macros();
     let mut macro_exprs: HashMap<String, tinycc_macro_bindgen::Expr> = HashMap::new();
     let mut macro_failures: Vec<(String, String)> = Vec::new();
 
@@ -511,58 +573,25 @@ fn run_gen_rust_fns(
         }
     }
 
-    // 8. inline関数を確定済みとして追加（型が既知のため）
-    for (_name, decl, _path) in &inline_functions {
-        if let ExternalDecl::FunctionDef(func_def) = decl {
-            // inline関数からFunctionSignatureを作成
-            if let Some(sig) = extract_inline_fn_signature(func_def, interner, &codegen) {
-                infer_ctx.add_confirmed(sig);
-            }
-        }
-    }
-
-    let after_inline = infer_ctx.confirmed_count();
-    eprintln!("After inline functions: {} confirmed (+{} inline)",
-        after_inline, after_inline - initial_confirmed);
-
     eprintln!("Pending functions: {}", infer_ctx.pending_count());
 
-    // 9. 反復推論を実行
+    // 10. 反復推論を実行
     let (resolved, iterations) = infer_ctx.run_inference();
     eprintln!("Iterative inference: {} resolved in {} iterations", resolved, iterations);
     eprintln!("Final: {} confirmed, {} still pending",
         infer_ctx.confirmed_count(), infer_ctx.pending_count());
 
-    // 10. 出力先を準備
-    let mut out: Box<dyn Write> = if let Some(path) = output {
-        Box::new(BufWriter::new(File::create(path)?))
-    } else {
-        Box::new(io::stdout().lock())
-    };
-
-    // ヘッダーコメント
-    writeln!(out, "// Auto-generated Rust functions from C macros and inline functions")?;
-    writeln!(out, "// Source: samples/wrapper.h with types from samples/bindings.rs")?;
-    writeln!(out, "// Type inference: {} iterations, {} functions resolved", iterations, resolved)?;
-    writeln!(out)?;
-    writeln!(out, "#![allow(non_snake_case)]")?;
-    writeln!(out, "#![allow(unused)]")?;
-    writeln!(out)?;
-    writeln!(out, "use std::ffi::{{c_char, c_int, c_uint, c_long, c_ulong, c_void}};")?;
-    writeln!(out)?;
-
-    // 統計用カウンタ
-    let mut macro_success = 0usize;
-    let mut macro_failure = 0usize;
-    let mut inline_success = 0usize;
-    let mut inline_failure = 0usize;
-
     // 推論結果を取得
     let (confirmed_fns, _still_pending) = infer_ctx.into_results();
 
     // ==================== マクロ関数の出力 ====================
-    writeln!(out, "// ==================== Macro Functions ====================")?;
     writeln!(out)?;
+    writeln!(out, "// ==================== Macro Functions ====================")?;
+    writeln!(out, "// Type inference: {} iterations, {} functions resolved", iterations, resolved)?;
+    writeln!(out)?;
+
+    let mut macro_success = 0usize;
+    let mut macro_failure = 0usize;
 
     // マクロ名を収集してソート
     let mut macro_names: Vec<_> = analyzer.iter()
@@ -643,34 +672,8 @@ fn run_gen_rust_fns(
         macro_failure += 1;
     }
 
-    // ==================== inline関数の出力 ====================
-    writeln!(out)?;
-    writeln!(out, "// ==================== Inline Functions ====================")?;
-    writeln!(out)?;
-
-    // inline関数を名前順にソート
-    let mut inline_functions = inline_functions;
-    inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // inline関数を順次出力
-    for (name, decl, _path) in &inline_functions {
-        if let ExternalDecl::FunctionDef(func_def) = decl {
-            match codegen.inline_fn_to_rust(func_def) {
-                Ok(rust_code) => {
-                    writeln!(out, "{}", rust_code)?;
-                    inline_success += 1;
-                }
-                Err(e) => {
-                    writeln!(out, "// FAILED: {} - {}", name, e)?;
-                    inline_failure += 1;
-                }
-            }
-        }
-    }
-
     // 統計を出力
     eprintln!("Macro functions: {} success, {} failures", macro_success, macro_failure);
-    eprintln!("Inline functions: {} success, {} failures", inline_success, inline_failure);
     eprintln!("Total: {} success, {} failures",
         macro_success + inline_success,
         macro_failure + inline_failure);
