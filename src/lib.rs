@@ -4,6 +4,7 @@
 //! Rustコードに変換するツール。
 
 pub mod ast;
+pub mod call_type_infer;
 pub mod error;
 pub mod fields_dict;
 pub mod intern;

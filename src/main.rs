@@ -10,9 +10,9 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer,
-    MacroCategory, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
-    SourceLocation, TokenKind, TypedSexpPrinter,
+    call_type_infer, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId,
+    MacroAnalyzer, MacroCategory, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict,
+    SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -510,6 +510,22 @@ fn run_gen_rust_fns(
         if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
             if let Some(ref ret_ty) = rust_fn.ret_ty {
                 info_with_bindings.return_type = Some(ret_ty.clone());
+            }
+        }
+
+        // 関数呼び出しから引数の型を推論
+        if let MacroKind::Function { ref params, .. } = def.kind {
+            let inferred = call_type_infer::infer_param_types_from_expr(
+                &expr,
+                params,
+                &rust_decls,
+                interner,
+            );
+            // 推論結果をマージ（既存の型がない場合のみ上書き）
+            for (param, ty) in inferred {
+                if !info_with_bindings.param_types.contains_key(&param) {
+                    info_with_bindings.param_types.insert(param, ty);
+                }
             }
         }
 
