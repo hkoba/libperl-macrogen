@@ -374,6 +374,11 @@ impl<'a> RustCodeGen<'a> {
         Some(format!("{}: {}", name, ty))
     }
 
+    /// パラメータ宣言から型のみを取得（公開API）
+    pub fn param_decl_to_rust_type(&self, param: &ParamDecl) -> String {
+        self.decl_to_rust_type(&param.specs, param.declarator.as_ref())
+    }
+
     /// 宣言からRust型を生成
     fn decl_to_rust_type(&self, specs: &DeclSpecs, declarator: Option<&crate::ast::Declarator>) -> String {
         let mut ptr_prefix = String::new();
@@ -409,6 +414,17 @@ impl<'a> RustCodeGen<'a> {
         }
 
         self.type_spec_to_rust(specs)
+    }
+
+    /// 関数の戻り値型を抽出（公開API）
+    /// 戻り値: Some(型文字列) または None（voidの場合）
+    pub fn extract_fn_return_type(&self, specs: &DeclSpecs, derived: &[DerivedDecl]) -> Option<String> {
+        let ty = self.extract_return_type(specs, derived);
+        if ty == "()" {
+            None
+        } else {
+            Some(ty)
+        }
     }
 
     /// 複合文をRustに変換

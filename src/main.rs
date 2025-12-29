@@ -10,9 +10,10 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use tinycc_macro_bindgen::{
-    call_type_infer, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId,
-    MacroAnalyzer, MacroCategory, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict,
-    SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
+    extract_called_functions, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId,
+    FunctionSignature, InferenceContext, MacroAnalyzer, MacroCategory, PPConfig, Parser,
+    PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation,
+    TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -350,7 +351,7 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
     Ok(())
 }
 
-/// マクロとinline関数からRust関数を生成
+/// マクロとinline関数からRust関数を生成（反復型推論版）
 fn run_gen_rust_fns(
     pp: &mut Preprocessor,
     bindings_path: &PathBuf,
@@ -419,10 +420,120 @@ fn run_gen_rust_fns(
     analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
-    // 5. RustCodeGen を作成
+    // 5. RustCodeGen を作成（inline関数の型抽出に必要）
     let codegen = RustCodeGen::new(interner, &fields_dict);
 
-    // 6. 出力先を準備
+    // 6. 反復型推論コンテキストを作成
+    let mut infer_ctx = InferenceContext::new(interner);
+
+    // bindings.rsから確定済み関数を読み込む
+    infer_ctx.load_bindings(&rust_decls);
+    let initial_confirmed = infer_ctx.confirmed_count();
+    eprintln!("Initial confirmed functions: {}", initial_confirmed);
+
+    // 7. マクロ関数をpendingとして追加
+    use tinycc_macro_bindgen::MacroKind;
+    let macros = pp.macros();
+
+    // マクロとパース結果を収集
+    use std::collections::HashMap;
+    let mut macro_exprs: HashMap<String, tinycc_macro_bindgen::Expr> = HashMap::new();
+    let mut macro_failures: Vec<(String, String)> = Vec::new();
+
+    for (name, info) in analyzer.iter() {
+        if !info.is_target {
+            continue;
+        }
+
+        let name_str = interner.get(*name).to_string();
+
+        let def = match macros.get(*name) {
+            Some(d) => d,
+            None => {
+                macro_failures.push((name_str, "macro definition not found".to_string()));
+                continue;
+            }
+        };
+
+        // オブジェクトマクロ（引数なし）はスキップ
+        if matches!(def.kind, MacroKind::Object) {
+            continue;
+        }
+
+        // Expressionマクロのみ処理
+        if info.category != MacroCategory::Expression {
+            macro_failures.push((name_str, format!("not an expression macro (category: {:?})", info.category)));
+            continue;
+        }
+
+        // マクロ本体をパース
+        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
+        let expr = match parse_result {
+            Ok(e) => e,
+            Err(e) => {
+                let expanded_str = expanded.iter()
+                    .map(|t| t.kind.format(interner))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                macro_failures.push((name_str, format!("parse error: {} | expanded: {}", e, expanded_str)));
+                continue;
+            }
+        };
+
+        // パラメータを取得
+        if let MacroKind::Function { ref params, .. } = def.kind {
+            // 呼び出す関数を抽出
+            let called_fns = extract_called_functions(&expr, interner);
+
+            // 既知の型情報を取得
+            let known_types = info.param_types.clone();
+
+            // bindingsから戻り値型を取得（あれば優先）
+            let ret_ty = if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
+                rust_fn.ret_ty.clone()
+            } else {
+                info.return_type.clone()
+            };
+
+            // PendingFunctionを作成
+            let pending = PendingFunction {
+                name: name_str.clone(),
+                param_names: params.clone(),
+                known_types,
+                called_functions: called_fns,
+                ret_ty,
+                body_expr: Some(expr.clone()),
+                body_stmt: None,
+            };
+
+            infer_ctx.add_pending(pending);
+            macro_exprs.insert(name_str, expr);
+        }
+    }
+
+    // 8. inline関数を確定済みとして追加（型が既知のため）
+    for (_name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            // inline関数からFunctionSignatureを作成
+            if let Some(sig) = extract_inline_fn_signature(func_def, interner, &codegen) {
+                infer_ctx.add_confirmed(sig);
+            }
+        }
+    }
+
+    let after_inline = infer_ctx.confirmed_count();
+    eprintln!("After inline functions: {} confirmed (+{} inline)",
+        after_inline, after_inline - initial_confirmed);
+
+    eprintln!("Pending functions: {}", infer_ctx.pending_count());
+
+    // 9. 反復推論を実行
+    let (resolved, iterations) = infer_ctx.run_inference();
+    eprintln!("Iterative inference: {} resolved in {} iterations", resolved, iterations);
+    eprintln!("Final: {} confirmed, {} still pending",
+        infer_ctx.confirmed_count(), infer_ctx.pending_count());
+
+    // 10. 出力先を準備
     let mut out: Box<dyn Write> = if let Some(path) = output {
         Box::new(BufWriter::new(File::create(path)?))
     } else {
@@ -432,6 +543,7 @@ fn run_gen_rust_fns(
     // ヘッダーコメント
     writeln!(out, "// Auto-generated Rust functions from C macros and inline functions")?;
     writeln!(out, "// Source: samples/wrapper.h with types from samples/bindings.rs")?;
+    writeln!(out, "// Type inference: {} iterations, {} functions resolved", iterations, resolved)?;
     writeln!(out)?;
     writeln!(out, "#![allow(non_snake_case)]")?;
     writeln!(out, "#![allow(unused)]")?;
@@ -445,14 +557,14 @@ fn run_gen_rust_fns(
     let mut inline_success = 0usize;
     let mut inline_failure = 0usize;
 
+    // 推論結果を取得
+    let (confirmed_fns, _still_pending) = infer_ctx.into_results();
+
     // ==================== マクロ関数の出力 ====================
     writeln!(out, "// ==================== Macro Functions ====================")?;
     writeln!(out)?;
 
     // マクロ名を収集してソート
-    use tinycc_macro_bindgen::MacroKind;
-    let macros = pp.macros();
-
     let mut macro_names: Vec<_> = analyzer.iter()
         .filter(|(_, info)| info.is_target)
         .map(|(name, _)| *name)
@@ -471,11 +583,7 @@ fn run_gen_rust_fns(
         // マクロ定義を取得
         let def = match macros.get(name) {
             Some(d) => d,
-            None => {
-                writeln!(out, "// FAILED: {} - macro definition not found", name_str)?;
-                macro_failure += 1;
-                continue;
-            }
+            None => continue, // 既にfailuresに記録済み
         };
 
         // オブジェクトマクロ（引数なし）はスキップ
@@ -485,54 +593,54 @@ fn run_gen_rust_fns(
 
         // Expressionマクロのみ処理
         if info.category != MacroCategory::Expression {
-            writeln!(out, "// FAILED: {} - not an expression macro (category: {:?})", name_str, info.category)?;
-            macro_failure += 1;
-            continue;
+            continue; // 既にfailuresに記録済み
         }
 
-        // マクロ本体をパース（展開済みトークンも取得）
-        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
-        let expr = match parse_result {
-            Ok(e) => e,
-            Err(e) => {
-                let expanded_str = expanded.iter()
-                    .map(|t| t.kind.format(interner))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                writeln!(out, "// FAILED: {} - parse error: {} | expanded: {}", name_str, e, expanded_str)?;
-                macro_failure += 1;
-                continue;
-            }
+        // パース済みの式を取得
+        let expr = match macro_exprs.get(&name_str) {
+            Some(e) => e,
+            None => continue, // 既にfailuresに記録済み
         };
 
-        // bindingsから戻り値型を取得（あれば優先）
-        let mut info_with_bindings = info.clone();
-        if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
-            if let Some(ref ret_ty) = rust_fn.ret_ty {
-                info_with_bindings.return_type = Some(ret_ty.clone());
+        // 推論結果から型情報を取得
+        let mut info_with_inferred = info.clone();
+
+        // 確定関数から型情報を取得
+        if let Some(sig) = confirmed_fns.get(&name_str) {
+            // パラメータ型を更新
+            if let MacroKind::Function { ref params, .. } = def.kind {
+                for (i, param_id) in params.iter().enumerate() {
+                    if i < sig.params.len() {
+                        let (_, ty) = &sig.params[i];
+                        if ty != "UnknownType" && !info_with_inferred.param_types.contains_key(param_id) {
+                            info_with_inferred.param_types.insert(*param_id, ty.clone());
+                        }
+                    }
+                }
+            }
+            // 戻り値型を更新
+            if info_with_inferred.return_type.is_none() {
+                info_with_inferred.return_type = sig.ret_ty.clone();
             }
         }
 
-        // 関数呼び出しから引数の型を推論
-        if let MacroKind::Function { ref params, .. } = def.kind {
-            let inferred = call_type_infer::infer_param_types_from_expr(
-                &expr,
-                params,
-                &rust_decls,
-                interner,
-            );
-            // 推論結果をマージ（既存の型がない場合のみ上書き）
-            for (param, ty) in inferred {
-                if !info_with_bindings.param_types.contains_key(&param) {
-                    info_with_bindings.param_types.insert(param, ty);
-                }
+        // bindingsから戻り値型を取得（あれば優先）
+        if let Some(rust_fn) = rust_decls.fns.get(&name_str) {
+            if let Some(ref ret_ty) = rust_fn.ret_ty {
+                info_with_inferred.return_type = Some(ret_ty.clone());
             }
         }
 
         // Rust関数を生成して出力
-        let rust_code = codegen.macro_to_rust_fn(def, &info_with_bindings, &expr);
+        let rust_code = codegen.macro_to_rust_fn(def, &info_with_inferred, expr);
         writeln!(out, "{}", rust_code)?;
         macro_success += 1;
+    }
+
+    // 失敗したマクロを出力
+    for (name, reason) in &macro_failures {
+        writeln!(out, "// FAILED: {} - {}", name, reason)?;
+        macro_failure += 1;
     }
 
     // ==================== inline関数の出力 ====================
@@ -1023,4 +1131,44 @@ fn parse_defines(defines: &[String]) -> Vec<(String, Option<String>)> {
             }
         })
         .collect()
+}
+
+/// inline関数からFunctionSignatureを抽出
+fn extract_inline_fn_signature(
+    func_def: &tinycc_macro_bindgen::FunctionDef,
+    interner: &tinycc_macro_bindgen::StringInterner,
+    codegen: &RustCodeGen,
+) -> Option<FunctionSignature> {
+    use tinycc_macro_bindgen::DerivedDecl;
+
+    // 関数名を取得
+    let name = func_def.declarator.name?;
+    let name_str = interner.get(name).to_string();
+
+    // パラメータを抽出
+    let mut params = Vec::new();
+    for derived in &func_def.declarator.derived {
+        if let DerivedDecl::Function(param_list) = derived {
+            for param in &param_list.params {
+                if let Some(ref decl) = param.declarator {
+                    if let Some(param_name) = decl.name {
+                        let param_name_str = interner.get(param_name).to_string();
+                        // 型を取得
+                        let ty = codegen.param_decl_to_rust_type(param);
+                        params.push((param_name_str, ty));
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // 戻り値型を抽出
+    let ret_ty = codegen.extract_fn_return_type(&func_def.specs, &func_def.declarator.derived);
+
+    Some(FunctionSignature {
+        name: name_str,
+        params,
+        ret_ty,
+    })
 }

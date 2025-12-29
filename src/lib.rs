@@ -8,6 +8,7 @@ pub mod call_type_infer;
 pub mod error;
 pub mod fields_dict;
 pub mod intern;
+pub mod iterative_infer;
 pub mod lexer;
 pub mod macro_analysis;
 pub mod macro_def;
@@ -28,6 +29,10 @@ pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use fields_dict::FieldsDict;
 pub use intern::{InternedStr, StringInterner};
+pub use iterative_infer::{
+    extract_called_functions, extract_called_functions_from_compound, FunctionSignature,
+    InferenceContext, PendingFunction,
+};
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
 pub use rust_codegen::RustCodeGen;
 pub use rust_decl::RustDeclDict;
