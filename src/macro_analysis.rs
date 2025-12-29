@@ -538,6 +538,33 @@ impl<'a> MacroAnalyzer<'a> {
             return false;
         }
 
+        // 式に使われる演算子・キーワードが含まれている場合は型ではない
+        for token in tokens {
+            match &token.kind {
+                // 三項演算子、比較演算子、論理演算子など
+                TokenKind::Question | TokenKind::Colon
+                | TokenKind::EqEq | TokenKind::BangEq
+                | TokenKind::Lt | TokenKind::Gt | TokenKind::LtEq | TokenKind::GtEq
+                | TokenKind::AmpAmp | TokenKind::PipePipe
+                | TokenKind::Plus | TokenKind::Minus | TokenKind::Slash | TokenKind::Percent
+                | TokenKind::Amp | TokenKind::Pipe | TokenKind::Caret
+                | TokenKind::LtLt | TokenKind::GtGt
+                | TokenKind::Eq | TokenKind::PlusEq | TokenKind::MinusEq
+                | TokenKind::Comma
+                | TokenKind::Arrow  // メンバアクセス
+                | TokenKind::Dot    // メンバアクセス
+                | TokenKind::Bang   // 論理否定
+                | TokenKind::IntLit(_) | TokenKind::UIntLit(_) | TokenKind::FloatLit(_) // リテラル
+                | TokenKind::StringLit(_) | TokenKind::CharLit(_)
+                | TokenKind::KwSizeof | TokenKind::KwAlignof  // sizeof/alignof演算子
+                | TokenKind::KwReturn | TokenKind::KwIf | TokenKind::KwElse  // 制御構文
+                | TokenKind::KwWhile | TokenKind::KwFor | TokenKind::KwDo => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         // 型キーワードで始まる
         match &tokens[0].kind {
             TokenKind::KwVoid | TokenKind::KwChar | TokenKind::KwShort
@@ -545,8 +572,12 @@ impl<'a> MacroAnalyzer<'a> {
             | TokenKind::KwDouble | TokenKind::KwSigned | TokenKind::KwUnsigned
             | TokenKind::KwStruct | TokenKind::KwUnion | TokenKind::KwEnum
             | TokenKind::KwConst | TokenKind::KwVolatile => true,
-            TokenKind::Ident(_) => {
+            TokenKind::Ident(id) => {
                 // typedef名の可能性
+                // typedefsに登録されている場合は型として扱う
+                if self.typedefs.contains(id) {
+                    return true;
+                }
                 // ポインタ修飾子が続く場合は型として扱う
                 tokens.iter().any(|t| matches!(t.kind, TokenKind::Star))
             }
