@@ -32,8 +32,8 @@ pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Re
 pub use fields_dict::FieldsDict;
 pub use intern::{InternedStr, StringInterner};
 pub use iterative_infer::{
-    extract_called_functions, extract_called_functions_from_compound, FunctionSignature,
-    InferenceContext, PendingFunction,
+    c_type_to_rust, extract_called_functions, extract_called_functions_from_compound,
+    FunctionSignature, InferenceContext, PendingFunction,
 };
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
 pub use rust_codegen::RustCodeGen;

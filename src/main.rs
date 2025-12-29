@@ -84,6 +84,10 @@ struct Cli {
     #[arg(long = "bindings")]
     bindings: Option<PathBuf>,
 
+    /// Perl apidocファイル (embed.fnc)
+    #[arg(long = "apidoc")]
+    apidoc: Option<PathBuf>,
+
     /// デバッグ: マクロ変換を即座に出力
     #[arg(long = "debug-macro-gen")]
     debug_macro_gen: bool,
@@ -155,7 +159,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.gen_rust_fns {
         // --gen-rust-fns: マクロとinline関数からRust関数を生成
         let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
-        run_gen_rust_fns(&mut pp, &bindings, cli.output.as_ref())?;
+        run_gen_rust_fns(&mut pp, &bindings, cli.apidoc.as_ref(), cli.output.as_ref())?;
     } else if cli.debug_macro_gen {
         // --debug-macro-gen: デバッグ用即時出力モード
         run_debug_macro_gen(&mut pp)?;
@@ -355,10 +359,11 @@ fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<
 fn run_gen_rust_fns(
     pp: &mut Preprocessor,
     bindings_path: &PathBuf,
+    apidoc_path: Option<&PathBuf>,
     output: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
-    use tinycc_macro_bindgen::MacroKind;
+    use tinycc_macro_bindgen::{ApidocDict, MacroKind};
 
     // 1. Rustバインディングをパースして型情報を取得
     let rust_decls = RustDeclDict::parse_file(bindings_path)?;
@@ -425,14 +430,28 @@ fn run_gen_rust_fns(
 
     // bindings.rsから確定済み関数を読み込む
     infer_ctx.load_bindings(&rust_decls);
-    let initial_confirmed = infer_ctx.confirmed_count();
-    eprintln!("Initial confirmed functions: {}", initial_confirmed);
+    let after_bindings = infer_ctx.confirmed_count();
+    eprintln!("After bindings.rs: {} confirmed", after_bindings);
+
+    // apidocから追加の型情報を読み込む（オプション）
+    if let Some(apidoc_file) = apidoc_path {
+        let apidoc = ApidocDict::parse_embed_fnc(apidoc_file)?;
+        let apidoc_stats = apidoc.stats();
+        eprintln!("Loaded apidoc: {} entries ({} functions, {} macros, {} inline)",
+            apidoc_stats.total, apidoc_stats.function_count,
+            apidoc_stats.macro_count, apidoc_stats.inline_count);
+
+        let added = infer_ctx.load_apidoc(&apidoc);
+        eprintln!("After apidoc: {} confirmed (+{} from apidoc)",
+            infer_ctx.confirmed_count(), added);
+    }
 
     // 6. inline関数を確定済みとして追加（型が既知のため）
     // inline関数を名前順にソート
     let mut inline_functions = inline_functions;
     inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let before_inline = infer_ctx.confirmed_count();
     for (_name, decl, _path) in &inline_functions {
         if let ExternalDecl::FunctionDef(func_def) = decl {
             // inline関数からFunctionSignatureを作成
@@ -444,7 +463,7 @@ fn run_gen_rust_fns(
 
     let after_inline = infer_ctx.confirmed_count();
     eprintln!("After inline functions: {} confirmed (+{} inline)",
-        after_inline, after_inline - initial_confirmed);
+        after_inline, after_inline - before_inline);
 
     // 7. 出力先を準備
     let mut out: Box<dyn Write> = if let Some(path) = output {

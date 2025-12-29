@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::apidoc::{ApidocDict, ApidocEntry};
 use crate::ast::{CompoundStmt, Expr};
 use crate::intern::{InternedStr, StringInterner};
 use crate::rust_decl::{RustDeclDict, RustFn};
@@ -34,6 +35,20 @@ impl FunctionSignature {
         }
     }
 
+    /// ApidocEntryから変換
+    pub fn from_apidoc_entry(entry: &ApidocEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            params: entry.args.iter()
+                .map(|arg| {
+                    let rust_ty = c_type_to_rust(&arg.ty);
+                    (arg.name.clone(), rust_ty)
+                })
+                .collect(),
+            ret_ty: entry.return_type.as_ref().map(|t| c_type_to_rust(t)),
+        }
+    }
+
     /// パラメータ数を取得
     pub fn param_count(&self) -> usize {
         self.params.len()
@@ -43,6 +58,129 @@ impl FunctionSignature {
     pub fn param_type(&self, index: usize) -> Option<&str> {
         self.params.get(index).map(|(_, ty)| ty.as_str())
     }
+}
+
+/// C型をRust型に変換
+///
+/// 例:
+/// - "SV *" -> "*mut SV"
+/// - "const char *" -> "*const c_char"
+/// - "int" -> "c_int"
+/// - "void" -> "()"
+pub fn c_type_to_rust(c_type: &str) -> String {
+    let trimmed = c_type.trim();
+
+    // 空の場合
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    // void
+    if trimmed == "void" {
+        return "()".to_string();
+    }
+
+    // 可変長引数
+    if trimmed == "..." {
+        return "...".to_string();
+    }
+
+    // ポインタ型の処理
+    // "const char *" -> "*const c_char"
+    // "SV *" -> "*mut SV"
+    // "const SV *" -> "*const SV"
+    // "char * const" -> "*mut c_char" (const after * is ignored for Rust)
+    if let Some(ptr_type) = parse_pointer_type(trimmed) {
+        return ptr_type;
+    }
+
+    // 基本型の変換
+    convert_basic_type(trimmed)
+}
+
+/// ポインタ型をパース
+fn parse_pointer_type(s: &str) -> Option<String> {
+    // 末尾の "* const" や "*" を探す
+    let s = s.trim();
+
+    // パターン: "type * const" or "type *"
+    // 末尾から * を探す
+    if let Some(star_pos) = s.rfind('*') {
+        let before_star = s[..star_pos].trim();
+        let after_star = s[star_pos + 1..].trim();
+
+        // after_star が "const" の場合は無視（ポインタ自体のconst）
+        let _ptr_const = after_star == "const";
+
+        // before_star から型を解析
+        // "const char" -> is_const=true, base="char"
+        // "SV" -> is_const=false, base="SV"
+        let (is_const, base_type) = if before_star.starts_with("const ") {
+            (true, before_star[6..].trim())
+        } else if before_star.ends_with(" const") {
+            (true, before_star[..before_star.len() - 6].trim())
+        } else {
+            (false, before_star)
+        };
+
+        // 再帰的にポインタをチェック（ダブルポインタなど）
+        let inner_type = if base_type.contains('*') {
+            // ネストしたポインタ
+            parse_pointer_type(base_type).unwrap_or_else(|| convert_basic_type(base_type))
+        } else {
+            convert_basic_type(base_type)
+        };
+
+        let ptr_prefix = if is_const { "*const " } else { "*mut " };
+        return Some(format!("{}{}", ptr_prefix, inner_type));
+    }
+
+    None
+}
+
+/// 基本型を変換
+fn convert_basic_type(s: &str) -> String {
+    let s = s.trim();
+
+    // unsigned/signed の処理
+    let (is_unsigned, base) = if s.starts_with("unsigned ") {
+        (true, s[9..].trim())
+    } else if s.starts_with("signed ") {
+        (false, s[7..].trim())
+    } else {
+        (false, s)
+    };
+
+    // const を除去
+    let base = base.trim_start_matches("const ").trim();
+
+    // 基本型の変換
+    let converted = match base {
+        "char" if is_unsigned => "c_uchar",
+        "char" => "c_char",
+        "short" | "short int" if is_unsigned => "c_ushort",
+        "short" | "short int" => "c_short",
+        "int" if is_unsigned => "c_uint",
+        "int" => "c_int",
+        "long" | "long int" if is_unsigned => "c_ulong",
+        "long" | "long int" => "c_long",
+        "long long" | "long long int" if is_unsigned => "c_ulonglong",
+        "long long" | "long long int" => "c_longlong",
+        "float" => "c_float",
+        "double" => "c_double",
+        "size_t" => "usize",
+        "ssize_t" => "isize",
+        "bool" | "_Bool" => "bool",
+
+        // Perl固有の型はそのまま
+        // SV, AV, HV, CV, GV, IO, STRLEN, I32, U32, IV, UV, NV, etc.
+        _ => {
+            // そのまま返す（Perl内部型など）
+            return base.to_string();
+        }
+    };
+
+    converted.to_string()
 }
 
 /// 未確定関数
@@ -120,6 +258,24 @@ impl<'a> InferenceContext<'a> {
         for (name, rust_fn) in &rust_decls.fns {
             self.confirmed.insert(name.clone(), FunctionSignature::from_rust_fn(rust_fn));
         }
+    }
+
+    /// apidocから確定済み関数を読み込む
+    /// 既にbindings.rsで読み込まれている関数は上書きしない
+    pub fn load_apidoc(&mut self, apidoc: &ApidocDict) -> usize {
+        let mut added = 0;
+        for (name, entry) in apidoc.iter() {
+            // 既に確定済みの関数は上書きしない
+            if self.confirmed.contains_key(name) {
+                continue;
+            }
+            // 引数がない場合はスキップ（型推論に使えない）
+            // ただし引数なしマクロでも戻り値型は有用なので含める
+            let sig = FunctionSignature::from_apidoc_entry(entry);
+            self.confirmed.insert(name.clone(), sig);
+            added += 1;
+        }
+        added
     }
 
     /// 未確定関数を追加
@@ -735,5 +891,45 @@ mod tests {
         assert_eq!(normalize_type("* const SV"), "*const SV");
         assert_eq!(normalize_type("* mut STRLEN"), "*mut STRLEN");
         assert_eq!(normalize_type("c_int"), "c_int");
+    }
+
+    #[test]
+    fn test_c_type_to_rust_basic() {
+        assert_eq!(c_type_to_rust("int"), "c_int");
+        assert_eq!(c_type_to_rust("unsigned int"), "c_uint");
+        assert_eq!(c_type_to_rust("char"), "c_char");
+        assert_eq!(c_type_to_rust("unsigned char"), "c_uchar");
+        assert_eq!(c_type_to_rust("long"), "c_long");
+        assert_eq!(c_type_to_rust("void"), "()");
+        assert_eq!(c_type_to_rust("size_t"), "usize");
+        assert_eq!(c_type_to_rust("bool"), "bool");
+    }
+
+    #[test]
+    fn test_c_type_to_rust_pointer() {
+        assert_eq!(c_type_to_rust("SV *"), "*mut SV");
+        assert_eq!(c_type_to_rust("const SV *"), "*const SV");
+        assert_eq!(c_type_to_rust("char *"), "*mut c_char");
+        assert_eq!(c_type_to_rust("const char *"), "*const c_char");
+        assert_eq!(c_type_to_rust("SV * const"), "*mut SV");
+    }
+
+    #[test]
+    fn test_c_type_to_rust_double_pointer() {
+        assert_eq!(c_type_to_rust("SV **"), "*mut *mut SV");
+        assert_eq!(c_type_to_rust("char **"), "*mut *mut c_char");
+    }
+
+    #[test]
+    fn test_c_type_to_rust_perl_types() {
+        // Perl固有の型はそのまま
+        assert_eq!(c_type_to_rust("STRLEN"), "STRLEN");
+        assert_eq!(c_type_to_rust("I32"), "I32");
+        assert_eq!(c_type_to_rust("U32"), "U32");
+        assert_eq!(c_type_to_rust("IV"), "IV");
+        assert_eq!(c_type_to_rust("UV"), "UV");
+        assert_eq!(c_type_to_rust("NV"), "NV");
+        assert_eq!(c_type_to_rust("AV *"), "*mut AV");
+        assert_eq!(c_type_to_rust("HV *"), "*mut HV");
     }
 }
