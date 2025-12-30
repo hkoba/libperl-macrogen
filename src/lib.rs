@@ -13,6 +13,7 @@ pub mod iterative_infer;
 pub mod lexer;
 pub mod macro_analysis;
 pub mod macro_def;
+pub mod macrogen;
 pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
@@ -48,6 +49,11 @@ pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
+
+// マクロ生成ライブラリ
+pub use macrogen::{
+    generate, MacrogenBuilder, MacrogenConfig, MacrogenError, MacrogenResult, MacrogenStats,
+};
 
 #[cfg(test)]
 mod tests {
