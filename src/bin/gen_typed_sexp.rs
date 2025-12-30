@@ -1,6 +1,6 @@
 use std::env;
 use std::path::Path;
-use tinycc_macro_bindgen::{Parser, Preprocessor, PPConfig, TypedSexpPrinter};
+use libperl_macrogen::{Parser, Preprocessor, PPConfig, TypedSexpPrinter};
 
 fn main() {
     let args: Vec<String> = env::args().collect();

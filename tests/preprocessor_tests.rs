@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use tempfile::NamedTempFile;
-use tinycc_macro_bindgen::{PPConfig, Preprocessor, TokenKind};
+use libperl_macrogen::{PPConfig, Preprocessor, TokenKind};
 
 /// Helper to create a preprocessor from source string
 fn preprocess(source: &str) -> Preprocessor {

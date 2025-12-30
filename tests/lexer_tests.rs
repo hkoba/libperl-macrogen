@@ -1,7 +1,7 @@
 //! Lexer integration tests
 
 use std::path::PathBuf;
-use tinycc_macro_bindgen::{FileRegistry, Lexer, StringInterner, Token, TokenKind};
+use libperl_macrogen::{FileRegistry, Lexer, StringInterner, Token, TokenKind};
 
 /// Helper to tokenize a source string
 fn tokenize(source: &[u8]) -> (Vec<Token>, StringInterner) {

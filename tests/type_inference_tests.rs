@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use tinycc_macro_bindgen::{
+use libperl_macrogen::{
     Parser, Preprocessor, PPConfig, TypedSexpPrinter, ExternalDecl,
 };
 

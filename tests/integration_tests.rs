@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::ops::ControlFlow;
 use tempfile::NamedTempFile;
-use tinycc_macro_bindgen::{
+use libperl_macrogen::{
     ExternalDecl, PPConfig, Parser, Preprocessor, SexpPrinter,
 };
 

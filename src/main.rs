@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
-use tinycc_macro_bindgen::{
+use libperl_macrogen::{
     extract_called_functions, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId,
     FunctionSignature, InferenceContext, MacroAnalyzer, MacroCategory, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation,
@@ -18,7 +18,7 @@ use tinycc_macro_bindgen::{
 
 /// コマンドライン引数
 #[derive(ClapParser)]
-#[command(name = "tinycc-macro-bindgen")]
+#[command(name = "libperl-macrogen")]
 #[command(version, about = "C to Rust macro bindgen tool")]
 struct Cli {
     /// 入力Cファイル（--parse-rust-bindings使用時は不要）
@@ -363,7 +363,7 @@ fn run_gen_rust_fns(
     output: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
-    use tinycc_macro_bindgen::{ApidocDict, MacroKind};
+    use libperl_macrogen::{ApidocDict, MacroKind};
 
     // 1. Rustバインディングをパースして型情報を取得
     let rust_decls = RustDeclDict::parse_file(bindings_path)?;
@@ -519,7 +519,7 @@ fn run_gen_rust_fns(
 
     // 9. マクロ関数をpendingとして追加
     let macros = pp.macros();
-    let mut macro_exprs: HashMap<String, tinycc_macro_bindgen::Expr> = HashMap::new();
+    let mut macro_exprs: HashMap<String, libperl_macrogen::Expr> = HashMap::new();
     let mut macro_failures: Vec<(String, String)> = Vec::new();
 
     for (name, info) in analyzer.iter() {
@@ -766,7 +766,7 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
 
     // マクロを即座に出力（名前順ではない）
     // 引数のある関数マクロのみを対象とする
-    use tinycc_macro_bindgen::MacroKind;
+    use libperl_macrogen::MacroKind;
 
     let macros = pp.macros();
     let mut success_count = 0usize;
@@ -1158,11 +1158,11 @@ fn parse_defines(defines: &[String]) -> Vec<(String, Option<String>)> {
 
 /// inline関数からFunctionSignatureを抽出
 fn extract_inline_fn_signature(
-    func_def: &tinycc_macro_bindgen::FunctionDef,
-    interner: &tinycc_macro_bindgen::StringInterner,
+    func_def: &libperl_macrogen::FunctionDef,
+    interner: &libperl_macrogen::StringInterner,
     codegen: &RustCodeGen,
 ) -> Option<FunctionSignature> {
-    use tinycc_macro_bindgen::DerivedDecl;
+    use libperl_macrogen::DerivedDecl;
 
     // 関数名を取得
     let name = func_def.declarator.name?;

@@ -1,5 +1,5 @@
 [package]
-name = "tinycc-macro-bindgen"
+name = "libperl-macrogen"
 version = "0.1.0"
 edition = "2024"
 
@@ -14,7 +14,7 @@ syn = { version = "2.0.111", features = ["full", "parsing"] }
 tempfile = "3"
 
 [[bin]]
-name = "tinycc-macro-bindgen"
+name = "libperl-macrogen"
 path = "src/main.rs"
 
 [[bin]]

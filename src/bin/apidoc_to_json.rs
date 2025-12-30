@@ -9,7 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
-use tinycc_macro_bindgen::ApidocDict;
+use libperl_macrogen::ApidocDict;
 
 #[derive(Parser)]
 #[command(name = "libperl-apidoc-to-json")]

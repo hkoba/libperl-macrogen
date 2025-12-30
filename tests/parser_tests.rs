@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use tempfile::NamedTempFile;
-use tinycc_macro_bindgen::{
+use libperl_macrogen::{
     DerivedDecl, ExternalDecl, PPConfig, Parser, Preprocessor, StorageClass, TypeSpec,
 };
 
