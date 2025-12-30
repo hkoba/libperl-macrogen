@@ -8,3 +8,4 @@ tinycc
 /target
 perf.data
 perf.data.old
+embed.fnc
