@@ -8,8 +8,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 /// 引数のNULL許容性
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Nullability {
     /// NN - ポインタはNULLであってはならない
     NotNull,
@@ -21,7 +23,7 @@ pub enum Nullability {
 }
 
 /// パースされた引数
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApidocArg {
     /// NULL許容性 (NN/NULLOK)
     pub nullability: Nullability,
@@ -36,7 +38,7 @@ pub struct ApidocArg {
 }
 
 /// パースされたフラグ
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApidocFlags {
     // 可視性
     pub api: bool,           // A - 公開API
@@ -81,7 +83,7 @@ pub struct ApidocFlags {
 }
 
 /// apidocエントリ（関数/マクロの定義）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApidocEntry {
     /// フラグ
     pub flags: ApidocFlags,
@@ -98,7 +100,7 @@ pub struct ApidocEntry {
 }
 
 /// apidoc辞書（名前でエントリを検索可能）
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ApidocDict {
     entries: HashMap<String, ApidocEntry>,
 }
@@ -530,10 +532,46 @@ impl ApidocDict {
         stats.total = self.entries.len();
         stats
     }
+
+    /// JSONファイルに保存
+    pub fn save_json<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        fs::write(path, json)
+    }
+
+    /// JSON文字列にシリアライズ
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// JSONファイルから読み込み
+    pub fn load_json<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let content = fs::read_to_string(path)?;
+        Self::from_json(&content)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// JSON文字列からデシリアライズ
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// ファイル拡張子に基づいて適切な形式で読み込み
+    /// - .json -> JSON形式
+    /// - それ以外 -> embed.fnc形式
+    pub fn load_auto<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let path_ref = path.as_ref();
+        if path_ref.extension().is_some_and(|ext| ext == "json") {
+            Self::load_json(path_ref)
+        } else {
+            Self::parse_embed_fnc(path_ref)
+        }
+    }
 }
 
 /// 統計情報
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ApidocStats {
     pub total: usize,
     pub function_count: usize,

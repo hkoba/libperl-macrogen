@@ -434,8 +434,9 @@ fn run_gen_rust_fns(
     eprintln!("After bindings.rs: {} confirmed", after_bindings);
 
     // apidocから追加の型情報を読み込む（オプション）
+    // .json 拡張子の場合はJSON形式、それ以外はembed.fnc形式として読み込む
     if let Some(apidoc_file) = apidoc_path {
-        let apidoc = ApidocDict::parse_embed_fnc(apidoc_file)?;
+        let apidoc = ApidocDict::load_auto(apidoc_file)?;
         let apidoc_stats = apidoc.stats();
         eprintln!("Loaded apidoc: {} entries ({} functions, {} macros, {} inline)",
             apidoc_stats.total, apidoc_stats.function_count,

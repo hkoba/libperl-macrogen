@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 quote = "1.0.42"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 syn = { version = "2.0.111", features = ["full", "parsing"] }
 
 [dev-dependencies]
@@ -14,3 +16,7 @@ tempfile = "3"
 [[bin]]
 name = "tinycc-macro-bindgen"
 path = "src/main.rs"
+
+[[bin]]
+name = "apidoc-to-json"
+path = "src/bin/apidoc_to_json.rs"
