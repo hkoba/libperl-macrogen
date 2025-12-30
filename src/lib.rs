@@ -37,7 +37,7 @@ pub use iterative_infer::{
     FunctionSignature, InferenceContext, PendingFunction,
 };
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
-pub use rust_codegen::RustCodeGen;
+pub use rust_codegen::{CodeFragment, CodeIssue, CodeIssueKind, RustCodeGen};
 pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};

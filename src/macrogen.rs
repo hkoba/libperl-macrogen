@@ -390,15 +390,16 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
         for (name, decl, _path) in &inline_functions {
             if let ExternalDecl::FunctionDef(func_def) = decl {
-                match codegen.inline_fn_to_rust(func_def) {
-                    Ok(rust_code) => {
-                        writeln!(output, "{}", rust_code)?;
-                        stats.inline_success += 1;
+                let frag = codegen.inline_fn_to_rust(func_def);
+                if frag.has_issues() {
+                    writeln!(output, "// FAILED: {} - {}", name, frag.issues_summary())?;
+                    for line in frag.code.lines() {
+                        writeln!(output, "// {}", line)?;
                     }
-                    Err(e) => {
-                        writeln!(output, "// FAILED: {} - {}", name, e)?;
-                        stats.inline_failure += 1;
-                    }
+                    stats.inline_failure += 1;
+                } else {
+                    writeln!(output, "{}", frag.code)?;
+                    stats.inline_success += 1;
                 }
             }
         }
@@ -598,9 +599,17 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 }
             }
 
-            let rust_code = codegen.macro_to_rust_fn(def, &info_with_inferred, expr);
-            writeln!(output, "{}", rust_code)?;
-            stats.macro_success += 1;
+            let frag = codegen.macro_to_rust_fn(def, &info_with_inferred, expr);
+            if frag.has_issues() {
+                writeln!(output, "// FAILED: {} - {}", name_str, frag.issues_summary())?;
+                for line in frag.code.lines() {
+                    writeln!(output, "// {}", line)?;
+                }
+                stats.macro_failure += 1;
+            } else {
+                writeln!(output, "{}", frag.code)?;
+                stats.macro_success += 1;
+            }
         }
 
         if config.verbose {

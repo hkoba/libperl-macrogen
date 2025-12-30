@@ -11,6 +11,105 @@ use crate::intern::StringInterner;
 use crate::macro_analysis::MacroInfo;
 use crate::macro_def::{MacroDef, MacroKind};
 
+// ==================== CodeFragment (Synthesized Attribute) ====================
+
+/// コード生成結果（Synthesized Attribute を含む）
+#[derive(Debug, Clone)]
+pub struct CodeFragment {
+    /// 生成されたコード
+    pub code: String,
+    /// 生成中に発生した問題
+    pub issues: Vec<CodeIssue>,
+}
+
+/// コード生成で発生した問題
+#[derive(Debug, Clone)]
+pub struct CodeIssue {
+    /// 問題の種類
+    pub kind: CodeIssueKind,
+    /// 問題の説明
+    pub description: String,
+}
+
+/// 問題の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeIssueKind {
+    /// 未サポートの構文（statement expression, compound literal 等）
+    UnsupportedConstruct,
+    /// インクリメント/デクリメント演算子
+    IncrementDecrement,
+    /// Goto/Label
+    ControlFlow,
+    /// インラインアセンブリ
+    InlineAsm,
+    /// 匿名型（anonymous struct/union/enum）
+    AnonymousType,
+    /// 不明な型
+    UnknownType,
+    /// 初期化子リスト
+    InitializerList,
+}
+
+impl CodeFragment {
+    /// 成功（問題なし）
+    pub fn ok(code: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            issues: vec![],
+        }
+    }
+
+    /// 問題あり
+    pub fn with_issue(code: impl Into<String>, issue: CodeIssue) -> Self {
+        Self {
+            code: code.into(),
+            issues: vec![issue],
+        }
+    }
+
+    /// 問題があるかどうか
+    pub fn has_issues(&self) -> bool {
+        !self.issues.is_empty()
+    }
+
+    /// 子の CodeFragment からの問題をマージ
+    pub fn merge_issues(&mut self, other: &CodeFragment) {
+        self.issues.extend(other.issues.iter().cloned());
+    }
+
+    /// 複数の CodeFragment を結合
+    pub fn concat(fragments: impl IntoIterator<Item = CodeFragment>, sep: &str) -> Self {
+        let mut code_parts = Vec::new();
+        let mut all_issues = Vec::new();
+        for frag in fragments {
+            code_parts.push(frag.code);
+            all_issues.extend(frag.issues);
+        }
+        Self {
+            code: code_parts.join(sep),
+            issues: all_issues,
+        }
+    }
+
+    /// 問題の説明を結合した文字列を返す
+    pub fn issues_summary(&self) -> String {
+        self.issues
+            .iter()
+            .map(|i| i.description.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+impl CodeIssue {
+    pub fn new(kind: CodeIssueKind, description: impl Into<String>) -> Self {
+        Self {
+            kind,
+            description: description.into(),
+        }
+    }
+}
+
 /// Rustコード生成器
 pub struct RustCodeGen<'a> {
     /// 文字列インターナー
@@ -29,137 +128,226 @@ impl<'a> RustCodeGen<'a> {
         }
     }
 
-    /// 式をRustコードに変換
-    pub fn expr_to_rust(&self, expr: &Expr) -> String {
+    /// 式をRustコードに変換（Synthesized Attribute 版）
+    pub fn expr_to_rust(&self, expr: &Expr) -> CodeFragment {
         match expr {
-            Expr::IntLit(n, _) => n.to_string(),
+            Expr::IntLit(n, _) => CodeFragment::ok(n.to_string()),
 
-            Expr::UIntLit(n, _) => format!("{}u64", n),
+            Expr::UIntLit(n, _) => CodeFragment::ok(format!("{}u64", n)),
 
-            Expr::FloatLit(f, _) => f.to_string(),
+            Expr::FloatLit(f, _) => CodeFragment::ok(f.to_string()),
 
-            Expr::CharLit(c, _) => format!("'{}' as c_char", self.escape_char(*c as char)),
+            Expr::CharLit(c, _) => CodeFragment::ok(format!("'{}' as c_char", self.escape_char(*c as char))),
 
             Expr::StringLit(s, _) => {
                 let escaped = self.escape_bytes(s);
-                format!("c\"{}\"", escaped)
+                CodeFragment::ok(format!("c\"{}\"", escaped))
             }
 
-            Expr::Ident(id, _) => self.interner.get(*id).to_string(),
+            Expr::Ident(id, _) => CodeFragment::ok(self.interner.get(*id).to_string()),
 
             Expr::Binary { op, lhs, rhs, .. } => {
-                let left_str = self.expr_to_rust(lhs);
-                let right_str = self.expr_to_rust(rhs);
+                let left = self.expr_to_rust(lhs);
+                let right = self.expr_to_rust(rhs);
                 let op_str = self.bin_op_to_rust(op);
-                format!("({} {} {})", left_str, op_str, right_str)
+                let mut result = CodeFragment::ok(format!("({} {} {})", left.code, op_str, right.code));
+                result.merge_issues(&left);
+                result.merge_issues(&right);
+                result
             }
 
             // 単項演算子
             Expr::UnaryPlus(inner, _) => {
-                format!("(+{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(+{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::UnaryMinus(inner, _) => {
-                format!("(-{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(-{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::BitNot(inner, _) => {
-                format!("(!{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(!{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::LogNot(inner, _) => {
-                format!("(!{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(!{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::Deref(inner, _) => {
-                format!("(*{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(*{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::AddrOf(inner, _) => {
-                format!("(&{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("(&{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::PreInc(inner, _) => {
-                format!("/* ++{} */", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::with_issue(
+                    format!("/* ++{} */", inner_frag.code),
+                    CodeIssue::new(CodeIssueKind::IncrementDecrement, format!("pre-increment: ++{}", inner_frag.code)),
+                );
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::PreDec(inner, _) => {
-                format!("/* --{} */", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::with_issue(
+                    format!("/* --{} */", inner_frag.code),
+                    CodeIssue::new(CodeIssueKind::IncrementDecrement, format!("pre-decrement: --{}", inner_frag.code)),
+                );
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::PostInc(inner, _) => {
-                format!("/* {}++ */", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::with_issue(
+                    format!("/* {}++ */", inner_frag.code),
+                    CodeIssue::new(CodeIssueKind::IncrementDecrement, format!("post-increment: {}++", inner_frag.code)),
+                );
+                result.merge_issues(&inner_frag);
+                result
             }
             Expr::PostDec(inner, _) => {
-                format!("/* {}-- */", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::with_issue(
+                    format!("/* {}-- */", inner_frag.code),
+                    CodeIssue::new(CodeIssueKind::IncrementDecrement, format!("post-decrement: {}--", inner_frag.code)),
+                );
+                result.merge_issues(&inner_frag);
+                result
             }
 
             // メンバアクセス
             Expr::Member { expr, member, .. } => {
-                let expr_str = self.expr_to_rust(expr);
+                let expr_frag = self.expr_to_rust(expr);
                 let member_str = self.interner.get(*member);
-                format!("{}.{}", expr_str, member_str)
+                let mut result = CodeFragment::ok(format!("{}.{}", expr_frag.code, member_str));
+                result.merge_issues(&expr_frag);
+                result
             }
             Expr::PtrMember { expr, member, .. } => {
-                let expr_str = self.expr_to_rust(expr);
+                let expr_frag = self.expr_to_rust(expr);
                 let member_str = self.interner.get(*member);
                 // ptr->field => (*ptr).field
-                format!("(*{}).{}", expr_str, member_str)
+                let mut result = CodeFragment::ok(format!("(*{}).{}", expr_frag.code, member_str));
+                result.merge_issues(&expr_frag);
+                result
             }
 
             Expr::Index { expr, index, .. } => {
-                let expr_str = self.expr_to_rust(expr);
-                let index_str = self.expr_to_rust(index);
-                format!("{}[{} as usize]", expr_str, index_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let index_frag = self.expr_to_rust(index);
+                let mut result = CodeFragment::ok(format!("{}[{} as usize]", expr_frag.code, index_frag.code));
+                result.merge_issues(&expr_frag);
+                result.merge_issues(&index_frag);
+                result
             }
 
             Expr::Call { func, args, .. } => {
-                let func_str = self.expr_to_rust(func);
-                let args_str: Vec<String> = args.iter()
+                let func_frag = self.expr_to_rust(func);
+                let args_frags: Vec<CodeFragment> = args.iter()
                     .map(|a| self.expr_to_rust(a))
                     .collect();
-                format!("{}({})", func_str, args_str.join(", "))
+                let args_str: Vec<&str> = args_frags.iter()
+                    .map(|f| f.code.as_str())
+                    .collect();
+                let mut result = CodeFragment::ok(format!("{}({})", func_frag.code, args_str.join(", ")));
+                result.merge_issues(&func_frag);
+                for arg_frag in &args_frags {
+                    result.merge_issues(arg_frag);
+                }
+                result
             }
 
             Expr::Cast { type_name, expr, .. } => {
-                let expr_str = self.expr_to_rust(expr);
-                let ty_str = self.type_name_to_rust(type_name);
-                format!("({} as {})", expr_str, ty_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let ty_frag = self.type_name_to_rust(type_name);
+                let mut result = CodeFragment::ok(format!("({} as {})", expr_frag.code, ty_frag.code));
+                result.merge_issues(&expr_frag);
+                result.merge_issues(&ty_frag);
+                result
             }
 
             Expr::Sizeof(inner, _) => {
-                format!("std::mem::size_of_val(&{})", self.expr_to_rust(inner))
+                let inner_frag = self.expr_to_rust(inner);
+                let mut result = CodeFragment::ok(format!("std::mem::size_of_val(&{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
             }
 
             Expr::SizeofType(type_name, _) => {
-                let ty_str = self.type_name_to_rust(type_name);
-                format!("std::mem::size_of::<{}>()", ty_str)
+                let ty_frag = self.type_name_to_rust(type_name);
+                let mut result = CodeFragment::ok(format!("std::mem::size_of::<{}>()", ty_frag.code));
+                result.merge_issues(&ty_frag);
+                result
             }
 
             Expr::Alignof(type_name, _) => {
-                let ty_str = self.type_name_to_rust(type_name);
-                format!("std::mem::align_of::<{}>()", ty_str)
+                let ty_frag = self.type_name_to_rust(type_name);
+                let mut result = CodeFragment::ok(format!("std::mem::align_of::<{}>()", ty_frag.code));
+                result.merge_issues(&ty_frag);
+                result
             }
 
             Expr::Conditional { cond, then_expr, else_expr, .. } => {
-                let cond_str = self.expr_to_rust(cond);
-                let then_str = self.expr_to_rust(then_expr);
-                let else_str = self.expr_to_rust(else_expr);
-                format!("(if {} != 0 {{ {} }} else {{ {} }})", cond_str, then_str, else_str)
+                let cond_frag = self.expr_to_rust(cond);
+                let then_frag = self.expr_to_rust(then_expr);
+                let else_frag = self.expr_to_rust(else_expr);
+                let mut result = CodeFragment::ok(format!(
+                    "(if {} != 0 {{ {} }} else {{ {} }})",
+                    cond_frag.code, then_frag.code, else_frag.code
+                ));
+                result.merge_issues(&cond_frag);
+                result.merge_issues(&then_frag);
+                result.merge_issues(&else_frag);
+                result
             }
 
             Expr::Comma { lhs, rhs, .. } => {
                 // Rustではカンマ演算子がないので、ブロック式にする
-                let left_str = self.expr_to_rust(lhs);
-                let right_str = self.expr_to_rust(rhs);
-                format!("{{ let _ = {}; {} }}", left_str, right_str)
+                let left_frag = self.expr_to_rust(lhs);
+                let right_frag = self.expr_to_rust(rhs);
+                let mut result = CodeFragment::ok(format!("{{ let _ = {}; {} }}", left_frag.code, right_frag.code));
+                result.merge_issues(&left_frag);
+                result.merge_issues(&right_frag);
+                result
             }
 
             Expr::Assign { op, lhs, rhs, .. } => {
-                let left_str = self.expr_to_rust(lhs);
-                let right_str = self.expr_to_rust(rhs);
+                let left_frag = self.expr_to_rust(lhs);
+                let right_frag = self.expr_to_rust(rhs);
                 let op_str = self.assign_op_to_rust(op);
-                format!("{} {} {}", left_str, op_str, right_str)
+                let mut result = CodeFragment::ok(format!("{} {} {}", left_frag.code, op_str, right_frag.code));
+                result.merge_issues(&left_frag);
+                result.merge_issues(&right_frag);
+                result
             }
 
             Expr::CompoundLit { .. } => {
-                "/* compound literal */".to_string()
+                CodeFragment::with_issue(
+                    "/* compound literal */",
+                    CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "compound literal"),
+                )
             }
 
             Expr::StmtExpr(_, _) => {
-                "/* statement expression */".to_string()
+                CodeFragment::with_issue(
+                    "/* statement expression */",
+                    CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "statement expression"),
+                )
             }
         }
     }
@@ -206,74 +394,85 @@ impl<'a> RustCodeGen<'a> {
     }
 
     /// TypeName をRust型に変換
-    fn type_name_to_rust(&self, ty: &TypeName) -> String {
-        let mut result = String::new();
+    fn type_name_to_rust(&self, ty: &TypeName) -> CodeFragment {
+        let mut ptr_prefix = String::new();
 
         // ポインタを考慮
         if let Some(ref decl) = ty.declarator {
             for derived in &decl.derived {
                 if let crate::ast::DerivedDecl::Pointer(_) = derived {
                     if ty.specs.qualifiers.is_const {
-                        result.push_str("*const ");
+                        ptr_prefix.push_str("*const ");
                     } else {
-                        result.push_str("*mut ");
+                        ptr_prefix.push_str("*mut ");
                     }
                 }
             }
         }
 
         // 基本型
-        let type_str = self.type_spec_to_rust(&ty.specs);
-        format!("{}{}", result, type_str)
+        let type_frag = self.type_spec_to_rust(&ty.specs);
+        let mut result = CodeFragment::ok(format!("{}{}", ptr_prefix, type_frag.code));
+        result.merge_issues(&type_frag);
+        result
     }
 
     /// 型指定子をRust型に変換
-    fn type_spec_to_rust(&self, specs: &crate::ast::DeclSpecs) -> String {
+    fn type_spec_to_rust(&self, specs: &crate::ast::DeclSpecs) -> CodeFragment {
         // unsigned があるかどうかをチェック
         let is_unsigned = specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Unsigned));
 
         // 基本型を探す
         for spec in &specs.type_specs {
             match spec {
-                TypeSpec::Void => return "c_void".to_string(),
+                TypeSpec::Void => return CodeFragment::ok("c_void"),
                 TypeSpec::Char => {
-                    return if is_unsigned { "c_uchar" } else { "c_char" }.to_string();
+                    return CodeFragment::ok(if is_unsigned { "c_uchar" } else { "c_char" });
                 }
                 TypeSpec::Short => {
-                    return if is_unsigned { "c_ushort" } else { "c_short" }.to_string();
+                    return CodeFragment::ok(if is_unsigned { "c_ushort" } else { "c_short" });
                 }
                 TypeSpec::Int => {
-                    return if is_unsigned { "c_uint" } else { "c_int" }.to_string();
+                    return CodeFragment::ok(if is_unsigned { "c_uint" } else { "c_int" });
                 }
                 TypeSpec::Long => {
-                    return if is_unsigned { "c_ulong" } else { "c_long" }.to_string();
+                    return CodeFragment::ok(if is_unsigned { "c_ulong" } else { "c_long" });
                 }
-                TypeSpec::Float => return "c_float".to_string(),
-                TypeSpec::Double => return "c_double".to_string(),
-                TypeSpec::Bool => return "bool".to_string(),
+                TypeSpec::Float => return CodeFragment::ok("c_float"),
+                TypeSpec::Double => return CodeFragment::ok("c_double"),
+                TypeSpec::Bool => return CodeFragment::ok("bool"),
                 TypeSpec::Signed | TypeSpec::Unsigned => continue,
                 // typedef名はそのまま出力
                 TypeSpec::TypedefName(id) => {
-                    return self.interner.get(*id).to_string();
+                    return CodeFragment::ok(self.interner.get(*id).to_string());
                 }
                 // struct/union/enum
                 TypeSpec::Struct(s) => {
                     if let Some(name) = s.name {
-                        return self.interner.get(name).to_string();
+                        return CodeFragment::ok(self.interner.get(name).to_string());
                     }
-                    return "/* anonymous struct */".to_string();
+                    return CodeFragment::with_issue(
+                        "/* anonymous struct */",
+                        CodeIssue::new(CodeIssueKind::AnonymousType, "anonymous struct"),
+                    );
                 }
                 TypeSpec::Union(s) => {
                     if let Some(name) = s.name {
-                        return self.interner.get(name).to_string();
+                        return CodeFragment::ok(self.interner.get(name).to_string());
                     }
-                    return "/* anonymous union */".to_string();
+                    return CodeFragment::with_issue(
+                        "/* anonymous union */",
+                        CodeIssue::new(CodeIssueKind::AnonymousType, "anonymous union"),
+                    );
                 }
                 TypeSpec::Enum(e) => {
                     if let Some(name) = e.name {
-                        return self.interner.get(name).to_string();
+                        return CodeFragment::ok(self.interner.get(name).to_string());
                     }
-                    return "/* anonymous enum */".to_string();
+                    return CodeFragment::with_issue(
+                        "/* anonymous enum */",
+                        CodeIssue::new(CodeIssueKind::AnonymousType, "anonymous enum"),
+                    );
                 }
                 _ => continue,
             }
@@ -281,106 +480,138 @@ impl<'a> RustCodeGen<'a> {
 
         // unsigned/signed だけの場合は int
         if is_unsigned {
-            "c_uint".to_string()
+            CodeFragment::ok("c_uint")
         } else if specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Signed)) {
-            "c_int".to_string()
+            CodeFragment::ok("c_int")
         } else {
-            "/* unknown type */".to_string()
+            CodeFragment::with_issue(
+                "/* unknown type */",
+                CodeIssue::new(CodeIssueKind::UnknownType, "unknown type"),
+            )
         }
     }
 
     /// マクロをRust関数に変換
-    pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo, expr: &Expr) -> String {
+    pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo, expr: &Expr) -> CodeFragment {
         let name = self.interner.get(def.name);
 
         // パラメータを構築
-        let params = self.format_params(def, info);
+        let params_frag = self.format_params(def, info);
 
         // 戻り値型
         let ret_ty = info.return_type.as_deref().unwrap_or("()");
 
         // 本体
-        let body = self.expr_to_rust(expr);
+        let body_frag = self.expr_to_rust(expr);
 
-        format!(
+        let code = format!(
             "#[inline]\npub unsafe fn {}({}) -> {} {{\n    {}\n}}\n",
-            name, params, ret_ty, body
-        )
+            name, params_frag.code, ret_ty, body_frag.code
+        );
+
+        let mut result = CodeFragment::ok(code);
+        result.merge_issues(&params_frag);
+        result.merge_issues(&body_frag);
+        result
     }
 
     /// パラメータをフォーマット
-    fn format_params(&self, def: &MacroDef, info: &MacroInfo) -> String {
+    fn format_params(&self, def: &MacroDef, info: &MacroInfo) -> CodeFragment {
         if let MacroKind::Function { ref params, .. } = def.kind {
-            params.iter()
+            let mut all_issues = Vec::new();
+            let params_str: Vec<String> = params.iter()
                 .map(|p| {
                     let name = self.interner.get(*p);
                     let ty = info.param_types.get(p)
                         .map(|s| s.as_str())
-                        .unwrap_or("/* unknown */");
+                        .unwrap_or_else(|| {
+                            all_issues.push(CodeIssue::new(
+                                CodeIssueKind::UnknownType,
+                                format!("unknown type for parameter '{}'", name),
+                            ));
+                            "/* unknown */"
+                        });
                     format!("{}: {}", name, ty)
                 })
-                .collect::<Vec<_>>()
-                .join(", ")
+                .collect();
+            CodeFragment {
+                code: params_str.join(", "),
+                issues: all_issues,
+            }
         } else {
-            String::new()
+            CodeFragment::ok(String::new())
         }
     }
 
     // ==================== Inline Function Conversion ====================
 
     /// インライン関数をRust関数に変換
-    pub fn inline_fn_to_rust(&self, func: &FunctionDef) -> Result<String, String> {
+    pub fn inline_fn_to_rust(&self, func: &FunctionDef) -> CodeFragment {
         // 関数名を取得
-        let name = func.declarator.name
-            .map(|id| self.interner.get(id).to_string())
-            .ok_or_else(|| "anonymous function".to_string())?;
+        let name = match func.declarator.name {
+            Some(id) => self.interner.get(id).to_string(),
+            None => {
+                return CodeFragment::with_issue(
+                    "/* anonymous function */",
+                    CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "anonymous function"),
+                );
+            }
+        };
 
         // パラメータリストを取得
-        let params = self.extract_fn_params(&func.declarator.derived)?;
+        let params_frag = self.extract_fn_params(&func.declarator.derived);
 
         // 戻り値型を取得
-        let ret_ty = self.extract_return_type(&func.specs, &func.declarator.derived);
+        let ret_frag = self.extract_return_type(&func.specs, &func.declarator.derived);
 
         // 関数本体を変換
-        let body = self.compound_stmt_to_rust(&func.body, 1);
+        let body_frag = self.compound_stmt_to_rust(&func.body, 1);
 
-        Ok(format!(
+        let code = format!(
             "#[inline]\npub unsafe fn {}({}) -> {} {{\n{}}}\n",
-            name, params, ret_ty, body
-        ))
+            name, params_frag.code, ret_frag.code, body_frag.code
+        );
+
+        let mut result = CodeFragment::ok(code);
+        result.merge_issues(&params_frag);
+        result.merge_issues(&ret_frag);
+        result.merge_issues(&body_frag);
+        result
     }
 
     /// 関数パラメータを抽出してフォーマット
-    fn extract_fn_params(&self, derived: &[DerivedDecl]) -> Result<String, String> {
+    fn extract_fn_params(&self, derived: &[DerivedDecl]) -> CodeFragment {
         for d in derived {
             if let DerivedDecl::Function(param_list) = d {
-                let params: Vec<String> = param_list.params.iter()
-                    .filter_map(|p| self.param_decl_to_rust(p))
+                let param_frags: Vec<CodeFragment> = param_list.params.iter()
+                    .map(|p| self.param_decl_to_rust_frag(p))
                     .collect();
-                return Ok(params.join(", "));
+                return CodeFragment::concat(param_frags, ", ");
             }
         }
-        Ok(String::new())
+        CodeFragment::ok(String::new())
     }
 
-    /// パラメータ宣言をRust形式に変換
-    fn param_decl_to_rust(&self, param: &ParamDecl) -> Option<String> {
+    /// パラメータ宣言をRust形式に変換（CodeFragment版）
+    fn param_decl_to_rust_frag(&self, param: &ParamDecl) -> CodeFragment {
         let name = param.declarator.as_ref()
             .and_then(|d| d.name)
             .map(|id| self.interner.get(id).to_string())
             .unwrap_or_else(|| "_".to_string());
 
-        let ty = self.decl_to_rust_type(&param.specs, param.declarator.as_ref());
-        Some(format!("{}: {}", name, ty))
+        let ty_frag = self.decl_to_rust_type_frag(&param.specs, param.declarator.as_ref());
+        let mut result = CodeFragment::ok(format!("{}: {}", name, ty_frag.code));
+        result.merge_issues(&ty_frag);
+        result
     }
 
-    /// パラメータ宣言から型のみを取得（公開API）
+    /// パラメータ宣言から型のみを取得（公開API - 文字列版、後方互換性のため）
     pub fn param_decl_to_rust_type(&self, param: &ParamDecl) -> String {
-        self.decl_to_rust_type(&param.specs, param.declarator.as_ref())
+        self.decl_to_rust_type_frag(&param.specs, param.declarator.as_ref()).code
     }
 
-    /// 宣言からRust型を生成
-    fn decl_to_rust_type(&self, specs: &DeclSpecs, declarator: Option<&crate::ast::Declarator>) -> String {
+    /// 宣言からRust型を生成（CodeFragment版）
+    fn decl_to_rust_type_frag(&self, specs: &DeclSpecs, declarator: Option<&crate::ast::Declarator>) -> CodeFragment {
         let mut ptr_prefix = String::new();
 
         // ポインタを処理
@@ -396,231 +627,309 @@ impl<'a> RustCodeGen<'a> {
             }
         }
 
-        let base_ty = self.type_spec_to_rust(specs);
-        format!("{}{}", ptr_prefix, base_ty)
+        let base_frag = self.type_spec_to_rust(specs);
+        let mut result = CodeFragment::ok(format!("{}{}", ptr_prefix, base_frag.code));
+        result.merge_issues(&base_frag);
+        result
     }
 
     /// 戻り値型を抽出
-    fn extract_return_type(&self, specs: &DeclSpecs, derived: &[DerivedDecl]) -> String {
+    fn extract_return_type(&self, specs: &DeclSpecs, derived: &[DerivedDecl]) -> CodeFragment {
         // void の場合
         if specs.type_specs.iter().any(|s| matches!(s, TypeSpec::Void)) {
             // ポインタがあるか確認
             let has_pointer = derived.iter().any(|d| {
-                if let DerivedDecl::Pointer(_) = d { true } else { false }
+                matches!(d, DerivedDecl::Pointer(_))
             });
             if !has_pointer {
-                return "()".to_string();
+                return CodeFragment::ok("()");
             }
         }
 
         self.type_spec_to_rust(specs)
     }
 
-    /// 関数の戻り値型を抽出（公開API）
+    /// 関数の戻り値型を抽出（公開API - 文字列版、後方互換性のため）
     /// 戻り値: Some(型文字列) または None（voidの場合）
     pub fn extract_fn_return_type(&self, specs: &DeclSpecs, derived: &[DerivedDecl]) -> Option<String> {
-        let ty = self.extract_return_type(specs, derived);
-        if ty == "()" {
+        let ty_frag = self.extract_return_type(specs, derived);
+        if ty_frag.code == "()" {
             None
         } else {
-            Some(ty)
+            Some(ty_frag.code)
         }
     }
 
     /// 複合文をRustに変換
-    fn compound_stmt_to_rust(&self, stmt: &CompoundStmt, indent: usize) -> String {
-        let mut result = String::new();
+    fn compound_stmt_to_rust(&self, stmt: &CompoundStmt, indent: usize) -> CodeFragment {
+        let mut code = String::new();
+        let mut issues = Vec::new();
 
         for item in &stmt.items {
-            match item {
-                BlockItem::Decl(decl) => {
-                    result.push_str(&self.decl_to_rust(decl, indent));
-                }
-                BlockItem::Stmt(s) => {
-                    result.push_str(&self.stmt_to_rust(s, indent));
-                }
-            }
+            let frag = match item {
+                BlockItem::Decl(decl) => self.decl_to_rust(decl, indent),
+                BlockItem::Stmt(s) => self.stmt_to_rust(s, indent),
+            };
+            code.push_str(&frag.code);
+            issues.extend(frag.issues);
         }
 
-        result
+        CodeFragment { code, issues }
     }
 
     /// 宣言をRustに変換
-    fn decl_to_rust(&self, decl: &Declaration, indent: usize) -> String {
+    fn decl_to_rust(&self, decl: &Declaration, indent: usize) -> CodeFragment {
         let indent_str = "    ".repeat(indent);
-        let mut result = String::new();
+        let mut code = String::new();
+        let mut issues = Vec::new();
 
         for init_decl in &decl.declarators {
             let name = init_decl.declarator.name
                 .map(|id| self.interner.get(id).to_string())
                 .unwrap_or_else(|| "_".to_string());
 
-            let ty = self.decl_to_rust_type(&decl.specs, Some(&init_decl.declarator));
+            let ty_frag = self.decl_to_rust_type_frag(&decl.specs, Some(&init_decl.declarator));
+            issues.extend(ty_frag.issues);
 
             if let Some(ref init) = init_decl.init {
                 match init {
                     crate::ast::Initializer::Expr(expr) => {
-                        let expr_str = self.expr_to_rust(expr);
-                        result.push_str(&format!("{}let mut {}: {} = {};\n", indent_str, name, ty, expr_str));
+                        let expr_frag = self.expr_to_rust(expr);
+                        code.push_str(&format!("{}let mut {}: {} = {};\n", indent_str, name, ty_frag.code, expr_frag.code));
+                        issues.extend(expr_frag.issues);
                     }
                     crate::ast::Initializer::List(_) => {
-                        result.push_str(&format!("{}let mut {}: {} = /* initializer list */;\n", indent_str, name, ty));
+                        code.push_str(&format!("{}let mut {}: {} = /* initializer list */;\n", indent_str, name, ty_frag.code));
+                        issues.push(CodeIssue::new(CodeIssueKind::InitializerList, "initializer list"));
                     }
                 }
             } else {
-                result.push_str(&format!("{}let mut {}: {};\n", indent_str, name, ty));
+                code.push_str(&format!("{}let mut {}: {};\n", indent_str, name, ty_frag.code));
             }
         }
 
-        result
+        CodeFragment { code, issues }
     }
 
     /// 文をRustに変換
-    fn stmt_to_rust(&self, stmt: &Stmt, indent: usize) -> String {
+    fn stmt_to_rust(&self, stmt: &Stmt, indent: usize) -> CodeFragment {
         let indent_str = "    ".repeat(indent);
 
         match stmt {
             Stmt::Compound(compound) => {
                 let inner = self.compound_stmt_to_rust(compound, indent + 1);
-                format!("{}{{\n{}{}}}\n", indent_str, inner, indent_str)
+                let mut result = CodeFragment::ok(format!("{}{{\n{}{}}}\n", indent_str, inner.code, indent_str));
+                result.merge_issues(&inner);
+                result
             }
 
             Stmt::Expr(Some(expr), _) => {
-                let expr_str = self.expr_to_rust(expr);
-                format!("{}{};\n", indent_str, expr_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let mut result = CodeFragment::ok(format!("{}{};\n", indent_str, expr_frag.code));
+                result.merge_issues(&expr_frag);
+                result
             }
 
             Stmt::Expr(None, _) => {
                 // 空文
-                String::new()
+                CodeFragment::ok(String::new())
             }
 
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
-                let cond_str = self.expr_to_rust(cond);
-                let then_str = self.stmt_to_rust_block(then_stmt, indent);
+                let cond_frag = self.expr_to_rust(cond);
+                let then_frag = self.stmt_to_rust_block(then_stmt, indent);
 
-                if let Some(else_s) = else_stmt {
-                    let else_str = self.stmt_to_rust_block(else_s, indent);
-                    format!("{}if {} != 0 {} else {}\n", indent_str, cond_str, then_str, else_str)
+                let code = if let Some(else_s) = else_stmt {
+                    let else_frag = self.stmt_to_rust_block(else_s, indent);
+                    let mut result = CodeFragment::ok(format!(
+                        "{}if {} != 0 {} else {}\n",
+                        indent_str, cond_frag.code, then_frag.code, else_frag.code
+                    ));
+                    result.merge_issues(&cond_frag);
+                    result.merge_issues(&then_frag);
+                    result.merge_issues(&else_frag);
+                    return result;
                 } else {
-                    format!("{}if {} != 0 {}\n", indent_str, cond_str, then_str)
-                }
+                    format!("{}if {} != 0 {}\n", indent_str, cond_frag.code, then_frag.code)
+                };
+
+                let mut result = CodeFragment::ok(code);
+                result.merge_issues(&cond_frag);
+                result.merge_issues(&then_frag);
+                result
             }
 
             Stmt::While { cond, body, .. } => {
-                let cond_str = self.expr_to_rust(cond);
-                let body_str = self.stmt_to_rust_block(body, indent);
-                format!("{}while {} != 0 {}\n", indent_str, cond_str, body_str)
+                let cond_frag = self.expr_to_rust(cond);
+                let body_frag = self.stmt_to_rust_block(body, indent);
+                let mut result = CodeFragment::ok(format!(
+                    "{}while {} != 0 {}\n",
+                    indent_str, cond_frag.code, body_frag.code
+                ));
+                result.merge_issues(&cond_frag);
+                result.merge_issues(&body_frag);
+                result
             }
 
             Stmt::DoWhile { body, cond, .. } => {
-                let cond_str = self.expr_to_rust(cond);
-                let body_str = self.stmt_to_rust_block(body, indent);
-                format!("{}loop {}\n{}if !({} != 0) {{ break; }}\n", indent_str, body_str, indent_str, cond_str)
+                let cond_frag = self.expr_to_rust(cond);
+                let body_frag = self.stmt_to_rust_block(body, indent);
+                let mut result = CodeFragment::ok(format!(
+                    "{}loop {}\n{}if !({} != 0) {{ break; }}\n",
+                    indent_str, body_frag.code, indent_str, cond_frag.code
+                ));
+                result.merge_issues(&body_frag);
+                result.merge_issues(&cond_frag);
+                result
             }
 
             Stmt::For { init, cond, step, body, .. } => {
-                let mut result = String::new();
+                let mut code = String::new();
+                let mut issues = Vec::new();
 
                 // init
                 if let Some(init) = init {
                     match init {
                         ForInit::Expr(expr) => {
-                            result.push_str(&format!("{}{};\n", indent_str, self.expr_to_rust(expr)));
+                            let frag = self.expr_to_rust(expr);
+                            code.push_str(&format!("{}{};\n", indent_str, frag.code));
+                            issues.extend(frag.issues);
                         }
                         ForInit::Decl(decl) => {
-                            result.push_str(&self.decl_to_rust(decl, indent));
+                            let frag = self.decl_to_rust(decl, indent);
+                            code.push_str(&frag.code);
+                            issues.extend(frag.issues);
                         }
                     }
                 }
 
                 // while loop
-                let cond_str = cond.as_ref()
-                    .map(|c| format!("{} != 0", self.expr_to_rust(c)))
-                    .unwrap_or_else(|| "true".to_string());
+                let cond_str = if let Some(c) = cond {
+                    let frag = self.expr_to_rust(c);
+                    issues.extend(frag.issues);
+                    format!("{} != 0", frag.code)
+                } else {
+                    "true".to_string()
+                };
 
-                result.push_str(&format!("{}while {} {{\n", indent_str, cond_str));
+                code.push_str(&format!("{}while {} {{\n", indent_str, cond_str));
 
                 // body
-                if let Stmt::Compound(compound) = body.as_ref() {
-                    result.push_str(&self.compound_stmt_to_rust(compound, indent + 1));
+                let body_frag = if let Stmt::Compound(compound) = body.as_ref() {
+                    self.compound_stmt_to_rust(compound, indent + 1)
                 } else {
-                    result.push_str(&self.stmt_to_rust(body, indent + 1));
-                }
+                    self.stmt_to_rust(body, indent + 1)
+                };
+                code.push_str(&body_frag.code);
+                issues.extend(body_frag.issues);
 
                 // step
                 if let Some(step) = step {
-                    result.push_str(&format!("{}    {};\n", indent_str, self.expr_to_rust(step)));
+                    let frag = self.expr_to_rust(step);
+                    code.push_str(&format!("{}    {};\n", indent_str, frag.code));
+                    issues.extend(frag.issues);
                 }
 
-                result.push_str(&format!("{}}}\n", indent_str));
-                result
+                code.push_str(&format!("{}}}\n", indent_str));
+                CodeFragment { code, issues }
             }
 
             Stmt::Return(Some(expr), _) => {
-                let expr_str = self.expr_to_rust(expr);
-                format!("{}return {};\n", indent_str, expr_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let mut result = CodeFragment::ok(format!("{}return {};\n", indent_str, expr_frag.code));
+                result.merge_issues(&expr_frag);
+                result
             }
 
             Stmt::Return(None, _) => {
-                format!("{}return;\n", indent_str)
+                CodeFragment::ok(format!("{}return;\n", indent_str))
             }
 
             Stmt::Break(_) => {
-                format!("{}break;\n", indent_str)
+                CodeFragment::ok(format!("{}break;\n", indent_str))
             }
 
             Stmt::Continue(_) => {
-                format!("{}continue;\n", indent_str)
+                CodeFragment::ok(format!("{}continue;\n", indent_str))
             }
 
             Stmt::Goto(label, _) => {
                 let label_str = self.interner.get(*label);
-                format!("{}/* goto {} */\n", indent_str, label_str)
+                CodeFragment::with_issue(
+                    format!("{}/* goto {} */\n", indent_str, label_str),
+                    CodeIssue::new(CodeIssueKind::ControlFlow, format!("goto {}", label_str)),
+                )
             }
 
             Stmt::Label { name, stmt, .. } => {
                 let name_str = self.interner.get(*name);
-                let stmt_str = self.stmt_to_rust(stmt, indent);
-                format!("{}/* label: {} */\n{}", indent_str, name_str, stmt_str)
+                let stmt_frag = self.stmt_to_rust(stmt, indent);
+                let mut result = CodeFragment::with_issue(
+                    format!("{}/* label: {} */\n{}", indent_str, name_str, stmt_frag.code),
+                    CodeIssue::new(CodeIssueKind::ControlFlow, format!("label: {}", name_str)),
+                );
+                result.merge_issues(&stmt_frag);
+                result
             }
 
             Stmt::Switch { expr, body, .. } => {
-                let expr_str = self.expr_to_rust(expr);
-                let body_str = self.stmt_to_rust(body, indent);
-                format!("{}match {} {{\n{}{}    _ => {{}}\n{}}}\n",
-                    indent_str, expr_str, body_str, indent_str, indent_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let body_frag = self.stmt_to_rust(body, indent);
+                let mut result = CodeFragment::ok(format!(
+                    "{}match {} {{\n{}{}    _ => {{}}\n{}}}\n",
+                    indent_str, expr_frag.code, body_frag.code, indent_str, indent_str
+                ));
+                result.merge_issues(&expr_frag);
+                result.merge_issues(&body_frag);
+                result
             }
 
             Stmt::Case { expr, stmt, .. } => {
-                let expr_str = self.expr_to_rust(expr);
-                let stmt_str = self.stmt_to_rust(stmt, indent + 1);
-                format!("{}    {} => {{\n{}{}}}\n", indent_str, expr_str, stmt_str, indent_str)
+                let expr_frag = self.expr_to_rust(expr);
+                let stmt_frag = self.stmt_to_rust(stmt, indent + 1);
+                let mut result = CodeFragment::ok(format!(
+                    "{}    {} => {{\n{}{}}}\n",
+                    indent_str, expr_frag.code, stmt_frag.code, indent_str
+                ));
+                result.merge_issues(&expr_frag);
+                result.merge_issues(&stmt_frag);
+                result
             }
 
             Stmt::Default { stmt, .. } => {
-                let stmt_str = self.stmt_to_rust(stmt, indent + 1);
-                format!("{}    _ => {{\n{}{}}}\n", indent_str, stmt_str, indent_str)
+                let stmt_frag = self.stmt_to_rust(stmt, indent + 1);
+                let mut result = CodeFragment::ok(format!(
+                    "{}    _ => {{\n{}{}}}\n",
+                    indent_str, stmt_frag.code, indent_str
+                ));
+                result.merge_issues(&stmt_frag);
+                result
             }
 
             Stmt::Asm { .. } => {
-                format!("{}/* asm */\n", indent_str)
+                CodeFragment::with_issue(
+                    format!("{}/* asm */\n", indent_str),
+                    CodeIssue::new(CodeIssueKind::InlineAsm, "inline assembly"),
+                )
             }
         }
     }
 
     /// 文をブロック形式に変換（if/while等のbody用）
-    fn stmt_to_rust_block(&self, stmt: &Stmt, indent: usize) -> String {
+    fn stmt_to_rust_block(&self, stmt: &Stmt, indent: usize) -> CodeFragment {
+        let indent_str = "    ".repeat(indent);
         match stmt {
             Stmt::Compound(compound) => {
                 let inner = self.compound_stmt_to_rust(compound, indent + 1);
-                let indent_str = "    ".repeat(indent);
-                format!("{{\n{}{}}}", inner, indent_str)
+                let mut result = CodeFragment::ok(format!("{{\n{}{}}}", inner.code, indent_str));
+                result.merge_issues(&inner);
+                result
             }
             _ => {
                 let inner = self.stmt_to_rust(stmt, indent + 1);
-                let indent_str = "    ".repeat(indent);
-                format!("{{\n{}{}}}", inner, indent_str)
+                let mut result = CodeFragment::ok(format!("{{\n{}{}}}", inner.code, indent_str));
+                result.merge_issues(&inner);
+                result
             }
         }
     }
@@ -678,7 +987,7 @@ mod tests {
         let codegen = RustCodeGen::new(&interner, &fields);
 
         let expr = Expr::IntLit(42, SourceLocation::default());
-        assert_eq!(codegen.expr_to_rust(&expr), "42");
+        assert_eq!(codegen.expr_to_rust(&expr).code, "42");
     }
 
     #[test]
@@ -698,7 +1007,7 @@ mod tests {
             rhs: Box::new(Expr::Ident(y, loc.clone())),
             loc,
         };
-        assert_eq!(codegen.expr_to_rust(&expr), "(x + y)");
+        assert_eq!(codegen.expr_to_rust(&expr).code, "(x + y)");
     }
 
     #[test]
@@ -718,6 +1027,6 @@ mod tests {
             member: sv_any,
             loc,
         };
-        assert_eq!(codegen.expr_to_rust(&expr), "(*sv).sv_any");
+        assert_eq!(codegen.expr_to_rust(&expr).code, "(*sv).sv_any");
     }
 }

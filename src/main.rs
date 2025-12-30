@@ -506,9 +506,17 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
             }
         };
 
-        let rust_code = codegen.macro_to_rust_fn(def, info, &expr);
-        println!("{}", rust_code);
-        success_count += 1;
+        let frag = codegen.macro_to_rust_fn(def, info, &expr);
+        if frag.has_issues() {
+            println!("// FAILED: {} - {}", name_str, frag.issues_summary());
+            for line in frag.code.lines() {
+                println!("// {}", line);
+            }
+            failure_count += 1;
+        } else {
+            println!("{}", frag.code);
+            success_count += 1;
+        }
     }
 
     eprintln!("Macros: {} success, {} failures (skipped {} object macros)",
