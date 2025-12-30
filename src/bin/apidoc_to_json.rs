@@ -1,8 +1,8 @@
 //! Perl apidoc (embed.fnc) を JSON に変換するツール
 //!
 //! Usage:
-//!   apidoc-to-json embed.fnc              # 標準出力へJSON出力
-//!   apidoc-to-json embed.fnc -o out.json  # ファイルへ保存
+//!   libperl-apidoc-to-json embed.fnc              # 標準出力へJSON出力
+//!   libperl-apidoc-to-json embed.fnc -o out.json  # ファイルへ保存
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -12,7 +12,7 @@ use clap::Parser;
 use tinycc_macro_bindgen::ApidocDict;
 
 #[derive(Parser)]
-#[command(name = "apidoc-to-json")]
+#[command(name = "libperl-apidoc-to-json")]
 #[command(version, about = "Convert Perl embed.fnc (apidoc format) to JSON")]
 struct Cli {
     /// 入力ファイル (embed.fnc)

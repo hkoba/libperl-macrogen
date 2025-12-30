@@ -18,5 +18,5 @@ name = "tinycc-macro-bindgen"
 path = "src/main.rs"
 
 [[bin]]
-name = "apidoc-to-json"
+name = "libperl-apidoc-to-json"
 path = "src/bin/apidoc_to_json.rs"
