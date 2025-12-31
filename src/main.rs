@@ -90,6 +90,10 @@ struct Cli {
     /// デバッグ: マクロ変換を即座に出力
     #[arg(long = "debug-macro-gen")]
     debug_macro_gen: bool,
+
+    /// 進行状況を表示
+    #[arg(long = "progress")]
+    progress: bool,
 }
 
 fn main() {
@@ -137,7 +141,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --gen-rust-fnsはライブラリAPIを使用するため、プリプロセッサを作成しない
     if cli.gen_rust_fns {
         let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
-        return run_gen_rust_fns_lib(&input, &bindings, cli.apidoc.as_ref(), cli.output.as_ref(), &config);
+        return run_gen_rust_fns_lib(&input, &bindings, cli.apidoc.as_ref(), cli.output.as_ref(), &config, cli.progress);
     }
 
     // プリプロセッサを初期化してファイルを処理
@@ -363,6 +367,7 @@ fn run_gen_rust_fns_lib(
     apidoc_path: Option<&PathBuf>,
     output: Option<&PathBuf>,
     pp_config: &PPConfig,
+    progress: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // MacrogenBuilderで設定を構築
     let mut builder = MacrogenBuilder::new(input, bindings_path)
@@ -370,7 +375,8 @@ fn run_gen_rust_fns_lib(
         .add_field_type("sv_any", "sv")
         .add_field_type("sv_refcnt", "sv")
         .add_field_type("sv_flags", "sv")
-        .verbose(true);
+        .verbose(true)
+        .progress(progress);
 
     if let Some(apidoc) = apidoc_path {
         builder = builder.apidoc(apidoc);

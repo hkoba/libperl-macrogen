@@ -46,6 +46,9 @@ pub struct MacrogenConfig {
 
     /// 冗長な進捗表示 (stderr)
     pub verbose: bool,
+
+    /// 処理進行状況を表示 (stderr)
+    pub progress: bool,
 }
 
 impl Default for MacrogenConfig {
@@ -60,6 +63,7 @@ impl Default for MacrogenConfig {
             include_inline_functions: true,
             include_macro_functions: true,
             verbose: false,
+            progress: false,
         }
     }
 }
@@ -140,6 +144,12 @@ impl MacrogenBuilder {
     /// 冗長出力
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.config.verbose = verbose;
+        self
+    }
+
+    /// 進行状況表示
+    pub fn progress(mut self, progress: bool) -> Self {
+        self.config.progress = progress;
         self
     }
 
@@ -261,12 +271,20 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
         fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
     }
 
-    // 3. プリプロセッサを初期化
+    // 3. プリプロセッサを初期化（第1パス：マクロ分析用）
+    if config.progress {
+        eprintln!("[progress] Starting 1st pass preprocessing...");
+    }
+
     let mut pp = Preprocessor::new(config.pp_config.clone());
     pp.process_file(&config.input)
         .map_err(|e| MacrogenError::Preprocess(format_error(&e, &pp)))?;
 
-    // 4. パースしてフィールド辞書を構築 & inline関数を収集
+    if config.progress {
+        eprintln!("[progress] 1st pass preprocessing done. Starting parsing...");
+    }
+
+    // 4. パースしてフィールド辞書を構築 + inline関数を収集
     let parser_result = Parser::new(&mut pp);
     let mut parser = match parser_result {
         Ok(p) => p,
@@ -280,22 +298,24 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
             fields_dict.collect_from_external_decl(decl, path);
 
             // inline関数を収集（対象ディレクトリ内のみ）
-            let path_str = path.to_string_lossy();
-            let is_target = if config.fields_target_dirs.is_empty() {
-                path_str.contains("/usr/lib64/perl5/CORE")
-            } else {
-                config.fields_target_dirs.iter().any(|d| path_str.contains(&d.to_string_lossy().as_ref()))
-            };
+            if config.include_inline_functions {
+                let path_str = path.to_string_lossy().to_string();
+                let is_target = if config.fields_target_dirs.is_empty() {
+                    path_str.contains("/usr/lib64/perl5/CORE")
+                } else {
+                    config.fields_target_dirs.iter().any(|d| path_str.contains(&d.to_string_lossy().as_ref()))
+                };
 
-            if is_target {
-                if let ExternalDecl::FunctionDef(func_def) = decl {
-                    if func_def.specs.is_inline {
-                        if let Some(name) = func_def.declarator.name {
-                            inline_functions.push((
-                                interner.get(name).to_string(),
-                                decl.clone(),
-                                path_str.to_string(),
-                            ));
+                if is_target {
+                    if let ExternalDecl::FunctionDef(func_def) = decl {
+                        if func_def.specs.is_inline {
+                            if let Some(name) = func_def.declarator.name {
+                                inline_functions.push((
+                                    interner.get(name).to_string(),
+                                    decl.clone(),
+                                    path_str.to_string(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -305,6 +325,14 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     });
 
     let typedefs = parser.typedefs().clone();
+
+    if config.progress {
+        eprintln!("[progress] Parsing done.");
+    }
+
+    if config.verbose && config.include_inline_functions {
+        eprintln!("Inline functions collected: {}", inline_functions.len());
+    }
 
     // 5. カスタムフィールド型を登録
     {
@@ -359,28 +387,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
         }
     }
 
-    // 9. inline関数を確定済みとして追加
-    inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let before_inline = infer_ctx.confirmed_count();
-    for (_name, decl, _path) in &inline_functions {
-        if let ExternalDecl::FunctionDef(func_def) = decl {
-            if let Some(sig) = extract_inline_fn_signature(func_def, interner, &codegen) {
-                infer_ctx.add_confirmed(sig);
-            }
-        }
-    }
-
-    if config.verbose {
-        let after_inline = infer_ctx.confirmed_count();
-        eprintln!(
-            "After inline functions: {} confirmed (+{} inline)",
-            after_inline,
-            after_inline - before_inline
-        );
-    }
-
-    // 10. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
+    // 9. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
     let files = pp.files();
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
     analyzer.set_typedefs(typedefs.clone());
@@ -402,6 +409,27 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     if config.verbose {
         eprintln!("Constant macros identified: {}", analyzer.constant_macros().len());
         eprintln!("THX-dependent macros identified: {}", analyzer.thx_macros().len());
+    }
+
+    // 10. inline関数を確定済みとして追加
+    inline_functions.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let before_inline = infer_ctx.confirmed_count();
+    for (_name, decl, _path) in &inline_functions {
+        if let ExternalDecl::FunctionDef(func_def) = decl {
+            if let Some(sig) = extract_inline_fn_signature(func_def, interner, &codegen) {
+                infer_ctx.add_confirmed(sig);
+            }
+        }
+    }
+
+    if config.verbose {
+        let after_inline = infer_ctx.confirmed_count();
+        eprintln!(
+            "After inline functions: {} confirmed (+{} inline)",
+            after_inline,
+            after_inline - before_inline
+        );
     }
 
     // 使用された定数マクロを収集
