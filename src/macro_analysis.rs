@@ -61,8 +61,8 @@ pub struct MacroAnalyzer<'a> {
     info: HashMap<InternedStr, MacroInfo>,
     /// フィールド辞書（型推論用）
     fields_dict: &'a FieldsDict,
-    /// 対象ディレクトリ
-    target_dirs: Vec<String>,
+    /// 対象ディレクトリ（単一）
+    target_dir: String,
     /// typedef名のセット（パース時のキャスト式判定用）
     typedefs: HashSet<InternedStr>,
     /// 定数マクロの集合（展開を抑制する対象）
@@ -74,6 +74,9 @@ pub struct MacroAnalyzer<'a> {
     /// THX依存関数の集合（bindings.rsから取得）
     thx_functions: HashSet<String>,
 }
+
+/// デフォルトのターゲットディレクトリ
+pub const DEFAULT_TARGET_DIR: &str = "/usr/lib64/perl5/CORE";
 
 impl<'a> MacroAnalyzer<'a> {
     /// 新しい解析器を作成
@@ -87,7 +90,7 @@ impl<'a> MacroAnalyzer<'a> {
             files,
             info: HashMap::new(),
             fields_dict,
-            target_dirs: vec!["/usr/lib64/perl5/CORE".to_string()],
+            target_dir: DEFAULT_TARGET_DIR.to_string(),
             typedefs: HashSet::new(),
             constant_macros: HashSet::new(),
             bindings_consts: HashSet::new(),
@@ -102,8 +105,8 @@ impl<'a> MacroAnalyzer<'a> {
     }
 
     /// 対象ディレクトリを設定
-    pub fn set_target_dirs(&mut self, dirs: Vec<String>) {
-        self.target_dirs = dirs;
+    pub fn set_target_dir(&mut self, dir: &str) {
+        self.target_dir = dir.to_string();
     }
 
     /// bindings.rs の定数名を設定
@@ -885,15 +888,7 @@ impl<'a> MacroAnalyzer<'a> {
     fn is_target_location(&self, loc: &SourceLocation) -> bool {
         let path = self.files.get_path(loc.file_id);
         let path_str = path.to_string_lossy();
-
-        // 対象ディレクトリのいずれかに含まれるかチェック
-        for target_dir in &self.target_dirs {
-            if path_str.contains(target_dir) {
-                return true;
-            }
-        }
-
-        false
+        path_str.starts_with(&self.target_dir)
     }
 
     /// 解析結果を取得

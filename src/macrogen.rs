@@ -15,6 +15,9 @@ use crate::{
     get_perl_config, PerlConfigError,
 };
 
+/// デフォルトのターゲットディレクトリ
+pub const DEFAULT_TARGET_DIR: &str = "/usr/lib64/perl5/CORE";
+
 /// Rust関数生成の設定
 #[derive(Debug, Clone)]
 pub struct MacrogenConfig {
@@ -31,8 +34,9 @@ pub struct MacrogenConfig {
     /// プリプロセッサ設定
     pub pp_config: PPConfig,
 
-    /// フィールド辞書の対象ディレクトリ
-    pub fields_target_dirs: Vec<PathBuf>,
+    /// ターゲットディレクトリ（単一）
+    /// デフォルト: /usr/lib64/perl5/CORE
+    pub target_dir: PathBuf,
 
     /// カスタムフィールド型マッピング (フィールド名 -> 構造体名)
     /// 例: ("sv_flags", "sv") で sv_flags -> sv型と推論
@@ -58,7 +62,7 @@ impl Default for MacrogenConfig {
             bindings: PathBuf::new(),
             apidoc: None,
             pp_config: PPConfig::default(),
-            fields_target_dirs: vec![],
+            target_dir: PathBuf::from(DEFAULT_TARGET_DIR),
             field_type_overrides: vec![],
             include_inline_functions: true,
             include_macro_functions: true,
@@ -105,9 +109,9 @@ impl MacrogenBuilder {
         self
     }
 
-    /// フィールド辞書対象ディレクトリを追加
-    pub fn add_fields_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.fields_target_dirs.push(path.into());
+    /// ターゲットディレクトリを設定
+    pub fn target_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.target_dir = path.into();
         self
     }
 
@@ -263,13 +267,8 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
     // 2. フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
-    for dir in &config.fields_target_dirs {
-        fields_dict.add_target_dir(&dir.to_string_lossy());
-    }
-    // デフォルトで /usr/lib64/perl5/CORE を対象に（空の場合）
-    if config.fields_target_dirs.is_empty() {
-        fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
-    }
+    let target_dir_str = config.target_dir.to_string_lossy().to_string();
+    fields_dict.set_target_dir(&target_dir_str);
 
     // 3. プリプロセッサを初期化（第1パス：マクロ分析用）
     if config.progress {
@@ -299,12 +298,8 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
             // inline関数を収集（対象ディレクトリ内のみ）
             if config.include_inline_functions {
-                let path_str = path.to_string_lossy().to_string();
-                let is_target = if config.fields_target_dirs.is_empty() {
-                    path_str.contains("/usr/lib64/perl5/CORE")
-                } else {
-                    config.fields_target_dirs.iter().any(|d| path_str.contains(&d.to_string_lossy().as_ref()))
-                };
+                let path_str = path.to_string_lossy();
+                let is_target = path_str.starts_with(&target_dir_str);
 
                 if is_target {
                     if let ExternalDecl::FunctionDef(func_def) = decl {
@@ -390,6 +385,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     // 9. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
     let files = pp.files();
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    analyzer.set_target_dir(&target_dir_str);
     analyzer.set_typedefs(typedefs.clone());
     analyzer.set_bindings_consts(bindings_consts.clone());
     analyzer.set_thx_functions(thx_functions.clone());
@@ -805,7 +801,7 @@ mod tests {
     fn test_builder_with_options() {
         let config = MacrogenBuilder::new("wrapper.h", "out/bindings.rs")
             .apidoc("embed.json")
-            .add_fields_dir("/usr/lib64/perl5/CORE")
+            .target_dir("/custom/target/dir")
             .add_include_path("/usr/include")
             .define("FOO", Some("1".to_string()))
             .define("BAR", None)
@@ -814,7 +810,7 @@ mod tests {
             .build();
 
         assert_eq!(config.apidoc, Some(PathBuf::from("embed.json")));
-        assert_eq!(config.fields_target_dirs.len(), 1);
+        assert_eq!(config.target_dir, PathBuf::from("/custom/target/dir"));
         assert_eq!(config.pp_config.include_paths.len(), 1);
         assert_eq!(config.pp_config.predefined.len(), 2);
         assert!(config.include_inline_functions);

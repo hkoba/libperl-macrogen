@@ -15,8 +15,8 @@ pub struct FieldsDict {
     /// フィールド名 -> 構造体名のセット
     /// (同じフィールド名が複数の構造体で使われる可能性があるためHashSet)
     field_to_structs: HashMap<InternedStr, HashSet<InternedStr>>,
-    /// 収集対象のディレクトリパス
-    target_dirs: Vec<String>,
+    /// 収集対象のディレクトリパス（単一）
+    target_dir: Option<String>,
 }
 
 impl FieldsDict {
@@ -25,18 +25,20 @@ impl FieldsDict {
         Self::default()
     }
 
-    /// 収集対象ディレクトリを追加
-    pub fn add_target_dir(&mut self, dir: &str) {
-        self.target_dirs.push(dir.to_string());
+    /// 収集対象ディレクトリを設定
+    pub fn set_target_dir(&mut self, dir: &str) {
+        self.target_dir = Some(dir.to_string());
     }
 
     /// 指定されたパスが収集対象かどうかを判定
     fn is_target_path(&self, path: &Path) -> bool {
-        if self.target_dirs.is_empty() {
-            return true; // ターゲットが指定されていなければ全て対象
+        match &self.target_dir {
+            None => true, // ターゲットが指定されていなければ全て対象
+            Some(dir) => {
+                let path_str = path.to_string_lossy();
+                path_str.starts_with(dir)
+            }
         }
-        let path_str = path.to_string_lossy();
-        self.target_dirs.iter().any(|dir| path_str.starts_with(dir))
     }
 
     /// 外部宣言からフィールド情報を収集

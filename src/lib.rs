@@ -53,6 +53,7 @@ pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 // マクロ生成ライブラリ
 pub use macrogen::{
     generate, MacrogenBuilder, MacrogenConfig, MacrogenError, MacrogenResult, MacrogenStats,
+    DEFAULT_TARGET_DIR,
 };
 
 #[cfg(test)]

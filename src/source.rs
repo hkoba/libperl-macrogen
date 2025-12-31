@@ -72,6 +72,14 @@ impl FileRegistry {
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
     }
+
+    /// 登録されたファイルをイテレート
+    pub fn iter(&self) -> impl Iterator<Item = (FileId, &Path)> {
+        self.paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (FileId(i as u32), p.as_path()))
+    }
 }
 
 #[cfg(test)]

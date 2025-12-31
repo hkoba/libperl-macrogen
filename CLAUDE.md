@@ -48,6 +48,12 @@ This project is developed in phases. Each phase should:
 - Commit after each phase is complete
 - Use descriptive commit messages explaining the changes
 
+### Documentation Updates
+
+When making changes to `src/macrogen.rs` (especially `generate()` function):
+- Update `doc/macrogen-flow.md` to reflect the changes
+- Keep the processing flow description in sync with the actual code
+
 ### Test Files Location
 
 Temporary test files should be placed in `./tmp/` directory, not `/tmp`.

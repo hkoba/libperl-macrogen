@@ -12,7 +12,7 @@ use clap::Parser as ClapParser;
 use libperl_macrogen::{
     generate, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer,
     MacroCategory, MacrogenBuilder, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict,
-    SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
+    SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter, DEFAULT_TARGET_DIR,
 };
 
 /// コマンドライン引数
@@ -63,9 +63,9 @@ struct Cli {
     #[arg(long = "dump-fields-dict")]
     dump_fields_dict: bool,
 
-    /// フィールド辞書収集対象ディレクトリ（複数指定可）
-    #[arg(long = "fields-dir")]
-    fields_dir: Vec<PathBuf>,
+    /// ターゲットディレクトリ（デフォルト: /usr/lib64/perl5/CORE）
+    #[arg(long = "target-dir")]
+    target_dir: Option<PathBuf>,
 
     /// Rustバインディングファイルから宣言を抽出
     #[arg(long = "parse-rust-bindings")]
@@ -161,10 +161,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         run_typed_sexp(&mut pp, cli.output.as_ref())?;
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
-        run_dump_fields_dict(&mut pp, &cli.fields_dir)?;
+        run_dump_fields_dict(&mut pp, cli.target_dir.as_ref())?;
     } else if cli.analyze_macros {
         // --analyze-macros: マクロ関数を解析
-        run_analyze_macros(&mut pp, &cli.fields_dir)?;
+        run_analyze_macros(&mut pp, cli.target_dir.as_ref())?;
     } else if cli.debug_macro_gen {
         // --debug-macro-gen: デバッグ用即時出力モード
         run_debug_macro_gen(&mut pp)?;
@@ -259,19 +259,15 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
 }
 
 /// 構造体フィールド辞書をダンプ
-fn run_dump_fields_dict(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dump_fields_dict(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
 
-    // 収集対象ディレクトリを設定
-    for dir in fields_dirs {
-        fields_dict.add_target_dir(&dir.to_string_lossy());
-    }
-
-    // デフォルトで /usr/lib64/perl5/CORE を対象に
-    if fields_dirs.is_empty() {
-        fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
-    }
+    // ターゲットディレクトリを設定
+    let target_dir_str = target_dir
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| DEFAULT_TARGET_DIR.to_string());
+    fields_dict.set_target_dir(&target_dir_str);
 
     let mut parser = match Parser::new(pp) {
         Ok(p) => p,
@@ -302,17 +298,15 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Resul
 }
 
 /// マクロ関数を解析
-fn run_analyze_macros(pp: &mut Preprocessor, fields_dirs: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
-    // 収集対象ディレクトリを設定
-    for dir in fields_dirs {
-        fields_dict.add_target_dir(&dir.to_string_lossy());
-    }
-    if fields_dirs.is_empty() {
-        fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
-    }
+    // ターゲットディレクトリを設定
+    let target_dir_str = target_dir
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| DEFAULT_TARGET_DIR.to_string());
+    fields_dict.set_target_dir(&target_dir_str);
 
     // パースしてフィールド辞書を構築
     let mut parser = match Parser::new(pp) {
@@ -401,7 +395,7 @@ fn run_gen_rust_fns_lib(
 fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
     // フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
-    fields_dict.add_target_dir("/usr/lib64/perl5/CORE");
+    fields_dict.set_target_dir(DEFAULT_TARGET_DIR);
 
     // パースしてフィールド辞書を構築
     let mut parser = match Parser::new(pp) {
