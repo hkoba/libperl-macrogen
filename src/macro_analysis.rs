@@ -63,6 +63,10 @@ pub struct MacroAnalyzer<'a> {
     target_dirs: Vec<String>,
     /// typedef名のセット（パース時のキャスト式判定用）
     typedefs: HashSet<InternedStr>,
+    /// 定数マクロの集合（展開を抑制する対象）
+    constant_macros: HashSet<InternedStr>,
+    /// bindings.rs に定義されている定数名
+    bindings_consts: HashSet<String>,
 }
 
 impl<'a> MacroAnalyzer<'a> {
@@ -79,6 +83,8 @@ impl<'a> MacroAnalyzer<'a> {
             fields_dict,
             target_dirs: vec!["/usr/lib64/perl5/CORE".to_string()],
             typedefs: HashSet::new(),
+            constant_macros: HashSet::new(),
+            bindings_consts: HashSet::new(),
         }
     }
 
@@ -90,6 +96,108 @@ impl<'a> MacroAnalyzer<'a> {
     /// 対象ディレクトリを設定
     pub fn set_target_dirs(&mut self, dirs: Vec<String>) {
         self.target_dirs = dirs;
+    }
+
+    /// bindings.rs の定数名を設定
+    pub fn set_bindings_consts(&mut self, consts: HashSet<String>) {
+        self.bindings_consts = consts;
+    }
+
+    /// 定数マクロを識別する
+    ///
+    /// Object マクロで本体が定数式のものを反復的に特定する。
+    /// 定数式は以下で構成される:
+    /// - 整数リテラル
+    /// - 他の定数マクロへの参照
+    /// - bindings.rs の定数への参照
+    /// - 演算子 (+, -, *, /, |, &, ^, ~, <<, >>, (, ))
+    pub fn identify_constant_macros(&mut self, macros: &MacroTable) {
+        // 反復的に定数マクロを識別
+        loop {
+            let mut found_new = false;
+
+            for (name, def) in macros.iter() {
+                // 既に定数マクロとして識別済みならスキップ
+                if self.constant_macros.contains(name) {
+                    continue;
+                }
+
+                // 関数マクロは対象外
+                if def.is_function() {
+                    continue;
+                }
+
+                // 本体が定数式かチェック
+                if self.is_constant_body(&def.body, macros) {
+                    self.constant_macros.insert(*name);
+                    found_new = true;
+                }
+            }
+
+            // 新しい定数マクロが見つからなければ終了
+            if !found_new {
+                break;
+            }
+        }
+    }
+
+    /// トークン列が定数式かどうかをチェック
+    fn is_constant_body(&self, tokens: &[Token], macros: &MacroTable) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+
+        for token in tokens {
+            match &token.kind {
+                // 整数リテラルは OK
+                TokenKind::IntLit(_) | TokenKind::UIntLit(_) => {}
+
+                // 識別子の場合
+                TokenKind::Ident(id) => {
+                    let name_str = self.interner.get(*id);
+
+                    // bindings.rs に定義されている定数ならOK
+                    if self.bindings_consts.contains(name_str) {
+                        continue;
+                    }
+
+                    // 既知の定数マクロならOK
+                    if self.constant_macros.contains(id) {
+                        continue;
+                    }
+
+                    // マクロだが定数マクロではない場合は NG
+                    if macros.is_defined(*id) {
+                        return false;
+                    }
+
+                    // マクロでもbindings定数でもない識別子は NG
+                    return false;
+                }
+
+                // 算術・ビット演算子は OK
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Star
+                | TokenKind::Slash | TokenKind::Percent
+                | TokenKind::Pipe | TokenKind::Amp | TokenKind::Caret
+                | TokenKind::Tilde | TokenKind::LtLt | TokenKind::GtGt
+                | TokenKind::LParen | TokenKind::RParen => {}
+
+                // それ以外は NG
+                _ => return false,
+            }
+        }
+
+        true
+    }
+
+    /// 指定された名前が定数マクロかどうか
+    pub fn is_constant_macro(&self, name: InternedStr) -> bool {
+        self.constant_macros.contains(&name)
+    }
+
+    /// 定数マクロの集合を取得
+    pub fn constant_macros(&self) -> &HashSet<InternedStr> {
+        &self.constant_macros
     }
 
     /// マクロテーブルを解析
@@ -199,6 +307,8 @@ impl<'a> MacroAnalyzer<'a> {
     }
 
     /// マクロ本体を再帰的に展開（使用マクロを追跡）
+    ///
+    /// 定数マクロは展開せず、識別子として保持する。
     fn expand_macro_body(
         &self,
         def: &MacroDef,
@@ -216,6 +326,19 @@ impl<'a> MacroAnalyzer<'a> {
         for token in &def.body {
             match &token.kind {
                 TokenKind::Ident(ident) => {
+                    // 定数マクロは展開しない（識別子として保持）
+                    if self.constant_macros.contains(ident) {
+                        result.push(token.clone());
+                        continue;
+                    }
+
+                    // bindings.rs の定数も展開しない
+                    let name_str = self.interner.get(*ident);
+                    if self.bindings_consts.contains(name_str) {
+                        result.push(token.clone());
+                        continue;
+                    }
+
                     // マクロ展開
                     if let Some(macro_def) = macros.get(*ident) {
                         // オブジェクトマクロの場合は展開

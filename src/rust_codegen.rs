@@ -2,12 +2,14 @@
 //!
 //! C言語のマクロ関数をRust関数に変換する。
 
+use std::collections::HashSet;
+
 use crate::ast::{
     AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl,
     Expr, ForInit, FunctionDef, ParamDecl, Stmt, TypeName, TypeSpec,
 };
 use crate::fields_dict::FieldsDict;
-use crate::intern::StringInterner;
+use crate::intern::{InternedStr, StringInterner};
 use crate::macro_analysis::MacroInfo;
 use crate::macro_def::{MacroDef, MacroKind};
 
@@ -20,6 +22,8 @@ pub struct CodeFragment {
     pub code: String,
     /// 生成中に発生した問題
     pub issues: Vec<CodeIssue>,
+    /// 使用された定数マクロ
+    pub used_constants: HashSet<InternedStr>,
 }
 
 /// コード生成で発生した問題
@@ -56,6 +60,7 @@ impl CodeFragment {
         Self {
             code: code.into(),
             issues: vec![],
+            used_constants: HashSet::new(),
         }
     }
 
@@ -64,6 +69,18 @@ impl CodeFragment {
         Self {
             code: code.into(),
             issues: vec![issue],
+            used_constants: HashSet::new(),
+        }
+    }
+
+    /// 定数参照あり
+    pub fn with_constant(code: impl Into<String>, constant: InternedStr) -> Self {
+        let mut used_constants = HashSet::new();
+        used_constants.insert(constant);
+        Self {
+            code: code.into(),
+            issues: vec![],
+            used_constants,
         }
     }
 
@@ -72,22 +89,31 @@ impl CodeFragment {
         !self.issues.is_empty()
     }
 
-    /// 子の CodeFragment からの問題をマージ
-    pub fn merge_issues(&mut self, other: &CodeFragment) {
+    /// 子の CodeFragment からの問題と定数参照をマージ
+    pub fn merge(&mut self, other: &CodeFragment) {
         self.issues.extend(other.issues.iter().cloned());
+        self.used_constants.extend(other.used_constants.iter().cloned());
+    }
+
+    /// 子の CodeFragment からの問題をマージ（後方互換）
+    pub fn merge_issues(&mut self, other: &CodeFragment) {
+        self.merge(other);
     }
 
     /// 複数の CodeFragment を結合
     pub fn concat(fragments: impl IntoIterator<Item = CodeFragment>, sep: &str) -> Self {
         let mut code_parts = Vec::new();
         let mut all_issues = Vec::new();
+        let mut all_constants = HashSet::new();
         for frag in fragments {
             code_parts.push(frag.code);
             all_issues.extend(frag.issues);
+            all_constants.extend(frag.used_constants);
         }
         Self {
             code: code_parts.join(sep),
             issues: all_issues,
+            used_constants: all_constants,
         }
     }
 
@@ -117,6 +143,8 @@ pub struct RustCodeGen<'a> {
     /// フィールド辞書（型推論用）
     #[allow(dead_code)]
     fields_dict: &'a FieldsDict,
+    /// 定数マクロの集合（展開されずに識別子として残ったもの）
+    constant_macros: HashSet<InternedStr>,
 }
 
 impl<'a> RustCodeGen<'a> {
@@ -125,7 +153,18 @@ impl<'a> RustCodeGen<'a> {
         Self {
             interner,
             fields_dict,
+            constant_macros: HashSet::new(),
         }
+    }
+
+    /// 定数マクロ情報を設定
+    pub fn set_constant_macros(&mut self, constants: HashSet<InternedStr>) {
+        self.constant_macros = constants;
+    }
+
+    /// 定数マクロかどうかをチェック
+    fn is_constant_macro(&self, name: InternedStr) -> bool {
+        self.constant_macros.contains(&name)
     }
 
     /// 式をRustコードに変換（Synthesized Attribute 版）
@@ -144,7 +183,14 @@ impl<'a> RustCodeGen<'a> {
                 CodeFragment::ok(format!("c\"{}\"", escaped))
             }
 
-            Expr::Ident(id, _) => CodeFragment::ok(self.interner.get(*id).to_string()),
+            Expr::Ident(id, _) => {
+                let name = self.interner.get(*id).to_string();
+                if self.is_constant_macro(*id) {
+                    CodeFragment::with_constant(name, *id)
+                } else {
+                    CodeFragment::ok(name)
+                }
+            }
 
             Expr::Binary { op, lhs, rhs, .. } => {
                 let left = self.expr_to_rust(lhs);
@@ -537,6 +583,7 @@ impl<'a> RustCodeGen<'a> {
             CodeFragment {
                 code: params_str.join(", "),
                 issues: all_issues,
+                used_constants: HashSet::new(),
             }
         } else {
             CodeFragment::ok(String::new())
@@ -664,6 +711,7 @@ impl<'a> RustCodeGen<'a> {
     fn compound_stmt_to_rust(&self, stmt: &CompoundStmt, indent: usize) -> CodeFragment {
         let mut code = String::new();
         let mut issues = Vec::new();
+        let mut used_constants = HashSet::new();
 
         for item in &stmt.items {
             let frag = match item {
@@ -672,9 +720,10 @@ impl<'a> RustCodeGen<'a> {
             };
             code.push_str(&frag.code);
             issues.extend(frag.issues);
+            used_constants.extend(frag.used_constants);
         }
 
-        CodeFragment { code, issues }
+        CodeFragment { code, issues, used_constants }
     }
 
     /// 宣言をRustに変換
@@ -682,6 +731,7 @@ impl<'a> RustCodeGen<'a> {
         let indent_str = "    ".repeat(indent);
         let mut code = String::new();
         let mut issues = Vec::new();
+        let mut used_constants = HashSet::new();
 
         for init_decl in &decl.declarators {
             let name = init_decl.declarator.name
@@ -690,6 +740,7 @@ impl<'a> RustCodeGen<'a> {
 
             let ty_frag = self.decl_to_rust_type_frag(&decl.specs, Some(&init_decl.declarator));
             issues.extend(ty_frag.issues);
+            used_constants.extend(ty_frag.used_constants);
 
             if let Some(ref init) = init_decl.init {
                 match init {
@@ -697,6 +748,7 @@ impl<'a> RustCodeGen<'a> {
                         let expr_frag = self.expr_to_rust(expr);
                         code.push_str(&format!("{}let mut {}: {} = {};\n", indent_str, name, ty_frag.code, expr_frag.code));
                         issues.extend(expr_frag.issues);
+                        used_constants.extend(expr_frag.used_constants);
                     }
                     crate::ast::Initializer::List(_) => {
                         code.push_str(&format!("{}let mut {}: {} = /* initializer list */;\n", indent_str, name, ty_frag.code));
@@ -708,7 +760,7 @@ impl<'a> RustCodeGen<'a> {
             }
         }
 
-        CodeFragment { code, issues }
+        CodeFragment { code, issues, used_constants }
     }
 
     /// 文をRustに変換
@@ -786,6 +838,7 @@ impl<'a> RustCodeGen<'a> {
             Stmt::For { init, cond, step, body, .. } => {
                 let mut code = String::new();
                 let mut issues = Vec::new();
+                let mut used_constants = HashSet::new();
 
                 // init
                 if let Some(init) = init {
@@ -794,11 +847,13 @@ impl<'a> RustCodeGen<'a> {
                             let frag = self.expr_to_rust(expr);
                             code.push_str(&format!("{}{};\n", indent_str, frag.code));
                             issues.extend(frag.issues);
+                            used_constants.extend(frag.used_constants);
                         }
                         ForInit::Decl(decl) => {
                             let frag = self.decl_to_rust(decl, indent);
                             code.push_str(&frag.code);
                             issues.extend(frag.issues);
+                            used_constants.extend(frag.used_constants);
                         }
                     }
                 }
@@ -807,6 +862,7 @@ impl<'a> RustCodeGen<'a> {
                 let cond_str = if let Some(c) = cond {
                     let frag = self.expr_to_rust(c);
                     issues.extend(frag.issues);
+                    used_constants.extend(frag.used_constants);
                     format!("{} != 0", frag.code)
                 } else {
                     "true".to_string()
@@ -822,16 +878,18 @@ impl<'a> RustCodeGen<'a> {
                 };
                 code.push_str(&body_frag.code);
                 issues.extend(body_frag.issues);
+                used_constants.extend(body_frag.used_constants);
 
                 // step
                 if let Some(step) = step {
                     let frag = self.expr_to_rust(step);
                     code.push_str(&format!("{}    {};\n", indent_str, frag.code));
                     issues.extend(frag.issues);
+                    used_constants.extend(frag.used_constants);
                 }
 
                 code.push_str(&format!("{}}}\n", indent_str));
-                CodeFragment { code, issues }
+                CodeFragment { code, issues, used_constants }
             }
 
             Stmt::Return(Some(expr), _) => {
