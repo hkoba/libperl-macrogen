@@ -24,6 +24,8 @@ pub struct CodeFragment {
     pub issues: Vec<CodeIssue>,
     /// 使用された定数マクロ
     pub used_constants: HashSet<InternedStr>,
+    /// my_perl引数が必要かどうか（THX依存）
+    pub needs_my_perl: bool,
 }
 
 /// コード生成で発生した問題
@@ -61,6 +63,7 @@ impl CodeFragment {
             code: code.into(),
             issues: vec![],
             used_constants: HashSet::new(),
+            needs_my_perl: false,
         }
     }
 
@@ -70,6 +73,7 @@ impl CodeFragment {
             code: code.into(),
             issues: vec![issue],
             used_constants: HashSet::new(),
+            needs_my_perl: false,
         }
     }
 
@@ -81,6 +85,7 @@ impl CodeFragment {
             code: code.into(),
             issues: vec![],
             used_constants,
+            needs_my_perl: false,
         }
     }
 
@@ -89,10 +94,11 @@ impl CodeFragment {
         !self.issues.is_empty()
     }
 
-    /// 子の CodeFragment からの問題と定数参照をマージ
+    /// 子の CodeFragment からの問題と定数参照、THX依存をマージ
     pub fn merge(&mut self, other: &CodeFragment) {
         self.issues.extend(other.issues.iter().cloned());
         self.used_constants.extend(other.used_constants.iter().cloned());
+        self.needs_my_perl = self.needs_my_perl || other.needs_my_perl;
     }
 
     /// 子の CodeFragment からの問題をマージ（後方互換）
@@ -105,15 +111,18 @@ impl CodeFragment {
         let mut code_parts = Vec::new();
         let mut all_issues = Vec::new();
         let mut all_constants = HashSet::new();
+        let mut any_needs_my_perl = false;
         for frag in fragments {
             code_parts.push(frag.code);
             all_issues.extend(frag.issues);
             all_constants.extend(frag.used_constants);
+            any_needs_my_perl = any_needs_my_perl || frag.needs_my_perl;
         }
         Self {
             code: code_parts.join(sep),
             issues: all_issues,
             used_constants: all_constants,
+            needs_my_perl: any_needs_my_perl,
         }
     }
 
@@ -145,6 +154,10 @@ pub struct RustCodeGen<'a> {
     fields_dict: &'a FieldsDict,
     /// 定数マクロの集合（展開されずに識別子として残ったもの）
     constant_macros: HashSet<InternedStr>,
+    /// THX依存マクロの集合
+    thx_macros: HashSet<InternedStr>,
+    /// THX依存関数の集合（bindings.rsから）
+    thx_functions: HashSet<String>,
 }
 
 impl<'a> RustCodeGen<'a> {
@@ -154,6 +167,8 @@ impl<'a> RustCodeGen<'a> {
             interner,
             fields_dict,
             constant_macros: HashSet::new(),
+            thx_macros: HashSet::new(),
+            thx_functions: HashSet::new(),
         }
     }
 
@@ -165,6 +180,30 @@ impl<'a> RustCodeGen<'a> {
     /// 定数マクロかどうかをチェック
     fn is_constant_macro(&self, name: InternedStr) -> bool {
         self.constant_macros.contains(&name)
+    }
+
+    /// THX依存マクロ情報を設定
+    pub fn set_thx_macros(&mut self, macros: HashSet<InternedStr>) {
+        self.thx_macros = macros;
+    }
+
+    /// THX依存関数情報を設定
+    pub fn set_thx_functions(&mut self, functions: HashSet<String>) {
+        self.thx_functions = functions;
+    }
+
+    /// 指定された関数/マクロがTHX依存かどうかをチェック
+    fn is_thx_dependent(&self, name: InternedStr) -> bool {
+        // THX依存マクロかチェック
+        if self.thx_macros.contains(&name) {
+            return true;
+        }
+        // THX依存関数かチェック（Perl_*も含む）
+        let name_str = self.interner.get(name);
+        if name_str.starts_with("Perl_") {
+            return true;
+        }
+        self.thx_functions.contains(name_str)
     }
 
     /// 式をRustコードに変換（Synthesized Attribute 版）
@@ -307,13 +346,35 @@ impl<'a> RustCodeGen<'a> {
                 let args_frags: Vec<CodeFragment> = args.iter()
                     .map(|a| self.expr_to_rust(a))
                     .collect();
-                let args_str: Vec<&str> = args_frags.iter()
-                    .map(|f| f.code.as_str())
-                    .collect();
+
+                // 呼び出し先がTHX依存かチェック
+                let callee_needs_my_perl = if let Expr::Ident(id, _) = func.as_ref() {
+                    self.is_thx_dependent(*id)
+                } else {
+                    false
+                };
+
+                // 第一引数が既に my_perl でなければ追加
+                let first_arg_is_my_perl = args_frags.first()
+                    .map(|f| f.code == "my_perl")
+                    .unwrap_or(false);
+
+                let args_str = if callee_needs_my_perl && !first_arg_is_my_perl {
+                    let mut strs: Vec<&str> = vec!["my_perl"];
+                    strs.extend(args_frags.iter().map(|f| f.code.as_str()));
+                    strs
+                } else {
+                    args_frags.iter().map(|f| f.code.as_str()).collect()
+                };
+
                 let mut result = CodeFragment::ok(format!("{}({})", func_frag.code, args_str.join(", ")));
                 result.merge_issues(&func_frag);
                 for arg_frag in &args_frags {
                     result.merge_issues(arg_frag);
+                }
+                // 呼び出し先がTHX依存なら自身もTHX依存
+                if callee_needs_my_perl {
+                    result.needs_my_perl = true;
                 }
                 result
             }
@@ -565,25 +626,33 @@ impl<'a> RustCodeGen<'a> {
     fn format_params(&self, def: &MacroDef, info: &MacroInfo) -> CodeFragment {
         if let MacroKind::Function { ref params, .. } = def.kind {
             let mut all_issues = Vec::new();
-            let params_str: Vec<String> = params.iter()
-                .map(|p| {
-                    let name = self.interner.get(*p);
-                    let ty = info.param_types.get(p)
-                        .map(|s| s.as_str())
-                        .unwrap_or_else(|| {
-                            all_issues.push(CodeIssue::new(
-                                CodeIssueKind::UnknownType,
-                                format!("unknown type for parameter '{}'", name),
-                            ));
-                            "/* unknown */"
-                        });
-                    format!("{}: {}", name, ty)
-                })
-                .collect();
+            let mut all_params: Vec<String> = Vec::new();
+
+            // THX依存なら先頭に my_perl を追加
+            if info.needs_my_perl {
+                all_params.push("my_perl: *mut PerlInterpreter".to_string());
+            }
+
+            // マクロのパラメータを追加
+            for p in params {
+                let name = self.interner.get(*p);
+                let ty = info.param_types.get(p)
+                    .map(|s| s.as_str())
+                    .unwrap_or_else(|| {
+                        all_issues.push(CodeIssue::new(
+                            CodeIssueKind::UnknownType,
+                            format!("unknown type for parameter '{}'", name),
+                        ));
+                        "/* unknown */"
+                    });
+                all_params.push(format!("{}: {}", name, ty));
+            }
+
             CodeFragment {
-                code: params_str.join(", "),
+                code: all_params.join(", "),
                 issues: all_issues,
                 used_constants: HashSet::new(),
+                needs_my_perl: false,
             }
         } else {
             CodeFragment::ok(String::new())
@@ -712,6 +781,7 @@ impl<'a> RustCodeGen<'a> {
         let mut code = String::new();
         let mut issues = Vec::new();
         let mut used_constants = HashSet::new();
+        let mut needs_my_perl = false;
 
         for item in &stmt.items {
             let frag = match item {
@@ -721,9 +791,10 @@ impl<'a> RustCodeGen<'a> {
             code.push_str(&frag.code);
             issues.extend(frag.issues);
             used_constants.extend(frag.used_constants);
+            needs_my_perl = needs_my_perl || frag.needs_my_perl;
         }
 
-        CodeFragment { code, issues, used_constants }
+        CodeFragment { code, issues, used_constants, needs_my_perl }
     }
 
     /// 宣言をRustに変換
@@ -732,6 +803,7 @@ impl<'a> RustCodeGen<'a> {
         let mut code = String::new();
         let mut issues = Vec::new();
         let mut used_constants = HashSet::new();
+        let mut needs_my_perl = false;
 
         for init_decl in &decl.declarators {
             let name = init_decl.declarator.name
@@ -741,6 +813,7 @@ impl<'a> RustCodeGen<'a> {
             let ty_frag = self.decl_to_rust_type_frag(&decl.specs, Some(&init_decl.declarator));
             issues.extend(ty_frag.issues);
             used_constants.extend(ty_frag.used_constants);
+            needs_my_perl = needs_my_perl || ty_frag.needs_my_perl;
 
             if let Some(ref init) = init_decl.init {
                 match init {
@@ -749,6 +822,7 @@ impl<'a> RustCodeGen<'a> {
                         code.push_str(&format!("{}let mut {}: {} = {};\n", indent_str, name, ty_frag.code, expr_frag.code));
                         issues.extend(expr_frag.issues);
                         used_constants.extend(expr_frag.used_constants);
+                        needs_my_perl = needs_my_perl || expr_frag.needs_my_perl;
                     }
                     crate::ast::Initializer::List(_) => {
                         code.push_str(&format!("{}let mut {}: {} = /* initializer list */;\n", indent_str, name, ty_frag.code));
@@ -760,7 +834,7 @@ impl<'a> RustCodeGen<'a> {
             }
         }
 
-        CodeFragment { code, issues, used_constants }
+        CodeFragment { code, issues, used_constants, needs_my_perl }
     }
 
     /// 文をRustに変換
@@ -839,6 +913,7 @@ impl<'a> RustCodeGen<'a> {
                 let mut code = String::new();
                 let mut issues = Vec::new();
                 let mut used_constants = HashSet::new();
+                let mut needs_my_perl = false;
 
                 // init
                 if let Some(init) = init {
@@ -848,12 +923,14 @@ impl<'a> RustCodeGen<'a> {
                             code.push_str(&format!("{}{};\n", indent_str, frag.code));
                             issues.extend(frag.issues);
                             used_constants.extend(frag.used_constants);
+                            needs_my_perl = needs_my_perl || frag.needs_my_perl;
                         }
                         ForInit::Decl(decl) => {
                             let frag = self.decl_to_rust(decl, indent);
                             code.push_str(&frag.code);
                             issues.extend(frag.issues);
                             used_constants.extend(frag.used_constants);
+                            needs_my_perl = needs_my_perl || frag.needs_my_perl;
                         }
                     }
                 }
@@ -863,6 +940,7 @@ impl<'a> RustCodeGen<'a> {
                     let frag = self.expr_to_rust(c);
                     issues.extend(frag.issues);
                     used_constants.extend(frag.used_constants);
+                    needs_my_perl = needs_my_perl || frag.needs_my_perl;
                     format!("{} != 0", frag.code)
                 } else {
                     "true".to_string()
@@ -879,6 +957,7 @@ impl<'a> RustCodeGen<'a> {
                 code.push_str(&body_frag.code);
                 issues.extend(body_frag.issues);
                 used_constants.extend(body_frag.used_constants);
+                needs_my_perl = needs_my_perl || body_frag.needs_my_perl;
 
                 // step
                 if let Some(step) = step {
@@ -886,10 +965,11 @@ impl<'a> RustCodeGen<'a> {
                     code.push_str(&format!("{}    {};\n", indent_str, frag.code));
                     issues.extend(frag.issues);
                     used_constants.extend(frag.used_constants);
+                    needs_my_perl = needs_my_perl || frag.needs_my_perl;
                 }
 
                 code.push_str(&format!("{}}}\n", indent_str));
-                CodeFragment { code, issues, used_constants }
+                CodeFragment { code, issues, used_constants, needs_my_perl }
             }
 
             Stmt::Return(Some(expr), _) => {

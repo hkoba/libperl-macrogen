@@ -47,6 +47,8 @@ pub struct MacroInfo {
     pub def_loc: SourceLocation,
     /// 対象ディレクトリ内かどうか
     pub is_target: bool,
+    /// THX依存（my_perl引数が必要）
+    pub needs_my_perl: bool,
 }
 
 /// マクロ解析器
@@ -67,6 +69,10 @@ pub struct MacroAnalyzer<'a> {
     constant_macros: HashSet<InternedStr>,
     /// bindings.rs に定義されている定数名
     bindings_consts: HashSet<String>,
+    /// THX依存マクロの集合（my_perl引数が必要）
+    thx_macros: HashSet<InternedStr>,
+    /// THX依存関数の集合（bindings.rsから取得）
+    thx_functions: HashSet<String>,
 }
 
 impl<'a> MacroAnalyzer<'a> {
@@ -85,6 +91,8 @@ impl<'a> MacroAnalyzer<'a> {
             typedefs: HashSet::new(),
             constant_macros: HashSet::new(),
             bindings_consts: HashSet::new(),
+            thx_macros: HashSet::new(),
+            thx_functions: HashSet::new(),
         }
     }
 
@@ -200,6 +208,93 @@ impl<'a> MacroAnalyzer<'a> {
         &self.constant_macros
     }
 
+    /// THX依存関数の集合を設定（bindings.rsから）
+    pub fn set_thx_functions(&mut self, fns: HashSet<String>) {
+        self.thx_functions = fns;
+    }
+
+    /// THX依存マクロを識別する
+    ///
+    /// 以下のいずれかを含むマクロはTHX依存:
+    /// 1. 展開後のトークン列に `my_perl` を含む
+    /// 2. THX依存な関数/マクロを呼び出している（推移的）
+    pub fn identify_thx_dependent_macros(&mut self, macros: &MacroTable) {
+        // Phase 1: 直接 my_perl を含むマクロを識別
+        for (name, def) in macros.iter() {
+            let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+            if self.contains_my_perl(&expanded) {
+                self.thx_macros.insert(*name);
+            }
+        }
+
+        // Phase 2: 推移的依存を解決（収束するまで反復）
+        loop {
+            let mut found_new = false;
+
+            // 現在のthx_macrosのコピーを作成（借用の問題を回避）
+            let current_thx: HashSet<InternedStr> = self.thx_macros.clone();
+
+            for (name, info) in &self.info {
+                if current_thx.contains(name) {
+                    continue;
+                }
+
+                // このマクロが使用する関数/マクロのいずれかがTHX依存なら、自身もTHX依存
+                for used in &info.uses {
+                    if current_thx.contains(used) || self.is_thx_function(*used) {
+                        self.thx_macros.insert(*name);
+                        found_new = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found_new {
+                break;
+            }
+        }
+
+        // Phase 3: MacroInfoのneeds_my_perlフラグを更新
+        let thx_macros = self.thx_macros.clone();
+        for (name, info) in self.info.iter_mut() {
+            if thx_macros.contains(name) {
+                info.needs_my_perl = true;
+            }
+        }
+    }
+
+    /// トークン列が my_perl を含むかチェック
+    fn contains_my_perl(&self, tokens: &[Token]) -> bool {
+        tokens.iter().any(|t| {
+            if let TokenKind::Ident(id) = &t.kind {
+                self.interner.get(*id) == "my_perl"
+            } else {
+                false
+            }
+        })
+    }
+
+    /// 指定された名前がTHX依存関数かどうか
+    fn is_thx_function(&self, name: InternedStr) -> bool {
+        let name_str = self.interner.get(name);
+        // Perl_* で始まる関数はTHX依存と仮定
+        if name_str.starts_with("Perl_") {
+            return true;
+        }
+        // bindings.rsで第一引数がPerlInterpreterの関数
+        self.thx_functions.contains(name_str)
+    }
+
+    /// 指定された名前がTHX依存マクロかどうか
+    pub fn is_thx_macro(&self, name: InternedStr) -> bool {
+        self.thx_macros.contains(&name)
+    }
+
+    /// THX依存マクロの集合を取得
+    pub fn thx_macros(&self) -> &HashSet<InternedStr> {
+        &self.thx_macros
+    }
+
     /// マクロテーブルを解析
     pub fn analyze(&mut self, macros: &MacroTable) {
         // Phase 1: 各マクロの使用関係を収集
@@ -244,6 +339,7 @@ impl<'a> MacroAnalyzer<'a> {
                     param_types: HashMap::new(),
                     def_loc: def.def_loc.clone(),
                     is_target,
+                    needs_my_perl: false,  // THX依存識別で後から更新
                 },
             );
         }

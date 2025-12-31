@@ -238,6 +238,9 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
     stats.bindings_loaded = rust_decls.fns.len();
 
+    // THX依存関数を取得
+    let thx_functions = rust_decls.thx_functions();
+
     if config.verbose {
         eprintln!(
             "Loaded {} functions, {} structs, {} types from bindings",
@@ -245,6 +248,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
             rust_decls.structs.len(),
             rust_decls.types.len()
         );
+        eprintln!("THX-dependent functions: {}", thx_functions.len());
     }
 
     // 2. フィールド辞書を作成
@@ -381,14 +385,23 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
     analyzer.set_typedefs(typedefs.clone());
     analyzer.set_bindings_consts(bindings_consts.clone());
+    analyzer.set_thx_functions(thx_functions.clone());
     analyzer.identify_constant_macros(pp.macros());
     analyzer.analyze(pp.macros());
+
+    // THX依存マクロを識別
+    analyzer.identify_thx_dependent_macros(pp.macros());
 
     // 定数マクロ情報をコード生成器に設定
     codegen.set_constant_macros(analyzer.constant_macros().clone());
 
+    // THX依存情報をコード生成器に設定
+    codegen.set_thx_macros(analyzer.thx_macros().clone());
+    codegen.set_thx_functions(thx_functions.clone());
+
     if config.verbose {
         eprintln!("Constant macros identified: {}", analyzer.constant_macros().len());
+        eprintln!("THX-dependent macros identified: {}", analyzer.thx_macros().len());
     }
 
     // 使用された定数マクロを収集

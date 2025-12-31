@@ -236,6 +236,20 @@ impl RustDeclDict {
         }
     }
 
+    /// THX依存関数の名前を取得
+    ///
+    /// 第一引数が *mut PerlInterpreter を含む関数を返す
+    pub fn thx_functions(&self) -> std::collections::HashSet<String> {
+        self.fns.iter()
+            .filter(|(_, f)| {
+                f.params.first()
+                    .map(|p| p.ty.contains("PerlInterpreter"))
+                    .unwrap_or(false)
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// 辞書をダンプ
     pub fn dump(&self) -> String {
         let mut result = String::new();
