@@ -267,6 +267,26 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
             Expr::Deref(inner, _) => {
+                // *ptr-- パターン: ポインタを post-decrement してから dereference
+                if let Expr::PostDec(ptr_expr, _) = inner.as_ref() {
+                    let ptr_frag = self.expr_to_rust(ptr_expr);
+                    let mut result = CodeFragment::ok(format!(
+                        "{{ let __ptr = {ptr}; {ptr} = {ptr}.sub(1); *__ptr }}",
+                        ptr = ptr_frag.code
+                    ));
+                    result.merge_issues(&ptr_frag);
+                    return result;
+                }
+                // *ptr++ パターン: ポインタを post-increment してから dereference
+                if let Expr::PostInc(ptr_expr, _) = inner.as_ref() {
+                    let ptr_frag = self.expr_to_rust(ptr_expr);
+                    let mut result = CodeFragment::ok(format!(
+                        "{{ let __ptr = {ptr}; {ptr} = {ptr}.add(1); *__ptr }}",
+                        ptr = ptr_frag.code
+                    ));
+                    result.merge_issues(&ptr_frag);
+                    return result;
+                }
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(*{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
@@ -297,6 +317,17 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
             Expr::PostInc(inner, _) => {
+                // (*ptr)++ パターン: ポインタを dereference した値を post-increment
+                // *ptr がポインタ型の場合は .add(1) を使用
+                if let Expr::Deref(ptr_expr, _) = inner.as_ref() {
+                    let ptr_frag = self.expr_to_rust(ptr_expr);
+                    let mut result = CodeFragment::ok(format!(
+                        "{{ let __ptr = *{ptr}; *{ptr} = (*{ptr}).add(1); __ptr }}",
+                        ptr = ptr_frag.code
+                    ));
+                    result.merge_issues(&ptr_frag);
+                    return result;
+                }
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::with_issue(
                     format!("/* {}++ */", inner_frag.code),
@@ -306,6 +337,17 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
             Expr::PostDec(inner, _) => {
+                // (*ptr)-- パターン: ポインタを dereference した値を post-decrement
+                // *ptr がポインタ型の場合は .sub(1) を使用
+                if let Expr::Deref(ptr_expr, _) = inner.as_ref() {
+                    let ptr_frag = self.expr_to_rust(ptr_expr);
+                    let mut result = CodeFragment::ok(format!(
+                        "{{ let __ptr = *{ptr}; *{ptr} = (*{ptr}).sub(1); __ptr }}",
+                        ptr = ptr_frag.code
+                    ));
+                    result.merge_issues(&ptr_frag);
+                    return result;
+                }
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::with_issue(
                     format!("/* {}-- */", inner_frag.code),
