@@ -582,9 +582,15 @@ impl<'a> InferenceContext<'a> {
     /// 式から戻り値型を推論
     fn infer_return_type_from_expr(&self, expr: &Expr) -> Option<String> {
         match expr {
-            // sv_u.svu_* フィールドアクセスの場合、フィールド型を返す
-            Expr::Member { expr: inner, member, .. } => {
+            // フィールドアクセスの場合、フィールド型を返す (. または ->)
+            Expr::Member { expr: inner, member, .. }
+            | Expr::PtrMember { expr: inner, member, .. } => {
+                // sv_u.svu_* パターン
                 if let Some((_pointer_type, field_type)) = self.infer_from_sv_u_field(*member, inner) {
+                    return Some(field_type);
+                }
+                // 既知のPerl内部構造体フィールド
+                if let Some(field_type) = self.lookup_known_field_type(*member) {
                     return Some(field_type);
                 }
                 None
@@ -625,6 +631,75 @@ impl<'a> InferenceContext<'a> {
             }
             // キャストの場合は型があるが、ここでは扱わない
             // （型情報の解析が必要になるため）
+            _ => None,
+        }
+    }
+
+    /// 既知のPerl内部構造体フィールドの型を検索
+    ///
+    /// Perl内部構造体（XPVAV, XPVHV, XPVCV, XPVGV, XPV, XPVIV, XPVUV, XPVNV, XPVMG）
+    /// のフィールド型マッピング
+    fn lookup_known_field_type(&self, field: InternedStr) -> Option<String> {
+        let field_name = self.interner.get(field);
+
+        match field_name {
+            // XPVAV fields
+            "xav_alloc" => Some("*mut *mut SV".to_string()),
+            "xav_max" => Some("SSize_t".to_string()),
+            "xav_fill" => Some("SSize_t".to_string()),
+
+            // XPVHV fields
+            "xhv_max" => Some("STRLEN".to_string()),
+            "xhv_keys" => Some("STRLEN".to_string()),
+
+            // XPV fields (共通)
+            "xpv_cur" => Some("STRLEN".to_string()),
+            "xpv_len" => Some("STRLEN".to_string()),
+            // XPV union fields (xpv_len_u.xpvlenu_len)
+            "xpvlenu_len" => Some("STRLEN".to_string()),
+            "xpvlenu_pv" => Some("*mut c_char".to_string()),
+
+            // XPVIV fields
+            "xiv_iv" => Some("IV".to_string()),
+            // XPVIV union fields (xiv_u.xivu_iv, xiv_u.xivu_uv, etc.)
+            "xivu_iv" => Some("IV".to_string()),
+            "xivu_uv" => Some("UV".to_string()),
+            "xivu_p1" => Some("*mut c_void".to_string()),
+            "xivu_i32" => Some("I32".to_string()),
+            "xivu_namehek" => Some("*mut HEK".to_string()),
+            "xivu_eval_seq" => Some("U32".to_string()),
+
+            // XPVUV fields
+            "xuv_uv" => Some("UV".to_string()),
+
+            // XPVNV fields
+            "xnv_nv" => Some("NV".to_string()),
+            // XPVNV union fields (xnv_u.xnv_nv, etc.)
+            "xnv_bm_tail" => Some("STRLEN".to_string()),
+
+            // XPVCV fields
+            "xcv_stash" => Some("*mut HV".to_string()),
+            "xcv_start" => Some("*mut OP".to_string()),
+            "xcv_root" => Some("*mut OP".to_string()),
+            "xcv_xsub" => Some("XSUBADDR_t".to_string()),
+            "xcv_file" => Some("*const c_char".to_string()),
+            "xcv_outside" => Some("*mut CV".to_string()),
+            "xcv_outside_seq" => Some("U32".to_string()),
+            "xcv_flags" => Some("U32".to_string()),
+            "xcv_depth" => Some("I32".to_string()),
+
+            // XPVGV fields
+            "xgv_stash" => Some("*mut HV".to_string()),
+
+            // XPVMG fields
+            "xmg_magic" => Some("*mut MAGIC".to_string()),
+            "xmg_stash" => Some("*mut HV".to_string()),
+
+            // XPVIO fields
+            "xio_ofp" => Some("*mut PerlIO".to_string()),
+            "xio_ifp" => Some("*mut PerlIO".to_string()),
+            "xio_dirp" => Some("*mut DIR".to_string()),
+
             _ => None,
         }
     }
