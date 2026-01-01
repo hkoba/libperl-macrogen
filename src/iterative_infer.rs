@@ -375,6 +375,11 @@ impl<'a> InferenceContext<'a> {
         // 式から推論
         if let Some(ref expr) = pending.body_expr {
             self.infer_from_expr(expr, &param_set, &mut pending.known_types);
+
+            // 戻り値型を推論（まだ不明の場合）
+            if pending.ret_ty.is_none() {
+                pending.ret_ty = self.infer_return_type_from_expr(expr);
+            }
         }
 
         // 複合文から推論
@@ -433,7 +438,19 @@ impl<'a> InferenceContext<'a> {
             | Expr::PostDec(inner, _) => {
                 self.infer_from_expr(inner, params, known_types);
             }
-            Expr::Member { expr, .. } | Expr::PtrMember { expr, .. } => {
+            Expr::Member { expr: inner, member, .. } => {
+                // sv_u.svu_* パターンの検出
+                // (ptr)->sv_u.svu_pv のような形式から ptr の型を推論
+                if let Some((pointer_type, _field_type)) = self.infer_from_sv_u_field(*member, inner) {
+                    if let Some(param_id) = self.find_base_param(inner, params) {
+                        if !known_types.contains_key(&param_id) {
+                            known_types.insert(param_id, pointer_type);
+                        }
+                    }
+                }
+                self.infer_from_expr(inner, params, known_types);
+            }
+            Expr::PtrMember { expr, .. } => {
                 self.infer_from_expr(expr, params, known_types);
             }
             Expr::Index { expr, index, .. } => {
@@ -472,6 +489,143 @@ impl<'a> InferenceContext<'a> {
             | Expr::SizeofType(_, _)
             | Expr::Alignof(_, _)
             | Expr::CompoundLit { .. } => {}
+        }
+    }
+
+    /// sv_u.svu_* パターンから型を推論
+    ///
+    /// 例: (sv)->sv_u.svu_pv の svu_pv から SV 型を推論
+    /// 戻り値: (ポインタ型, フィールド型)
+    /// - svu_pv → (*mut SV, *mut c_char)
+    /// - svu_iv → (*mut SV, IV)
+    /// - svu_uv → (*mut SV, UV)
+    /// - svu_rv → (*mut SV, *mut SV)
+    /// - svu_array → (*mut AV, *mut *mut SV)
+    /// - svu_hash → (*mut HV, *mut *mut HE)
+    /// - svu_gp → (*mut GV, *mut GP)
+    /// - svu_fp → (*, *mut PerlIO)
+    fn infer_from_sv_u_field(&self, field: InternedStr, inner: &Expr) -> Option<(String, String)> {
+        let field_name = self.interner.get(field);
+
+        // svu_* フィールドでなければスキップ
+        if !field_name.starts_with("svu_") {
+            return None;
+        }
+
+        // 内部式が .sv_u へのアクセスかチェック
+        let sv_u_base = match inner {
+            Expr::Member { expr, member, .. } => {
+                if self.interner.get(*member) == "sv_u" {
+                    Some(expr.as_ref())
+                } else {
+                    None
+                }
+            }
+            Expr::PtrMember { expr, member, .. } => {
+                if self.interner.get(*member) == "sv_u" {
+                    Some(expr.as_ref())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        // sv_u へのアクセスでなければスキップ
+        sv_u_base?;
+
+        // フィールド名からポインタ型とフィールド型を決定
+        match field_name {
+            "svu_pv" => Some(("*mut SV".to_string(), "*mut c_char".to_string())),
+            "svu_iv" => Some(("*mut SV".to_string(), "IV".to_string())),
+            "svu_uv" => Some(("*mut SV".to_string(), "UV".to_string())),
+            "svu_rv" => Some(("*mut SV".to_string(), "*mut SV".to_string())),
+            "svu_array" => Some(("*mut AV".to_string(), "*mut *mut SV".to_string())),
+            "svu_hash" => Some(("*mut HV".to_string(), "*mut *mut HE".to_string())),
+            "svu_gp" => Some(("*mut GV".to_string(), "*mut GP".to_string())),
+            "svu_fp" => Some(("*mut SV".to_string(), "*mut PerlIO".to_string())),
+            _ => None,
+        }
+    }
+
+    /// 式からベースとなるパラメータを探す
+    fn find_base_param(&self, expr: &Expr, params: &HashSet<InternedStr>) -> Option<InternedStr> {
+        match expr {
+            Expr::Ident(id, _) => {
+                if params.contains(id) {
+                    Some(*id)
+                } else {
+                    None
+                }
+            }
+            // sv_u へのアクセスの場合、さらに内側を探す
+            Expr::Member { expr: inner, member, .. } => {
+                if self.interner.get(*member) == "sv_u" {
+                    self.find_base_param(inner, params)
+                } else {
+                    None
+                }
+            }
+            Expr::PtrMember { expr: inner, member, .. } => {
+                if self.interner.get(*member) == "sv_u" {
+                    self.find_base_param(inner, params)
+                } else {
+                    None
+                }
+            }
+            // 括弧で囲まれた式
+            Expr::Deref(inner, _) => self.find_base_param(inner, params),
+            _ => None,
+        }
+    }
+
+    /// 式から戻り値型を推論
+    fn infer_return_type_from_expr(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            // sv_u.svu_* フィールドアクセスの場合、フィールド型を返す
+            Expr::Member { expr: inner, member, .. } => {
+                if let Some((_pointer_type, field_type)) = self.infer_from_sv_u_field(*member, inner) {
+                    return Some(field_type);
+                }
+                None
+            }
+            // 括弧やデリファレンスを透過
+            Expr::Deref(inner, _) => self.infer_return_type_from_expr(inner),
+            // 条件式の場合、then/else両方から推論を試みる
+            Expr::Conditional { then_expr, else_expr, .. } => {
+                self.infer_return_type_from_expr(then_expr)
+                    .or_else(|| self.infer_return_type_from_expr(else_expr))
+            }
+            // 二項演算の場合、どちらかのオペランドから推論を試みる
+            // 例: 0 + (gv)->sv_u.svu_gp では右側から型を推論
+            Expr::Binary { lhs, rhs, .. } => {
+                // 一方がリテラル0の場合、もう一方から推論
+                let lhs_is_zero = matches!(lhs.as_ref(), Expr::IntLit(0, _));
+                let rhs_is_zero = matches!(rhs.as_ref(), Expr::IntLit(0, _));
+
+                if lhs_is_zero {
+                    self.infer_return_type_from_expr(rhs)
+                } else if rhs_is_zero {
+                    self.infer_return_type_from_expr(lhs)
+                } else {
+                    // 両方から試みる
+                    self.infer_return_type_from_expr(lhs)
+                        .or_else(|| self.infer_return_type_from_expr(rhs))
+                }
+            }
+            // 関数呼び出しの場合、確定済み関数の戻り値型を使用
+            Expr::Call { func, .. } => {
+                if let Expr::Ident(func_name, _) = func.as_ref() {
+                    let func_name_str = self.interner.get(*func_name);
+                    if let Some(sig) = self.confirmed.get(func_name_str) {
+                        return sig.ret_ty.clone();
+                    }
+                }
+                None
+            }
+            // キャストの場合は型があるが、ここでは扱わない
+            // （型情報の解析が必要になるため）
+            _ => None,
         }
     }
 
