@@ -382,8 +382,58 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
         }
     }
 
-    // 9. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
+    // 9. 読み込まれたターゲットファイルを収集
     let files = pp.files();
+
+    // FileRegistryからターゲットディレクトリ内のファイルを抽出
+    let included_target_files: Vec<_> = files
+        .iter()
+        .filter(|(_, path)| path.to_string_lossy().starts_with(&target_dir_str))
+        .map(|(id, path)| (id, path.to_path_buf()))
+        .collect();
+
+    if config.verbose {
+        eprintln!("Included target files: {} files", included_target_files.len());
+        for (_, path) in &included_target_files {
+            eprintln!("  {}", path.display());
+        }
+    }
+
+    // 9.5. ターゲットヘッダから =for apidoc コメントを抽出
+    {
+        let mut header_apidoc = ApidocDict::new();
+        for (_, path) in &included_target_files {
+            if let Ok(dict) = ApidocDict::parse_header_apidoc(path) {
+                header_apidoc.merge(dict);
+            }
+        }
+
+        if !header_apidoc.is_empty() {
+            let header_stats = header_apidoc.stats();
+            if config.verbose {
+                eprintln!(
+                    "Extracted apidoc from headers: {} entries ({} functions, {} macros, {} inline)",
+                    header_stats.total,
+                    header_stats.function_count,
+                    header_stats.macro_count,
+                    header_stats.inline_count
+                );
+            }
+
+            let added = infer_ctx.load_apidoc(&header_apidoc);
+            stats.apidoc_loaded += added;
+
+            if config.verbose {
+                eprintln!(
+                    "After header apidoc: {} confirmed (+{} from headers)",
+                    infer_ctx.confirmed_count(),
+                    added
+                );
+            }
+        }
+    }
+
+    // 10. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
     let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
     analyzer.set_target_dir(&target_dir_str);
     analyzer.set_typedefs(typedefs.clone());

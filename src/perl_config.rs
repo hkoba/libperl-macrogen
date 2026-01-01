@@ -110,6 +110,31 @@ fn parse_incpth(incpth: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// ExtUtils::Embed の ccopts から -D オプションを抽出
+fn get_ccopts_defines() -> Result<Vec<(String, Option<String>)>, PerlConfigError> {
+    let output = Command::new("perl")
+        .args(["-MExtUtils::Embed", "-e", "print ccopts"])
+        .output()
+        .map_err(|e| PerlConfigError::CommandFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(PerlConfigError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let ccopts = String::from_utf8_lossy(&output.stdout);
+    let mut defines = Vec::new();
+
+    for part in ccopts.split_whitespace() {
+        if let Some(def) = part.strip_prefix("-D") {
+            defines.push(parse_single_define(def));
+        }
+    }
+
+    Ok(defines)
+}
+
 /// Perl Config.pm から設定を取得
 pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
     // インクルードパスを取得
@@ -128,6 +153,18 @@ pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
     // cppsymbols を取得
     let cppsymbols = get_config_value("cppsymbols")?;
     let mut defines = parse_cppsymbols(&cppsymbols);
+
+    // ccopts から -D オプションを抽出して追加（重複は後で上書きされる）
+    if let Ok(ccopts_defines) = get_ccopts_defines() {
+        for (name, value) in ccopts_defines {
+            // 既存の定義を上書き（ccoptの方が優先）
+            if let Some(pos) = defines.iter().position(|(n, _)| n == &name) {
+                defines[pos] = (name, value);
+            } else {
+                defines.push((name, value));
+            }
+        }
+    }
 
     // PERL_CORE を追加 (perl.h内のDFA表などを正しく展開するために必要)
     defines.push(("PERL_CORE".to_string(), None));
