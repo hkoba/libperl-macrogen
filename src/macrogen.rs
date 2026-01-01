@@ -42,6 +42,11 @@ pub struct MacrogenConfig {
     /// 例: ("sv_flags", "sv") で sv_flags -> sv型と推論
     pub field_type_overrides: Vec<(String, String)>,
 
+    /// フィールドRust型オーバーライド (構造体名, フィールド名, Rust型)
+    /// 自動導出できない場合や特殊なマッピングが必要な場合に使用
+    /// 例: ("XPVCV", "xcv_xsub", "XSUBADDR_t")
+    pub field_rust_type_overrides: Vec<(String, String, String)>,
+
     /// inline関数を出力に含めるか
     pub include_inline_functions: bool,
 
@@ -64,6 +69,7 @@ impl Default for MacrogenConfig {
             pp_config: PPConfig::default(),
             target_dir: PathBuf::from(DEFAULT_TARGET_DIR),
             field_type_overrides: vec![],
+            field_rust_type_overrides: vec![],
             include_inline_functions: true,
             include_macro_functions: true,
             verbose: false,
@@ -115,9 +121,25 @@ impl MacrogenBuilder {
         self
     }
 
-    /// カスタムフィールド型を追加
+    /// カスタムフィールド→構造体マッピングを追加
     pub fn add_field_type(mut self, field: impl Into<String>, struct_name: impl Into<String>) -> Self {
         self.config.field_type_overrides.push((field.into(), struct_name.into()));
+        self
+    }
+
+    /// フィールドRust型をオーバーライド
+    /// 自動導出できない場合や特殊なマッピングが必要な場合に使用
+    pub fn add_field_type_override(
+        mut self,
+        struct_name: impl Into<String>,
+        field_name: impl Into<String>,
+        rust_type: impl Into<String>,
+    ) -> Self {
+        self.config.field_rust_type_overrides.push((
+            struct_name.into(),
+            field_name.into(),
+            rust_type.into(),
+        ));
         self
     }
 
@@ -294,7 +316,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
     parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path);
+            fields_dict.collect_from_external_decl(decl, path, interner);
 
             // inline関数を収集（対象ディレクトリ内のみ）
             if config.include_inline_functions {
@@ -337,6 +359,13 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
             let struct_id = interner.intern(struct_name);
             fields_dict.set_unique_field_type(field_id, struct_id);
         }
+
+        // 5.1 フィールドRust型オーバーライドを登録
+        for (struct_name, field_name, rust_type) in &config.field_rust_type_overrides {
+            let struct_id = interner.intern(struct_name);
+            let field_id = interner.intern(field_name);
+            fields_dict.set_field_type_override(struct_id, field_id, rust_type.clone());
+        }
     }
 
     // 6. RustCodeGen を作成
@@ -347,7 +376,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     let bindings_consts: std::collections::HashSet<String> = rust_decls.consts.keys().cloned().collect();
 
     // 7. 反復型推論コンテキストを作成
-    let mut infer_ctx = InferenceContext::new(interner);
+    let mut infer_ctx = InferenceContext::new(interner, &fields_dict);
     infer_ctx.load_bindings(&rust_decls);
 
     if config.verbose {

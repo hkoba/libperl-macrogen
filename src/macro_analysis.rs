@@ -827,183 +827,23 @@ impl<'a> MacroAnalyzer<'a> {
         }
 
         if let Some(field_name) = last_field {
-            let field_str = self.interner.get(field_name);
-
-            // フィールド辞書から構造体型を取得
-            if let Some(struct_name) = self.fields_dict.lookup_unique(field_name) {
-                let struct_str = self.interner.get(struct_name);
-
-                // 既知のフィールド型を返す
-                if let Some(ty) = self.get_field_type(struct_str, field_str) {
-                    return Some(ty);
-                }
-
-                // フィールド辞書にあるが既知の型がない場合は構造体へのポインタを返す
-                return Some(format!("*mut {}", struct_str));
+            // フィールド辞書から型情報を取得（動的推論）
+            if let Some(field_type) = self.fields_dict.get_unique_field_type(field_name) {
+                return Some(field_type.rust_type.clone());
             }
 
-            // フィールド辞書にない場合でも、既知のフィールド名から型を推論
-            if let Some(ty) = self.get_field_type_by_name(field_str) {
-                return Some(ty);
+            // 一意に特定できない場合でも、構造体名が分かれば型を取得
+            if let Some(struct_name) = self.fields_dict.lookup_unique(field_name) {
+                if let Some(field_type) = self.fields_dict.get_field_type(struct_name, field_name) {
+                    return Some(field_type.rust_type.clone());
+                }
+                // 型情報がない場合は構造体へのポインタを返す
+                let struct_str = self.interner.get(struct_name);
+                return Some(format!("*mut {}", struct_str));
             }
         }
 
         None
-    }
-
-    /// フィールド名だけから型を推論（構造体名が不明な場合）
-    fn get_field_type_by_name(&self, field_name: &str) -> Option<String> {
-        match field_name {
-            // XPVAV fields
-            "xav_alloc" => Some("*mut *mut SV".to_string()),
-            "xav_max" => Some("SSize_t".to_string()),
-            "xav_fill" => Some("SSize_t".to_string()),
-
-            // XPVHV fields
-            "xhv_max" => Some("STRLEN".to_string()),
-            "xhv_keys" => Some("STRLEN".to_string()),
-
-            // XPV fields
-            "xpv_cur" => Some("STRLEN".to_string()),
-            "xpv_len" => Some("STRLEN".to_string()),
-            // XPV union fields (xpv_len_u.xpvlenu_len)
-            "xpvlenu_len" => Some("STRLEN".to_string()),
-            "xpvlenu_pv" => Some("*mut c_char".to_string()),
-
-            // XPVIV fields
-            "xiv_iv" => Some("IV".to_string()),
-            // XPVIV union fields (xiv_u.xivu_iv, xiv_u.xivu_uv, etc.)
-            "xivu_iv" => Some("IV".to_string()),
-            "xivu_uv" => Some("UV".to_string()),
-            "xivu_p1" => Some("*mut c_void".to_string()),
-            "xivu_i32" => Some("I32".to_string()),
-            "xivu_namehek" => Some("*mut HEK".to_string()),
-            "xivu_eval_seq" => Some("U32".to_string()),
-
-            // XPVUV fields
-            "xuv_uv" => Some("UV".to_string()),
-
-            // XPVNV fields
-            "xnv_nv" => Some("NV".to_string()),
-            // XPVNV union fields (xnv_u.xnv_nv, etc.)
-            "xnv_bm_tail" => Some("STRLEN".to_string()),
-
-            // XPVCV fields
-            "xcv_stash" => Some("*mut HV".to_string()),
-            "xcv_start" => Some("*mut OP".to_string()),
-            "xcv_root" => Some("*mut OP".to_string()),
-            "xcv_xsub" => Some("XSUBADDR_t".to_string()),
-            "xcv_file" => Some("*const c_char".to_string()),
-            "xcv_outside" => Some("*mut CV".to_string()),
-            "xcv_outside_seq" => Some("U32".to_string()),
-            "xcv_flags" => Some("U32".to_string()),
-            "xcv_depth" => Some("I32".to_string()),
-
-            // XPVGV fields
-            "xgv_stash" => Some("*mut HV".to_string()),
-
-            // XPVMG fields
-            "xmg_magic" => Some("*mut MAGIC".to_string()),
-            "xmg_stash" => Some("*mut HV".to_string()),
-
-            // XPVIO fields
-            "xio_ofp" => Some("*mut PerlIO".to_string()),
-            "xio_ifp" => Some("*mut PerlIO".to_string()),
-            "xio_dirp" => Some("*mut DIR".to_string()),
-
-            _ => None,
-        }
-    }
-
-    /// 既知のフィールド型を取得
-    fn get_field_type(&self, struct_name: &str, field_name: &str) -> Option<String> {
-        // 構造体名を正規化（小文字→大文字、typedefエイリアス解決）
-        let normalized_struct = match struct_name.to_uppercase().as_str() {
-            "XPVAV" => "XPVAV",
-            "XPVHV" => "XPVHV",
-            "XPVCV" => "XPVCV",
-            "XPVGV" => "XPVGV",
-            "XPVIO" => "XPVIO",
-            "XPVMG" => "XPVMG",
-            "XPVNV" => "XPVNV",
-            "XPVUV" => "XPVUV",
-            "XPVIV" => "XPVIV",
-            "XPV" => "XPV",
-            // Perl union types
-            "_XIVU" => "_xivu",
-            "_XNVU" => "_xnvu",
-            _ => struct_name,
-        };
-
-        match (normalized_struct, field_name) {
-            // sv fields
-            ("sv", "sv_any") => Some("*mut c_void".to_string()),
-            ("sv", "sv_refcnt") => Some("U32".to_string()),
-            ("sv", "sv_flags") => Some("U32".to_string()),
-
-            // XPVAV fields
-            ("XPVAV", "xav_alloc") => Some("*mut *mut SV".to_string()),
-            ("XPVAV", "xav_max") => Some("SSize_t".to_string()),
-            ("XPVAV", "xav_fill") => Some("SSize_t".to_string()),
-
-            // XPVHV fields
-            ("XPVHV", "xhv_max") => Some("STRLEN".to_string()),
-            ("XPVHV", "xhv_keys") => Some("STRLEN".to_string()),
-
-            // XPV fields (共通)
-            ("XPV", "xpv_cur") | (_, "xpv_cur") => Some("STRLEN".to_string()),
-            ("XPV", "xpv_len") | (_, "xpv_len") => Some("STRLEN".to_string()),
-
-            // XPVIV fields
-            ("XPVIV", "xiv_iv") | (_, "xiv_iv") => Some("IV".to_string()),
-
-            // XPVUV fields
-            ("XPVUV", "xuv_uv") | (_, "xuv_uv") => Some("UV".to_string()),
-
-            // XPVNV fields
-            ("XPVNV", "xnv_nv") | (_, "xnv_nv") => Some("NV".to_string()),
-
-            // XPVCV fields
-            ("XPVCV", "xcv_stash") => Some("*mut HV".to_string()),
-            ("XPVCV", "xcv_start") => Some("*mut OP".to_string()),
-            ("XPVCV", "xcv_root") => Some("*mut OP".to_string()),
-            ("XPVCV", "xcv_xsub") => Some("XSUBADDR_t".to_string()),
-            ("XPVCV", "xcv_file") => Some("*const c_char".to_string()),
-            ("XPVCV", "xcv_outside") => Some("*mut CV".to_string()),
-            ("XPVCV", "xcv_outside_seq") => Some("U32".to_string()),
-            ("XPVCV", "xcv_flags") => Some("U32".to_string()),
-            ("XPVCV", "xcv_depth") => Some("I32".to_string()),
-
-            // XPVGV fields
-            ("XPVGV", "xgv_stash") => Some("*mut HV".to_string()),
-
-            // XPVMG fields
-            ("XPVMG", "xmg_magic") => Some("*mut MAGIC".to_string()),
-            ("XPVMG", "xmg_stash") => Some("*mut HV".to_string()),
-
-            // XPVIO fields
-            ("XPVIO", "xio_ofp") => Some("*mut PerlIO".to_string()),
-            ("XPVIO", "xio_ifp") => Some("*mut PerlIO".to_string()),
-            ("XPVIO", "xio_dirp") => Some("*mut DIR".to_string()),
-
-            // Union _xivu fields (xiv_u.xivu_iv, etc.)
-            ("_xivu", "xivu_iv") => Some("IV".to_string()),
-            ("_xivu", "xivu_uv") => Some("UV".to_string()),
-            ("_xivu", "xivu_p1") => Some("*mut c_void".to_string()),
-            ("_xivu", "xivu_i32") => Some("I32".to_string()),
-            ("_xivu", "xivu_namehek") => Some("*mut HEK".to_string()),
-            ("_xivu", "xivu_eval_seq") => Some("U32".to_string()),
-
-            // Union _xnvu fields (xnv_u.xnv_nv, etc.)
-            ("_xnvu", "xnv_nv") => Some("NV".to_string()),
-            ("_xnvu", "xnv_bm_tail") => Some("STRLEN".to_string()),
-
-            // Union xpv_len_u fields
-            (_, "xpvlenu_len") => Some("STRLEN".to_string()),
-            (_, "xpvlenu_pv") => Some("*mut c_char".to_string()),
-
-            _ => None,
-        }
     }
 
     /// トークン列を文字列に変換

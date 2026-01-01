@@ -228,3 +228,33 @@ struct xpviv {
 1. **Perl バージョン非依存**: ヘッダーから動的に型情報を取得するため、Perl 5.36 でも 5.40 でも動作
 2. **保守性向上**: ハードコードを削除し、自動収集に依存
 3. **拡張性**: 必要に応じて外部から設定可能
+
+## 実装完了 (2026-01-01)
+
+全フェーズの実装が完了しました。
+
+### 実装された機能
+
+1. **Phase 1**: `FieldsDict` に `FieldType` 構造体と `field_types` HashMap を追加
+2. **Phase 2**: `extract_field_type`, `extract_base_type`, `apply_derived_decls` を実装
+3. **Phase 3**: `macro_analysis.rs` と `iterative_infer.rs` のハードコードを削除し、`FieldsDict` を使用
+4. **Phase 4**: `MacrogenBuilder` に `add_field_type_override` メソッドを追加
+5. **Phase 5**: テスト完了
+
+### 検証結果
+
+動的型推論が正しく動作することを確認:
+- `AvALLOC` → `*mut *mut SV`
+- `SvIVX` → `IV`
+- `SvNVX` → `NV`
+- `SvUVX` → `UV`
+
+### 使用例
+
+```rust
+MacrogenBuilder::new("wrapper.h", "bindings.rs")
+    .auto_config()
+    // 自動導出できない特殊ケースのみオーバーライド
+    .add_field_type_override("XPVCV", "xcv_xsub", "XSUBADDR_t")
+    .generate()?;
+```

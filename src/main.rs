@@ -275,23 +275,24 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> 
     };
 
     // パースしながらフィールド情報を収集
-    parser.parse_each(|result, _loc, path, _interner| {
+    parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path);
+            fields_dict.collect_from_external_decl(decl, path, interner);
         }
         std::ops::ControlFlow::Continue(())
     });
 
     // 統計情報を表示
     let stats = fields_dict.stats();
+    let interner = parser.interner();
     eprintln!("=== Fields Dictionary Stats ===");
     eprintln!("Total fields: {}", stats.total_fields);
     eprintln!("Unique fields (can infer struct): {}", stats.unique_fields);
     eprintln!("Ambiguous fields: {}", stats.ambiguous_fields);
+    eprintln!("Field types collected: {}", fields_dict.field_types_count());
     eprintln!();
 
     // 一意なフィールドをダンプ
-    let interner = parser.interner();
     println!("{}", fields_dict.dump_unique(interner));
 
     Ok(())
@@ -314,9 +315,9 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
         Err(e) => return Err(format_error(&e, pp).into()),
     };
 
-    parser.parse_each(|result, _loc, path, _interner| {
+    parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path);
+            fields_dict.collect_from_external_decl(decl, path, interner);
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -407,7 +408,7 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
 
     parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path);
+            fields_dict.collect_from_external_decl(decl, path, interner);
 
             // inline関数を即座に出力
             let path_str = path.to_string_lossy();

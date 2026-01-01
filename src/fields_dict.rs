@@ -1,13 +1,20 @@
 //! 構造体フィールド名辞書
 //!
 //! マクロの引数型推論のため、フィールド名から構造体名への
-//! マッピングを記録する。
+//! マッピングと、フィールドの型情報を記録する。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::ast::{Declaration, ExternalDecl, StructSpec, TypeSpec};
+use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StructSpec, TypeSpec};
 use crate::intern::{InternedStr, StringInterner};
+
+/// フィールドの型情報
+#[derive(Debug, Clone)]
+pub struct FieldType {
+    /// Rust言語での型表現
+    pub rust_type: String,
+}
 
 /// フィールド名から構造体名へのマッピング
 #[derive(Debug, Default)]
@@ -15,6 +22,8 @@ pub struct FieldsDict {
     /// フィールド名 -> 構造体名のセット
     /// (同じフィールド名が複数の構造体で使われる可能性があるためHashSet)
     field_to_structs: HashMap<InternedStr, HashSet<InternedStr>>,
+    /// (構造体名, フィールド名) -> フィールド型
+    field_types: HashMap<(InternedStr, InternedStr), FieldType>,
     /// 収集対象のディレクトリパス（単一）
     target_dir: Option<String>,
 }
@@ -42,10 +51,12 @@ impl FieldsDict {
     }
 
     /// 外部宣言からフィールド情報を収集
+    /// interner はパース中のインターナーへの参照を渡す
     pub fn collect_from_external_decl(
         &mut self,
         decl: &ExternalDecl,
         path: &Path,
+        interner: &StringInterner,
     ) {
         // パスが収集対象かチェック
         if !self.is_target_path(path) {
@@ -53,20 +64,20 @@ impl FieldsDict {
         }
 
         if let ExternalDecl::Declaration(d) = decl {
-            self.collect_from_declaration(d);
+            self.collect_from_declaration(d, interner);
         }
     }
 
     /// 宣言からフィールド情報を収集
-    fn collect_from_declaration(&mut self, decl: &Declaration) {
+    fn collect_from_declaration(&mut self, decl: &Declaration, interner: &StringInterner) {
         for type_spec in &decl.specs.type_specs {
             match type_spec {
                 TypeSpec::Struct(spec) => {
-                    self.collect_from_struct_spec(spec);
+                    self.collect_from_struct_spec(spec, interner);
                 }
                 TypeSpec::Union(spec) => {
                     // 共用体も同様に収集
-                    self.collect_from_struct_spec(spec);
+                    self.collect_from_struct_spec(spec, interner);
                 }
                 _ => {}
             }
@@ -74,7 +85,7 @@ impl FieldsDict {
     }
 
     /// 構造体指定からフィールド情報を収集
-    fn collect_from_struct_spec(&mut self, spec: &StructSpec) {
+    fn collect_from_struct_spec(&mut self, spec: &StructSpec, interner: &StringInterner) {
         // 名前付き構造体のみ対象
         let struct_name = match spec.name {
             Some(name) => name,
@@ -92,27 +103,145 @@ impl FieldsDict {
             for type_spec in &member.specs.type_specs {
                 match type_spec {
                     TypeSpec::Struct(nested) => {
-                        self.collect_from_struct_spec(nested);
+                        self.collect_from_struct_spec(nested, interner);
                     }
                     TypeSpec::Union(nested) => {
-                        self.collect_from_struct_spec(nested);
+                        self.collect_from_struct_spec(nested, interner);
                     }
                     _ => {}
                 }
             }
 
-            // フィールド名を収集
+            // フィールド名と型を収集
             for decl in &member.declarators {
                 if let Some(ref declarator) = decl.declarator {
                     if let Some(field_name) = declarator.name {
+                        // フィールド名 -> 構造体名のマッピング
                         self.field_to_structs
                             .entry(field_name)
                             .or_insert_with(HashSet::new)
                             .insert(struct_name);
+
+                        // フィールド型の収集
+                        if let Some(rust_type) = self.extract_field_type(&member.specs, declarator, interner) {
+                            self.field_types.insert(
+                                (struct_name, field_name),
+                                FieldType { rust_type },
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// DeclSpecs と Declarator からフィールドの Rust 型を抽出
+    fn extract_field_type(&self, specs: &DeclSpecs, declarator: &Declarator, interner: &StringInterner) -> Option<String> {
+        // 基本型を取得
+        let base_type = self.extract_base_type(specs, interner)?;
+
+        // ポインタ等の派生型を適用
+        let full_type = self.apply_derived_decls(&base_type, &declarator.derived, &specs.qualifiers);
+
+        Some(full_type)
+    }
+
+    /// DeclSpecs から基本型を抽出
+    fn extract_base_type(&self, specs: &DeclSpecs, interner: &StringInterner) -> Option<String> {
+        let mut has_signed = false;
+        let mut has_unsigned = false;
+        let mut has_short = false;
+        let mut has_long = 0u8;
+        let mut base_type: Option<String> = None;
+
+        for type_spec in &specs.type_specs {
+            match type_spec {
+                TypeSpec::Void => base_type = Some("()".to_string()),
+                TypeSpec::Char => base_type = Some("c_char".to_string()),
+                TypeSpec::Short => has_short = true,
+                TypeSpec::Int => {
+                    if base_type.is_none() {
+                        base_type = Some("c_int".to_string());
+                    }
+                }
+                TypeSpec::Long => has_long += 1,
+                TypeSpec::Float => base_type = Some("c_float".to_string()),
+                TypeSpec::Double => base_type = Some("c_double".to_string()),
+                TypeSpec::Signed => has_signed = true,
+                TypeSpec::Unsigned => has_unsigned = true,
+                TypeSpec::Bool => base_type = Some("bool".to_string()),
+                TypeSpec::Int128 => {
+                    base_type = Some(if has_unsigned { "u128" } else { "i128" }.to_string())
+                }
+                TypeSpec::Struct(s) | TypeSpec::Union(s) => {
+                    if let Some(name) = s.name {
+                        base_type = Some(interner.get(name).to_string());
+                    }
+                }
+                TypeSpec::Enum(_) => base_type = Some("c_int".to_string()),
+                TypeSpec::TypedefName(name) => {
+                    base_type = Some(interner.get(*name).to_string());
+                }
+                _ => {}
+            }
+        }
+
+        // signed/unsigned と short/long の組み合わせを処理
+        if has_short {
+            base_type = Some(if has_unsigned { "c_ushort" } else { "c_short" }.to_string());
+        } else if has_long >= 2 {
+            base_type = Some(if has_unsigned { "c_ulonglong" } else { "c_longlong" }.to_string());
+        } else if has_long == 1 {
+            if base_type.as_deref() == Some("c_double") {
+                // long double は特別扱い（Rust には直接対応がない）
+                base_type = Some("c_double".to_string());
+            } else {
+                base_type = Some(if has_unsigned { "c_ulong" } else { "c_long" }.to_string());
+            }
+        } else if has_unsigned && base_type.is_none() {
+            base_type = Some("c_uint".to_string());
+        } else if has_signed && base_type.is_none() {
+            base_type = Some("c_int".to_string());
+        } else if has_unsigned && base_type.as_deref() == Some("c_char") {
+            base_type = Some("c_uchar".to_string());
+        } else if has_unsigned && base_type.as_deref() == Some("c_int") {
+            base_type = Some("c_uint".to_string());
+        }
+
+        base_type
+    }
+
+    /// 派生型（ポインタ、配列など）を適用
+    fn apply_derived_decls(
+        &self,
+        base_type: &str,
+        derived: &[DerivedDecl],
+        _qualifiers: &crate::ast::TypeQualifiers,
+    ) -> String {
+        let mut result = base_type.to_string();
+
+        // 派生宣言子は逆順に適用（内側から外側へ）
+        for decl in derived.iter().rev() {
+            match decl {
+                DerivedDecl::Pointer(quals) => {
+                    if quals.is_const {
+                        result = format!("*const {}", result);
+                    } else {
+                        result = format!("*mut {}", result);
+                    }
+                }
+                DerivedDecl::Array(_) => {
+                    // 配列はポインタとして扱う
+                    result = format!("*mut {}", result);
+                }
+                DerivedDecl::Function(_) => {
+                    // 関数ポインタ（簡略化）
+                    result = "unsafe extern \"C\" fn()".to_string();
+                }
+            }
+        }
+
+        result
     }
 
     /// フィールド名と構造体名を手動で登録
@@ -145,6 +274,40 @@ impl FieldsDict {
                 None
             }
         })
+    }
+
+    /// (構造体名, フィールド名) からフィールド型を検索
+    pub fn get_field_type(
+        &self,
+        struct_name: InternedStr,
+        field_name: InternedStr,
+    ) -> Option<&FieldType> {
+        self.field_types.get(&(struct_name, field_name))
+    }
+
+    /// フィールド名から一意にフィールド型を特定（構造体が1つしかない場合）
+    pub fn get_unique_field_type(&self, field_name: InternedStr) -> Option<&FieldType> {
+        let struct_name = self.lookup_unique(field_name)?;
+        self.field_types.get(&(struct_name, field_name))
+    }
+
+    /// フィールド型をオーバーライド設定
+    /// 自動収集できない場合や、特殊なマッピングが必要な場合に使用
+    pub fn set_field_type_override(
+        &mut self,
+        struct_name: InternedStr,
+        field_name: InternedStr,
+        rust_type: String,
+    ) {
+        self.field_types.insert(
+            (struct_name, field_name),
+            FieldType { rust_type },
+        );
+    }
+
+    /// 収集されたフィールド型の数を取得
+    pub fn field_types_count(&self) -> usize {
+        self.field_types.len()
     }
 
     /// 辞書をダンプ
@@ -209,6 +372,28 @@ impl FieldsDict {
             unique_fields,
             ambiguous_fields,
         }
+    }
+
+    /// フィールド型情報をダンプ（デバッグ用）
+    pub fn dump_field_types(&self, interner: &StringInterner) -> String {
+        let mut result = String::new();
+
+        // (構造体名, フィールド名) でソートして出力
+        let mut entries: Vec<_> = self.field_types.iter().collect();
+        entries.sort_by_key(|((struct_name, field_name), _)| {
+            (interner.get(*struct_name), interner.get(*field_name))
+        });
+
+        for ((struct_name, field_name), field_type) in entries {
+            let struct_str = interner.get(*struct_name);
+            let field_str = interner.get(*field_name);
+            result.push_str(&format!(
+                "{}.{}: {}\n",
+                struct_str, field_str, field_type.rust_type
+            ));
+        }
+
+        result
     }
 }
 
