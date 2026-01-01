@@ -384,6 +384,15 @@ impl<'a> RustCodeGen<'a> {
             }
 
             Expr::Call { func, args, .. } => {
+                // __builtin_expect(x, c) を x に置き換え
+                // GCCの分岐予測ヒントはRustでは実装できないため、第1引数をそのまま返す
+                if let Expr::Ident(id, _) = func.as_ref() {
+                    let name = self.interner.get(*id);
+                    if name == "__builtin_expect" && args.len() == 2 {
+                        return self.expr_to_rust(&args[0]);
+                    }
+                }
+
                 let func_frag = self.expr_to_rust(func);
                 let args_frags: Vec<CodeFragment> = args.iter()
                     .map(|a| self.expr_to_rust(a))
