@@ -1011,9 +1011,8 @@ fn normalize_rust_type(rust_type: &str) -> String {
     let mut s = rust_type.trim().to_string();
     // 空白を除去
     s = s.replace(" ", "");
-    // 先頭のコロン（::std::...）を除去
-    s = s.trim_start_matches(':').to_string();
-    s = s.replace("::", "::");
+    // ::std:: プレフィックスを std:: に統一
+    s = s.replace("::std::", "std::");
     // std::ffi:: プレフィックスを除去
     s = s.replace("std::ffi::", "");
     // std::os::raw:: プレフィックスを除去
@@ -1414,6 +1413,10 @@ mod tests {
         assert!(types_match("char *", "*mut c_char"));
         // C "const char *" should match Rust "*const c_char"
         assert!(types_match("const char *", "*const c_char"));
+        // C "const char * const" should match Rust "*const c_char"
+        assert!(types_match("const char * const", "*const c_char"));
+        // C "const char * const" should also match with ::std::os::raw:: prefix
+        assert!(types_match("const char * const", "*const ::std::os::raw::c_char"));
     }
 
     #[test]

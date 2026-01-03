@@ -1095,6 +1095,8 @@ mod tests {
         assert_eq!(c_type_to_rust("char *"), "*mut c_char");
         assert_eq!(c_type_to_rust("const char *"), "*const c_char");
         assert_eq!(c_type_to_rust("SV * const"), "*mut SV");
+        // 二重 const: "const char * const" は "*const c_char" と同じ
+        assert_eq!(c_type_to_rust("const char * const"), "*const c_char");
     }
 
     #[test]
