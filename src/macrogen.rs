@@ -12,11 +12,8 @@ use crate::{
     ApidocDict, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
     InferenceContext, MacroAnalyzer, MacroCategory, MacroKind, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, extract_called_functions,
-    get_perl_config, PerlConfigError,
+    get_default_target_dir, get_perl_config, PerlConfigError,
 };
-
-/// デフォルトのターゲットディレクトリ
-pub const DEFAULT_TARGET_DIR: &str = "/usr/lib64/perl5/CORE";
 
 /// Rust関数生成の設定
 #[derive(Debug, Clone)]
@@ -67,7 +64,7 @@ impl Default for MacrogenConfig {
             bindings: PathBuf::new(),
             apidoc: None,
             pp_config: PPConfig::default(),
-            target_dir: PathBuf::from(DEFAULT_TARGET_DIR),
+            target_dir: PathBuf::new(), // with_perl_auto_config() で設定される
             field_type_overrides: vec![],
             field_rust_type_overrides: vec![],
             include_inline_functions: true,
@@ -100,6 +97,7 @@ impl MacrogenBuilder {
         let perl_cfg = get_perl_config()?;
         self.config.pp_config.include_paths = perl_cfg.include_paths;
         self.config.pp_config.predefined = perl_cfg.defines;
+        self.config.target_dir = get_default_target_dir()?;
         Ok(self)
     }
 
@@ -186,7 +184,9 @@ impl MacrogenBuilder {
     }
 
     /// 設定を構築
-    pub fn build(self) -> MacrogenConfig {
+    pub fn build(mut self) -> MacrogenConfig {
+        // pp_config.target_dir を config.target_dir から同期
+        self.config.pp_config.target_dir = Some(self.config.target_dir.clone());
         self.config
     }
 }
@@ -290,7 +290,6 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     // 2. フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
     let target_dir_str = config.target_dir.to_string_lossy().to_string();
-    fields_dict.set_target_dir(&target_dir_str);
 
     // 3. プリプロセッサを初期化（第1パス：マクロ分析用）
     if config.progress {
@@ -316,23 +315,20 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
     parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path, interner);
+            // フィールド情報を収集
+            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
             // inline関数を収集（対象ディレクトリ内のみ）
-            if config.include_inline_functions {
-                let path_str = path.to_string_lossy();
-                let is_target = path_str.starts_with(&target_dir_str);
-
-                if is_target {
-                    if let ExternalDecl::FunctionDef(func_def) = decl {
-                        if func_def.specs.is_inline {
-                            if let Some(name) = func_def.declarator.name {
-                                inline_functions.push((
-                                    interner.get(name).to_string(),
-                                    decl.clone(),
-                                    path_str.to_string(),
-                                ));
-                            }
+            if config.include_inline_functions && decl.is_target() {
+                if let ExternalDecl::FunctionDef(func_def) = decl {
+                    if func_def.specs.is_inline {
+                        if let Some(name) = func_def.declarator.name {
+                            let path_str = path.to_string_lossy();
+                            inline_functions.push((
+                                interner.get(name).to_string(),
+                                decl.clone(),
+                                path_str.to_string(),
+                            ));
                         }
                     }
                 }
@@ -463,8 +459,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     }
 
     // 10. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
-    analyzer.set_target_dir(&target_dir_str);
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs.clone());
     analyzer.set_bindings_consts(bindings_consts.clone());
     analyzer.set_thx_functions(thx_functions.clone());

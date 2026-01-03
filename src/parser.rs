@@ -115,6 +115,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     fn parse_external_decl(&mut self) -> Result<ExternalDecl> {
         let comments = self.current.leading_comments.clone();
         let loc = self.current.loc.clone();
+        let is_target = self.source.is_file_in_target(loc.file_id);
 
         // 宣言指定子をパース
         let specs = self.parse_decl_specs()?;
@@ -127,6 +128,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 declarators: Vec::new(),
                 loc,
                 comments,
+                is_target,
             }));
         }
 
@@ -146,6 +148,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 body,
                 loc,
                 comments,
+                is_target,
             }));
         }
 
@@ -193,6 +196,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             declarators,
             loc,
             comments,
+            is_target,
         }))
     }
 
@@ -863,6 +867,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     fn parse_declaration(&mut self) -> Result<Declaration> {
         let comments = self.current.leading_comments.clone();
         let loc = self.current.loc.clone();
+        let is_target = self.source.is_file_in_target(loc.file_id);
         let specs = self.parse_decl_specs()?;
 
         if self.check(&TokenKind::Semi) {
@@ -872,6 +877,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 declarators: Vec::new(),
                 loc,
                 comments,
+                is_target,
             });
         }
 
@@ -916,6 +922,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             declarators,
             loc,
             comments,
+            is_target,
         })
     }
 

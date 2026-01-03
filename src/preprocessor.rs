@@ -34,6 +34,8 @@ pub struct PPConfig {
     pub predefined: Vec<(String, Option<String>)>,
     /// プリプロセッサデバッグ出力 (--debug-pp)
     pub debug_pp: bool,
+    /// ターゲットディレクトリ（このディレクトリ内で定義されたマクロにis_target=trueを設定）
+    pub target_dir: Option<PathBuf>,
 }
 
 /// 条件コンパイル状態
@@ -1368,6 +1370,7 @@ impl Preprocessor {
             }
         }
 
+        let is_target = self.is_current_file_in_target();
         let def = MacroDef {
             name,
             kind,
@@ -1375,6 +1378,7 @@ impl Preprocessor {
             def_loc: loc,
             leading_comments: std::mem::take(&mut self.pending_comments),
             is_builtin: self.defining_builtin,
+            is_target,
         };
 
         self.macros.define(def, &self.interner);
@@ -2582,6 +2586,22 @@ impl Preprocessor {
         &self.macros
     }
 
+    /// 現在のファイルがターゲットディレクトリ内かどうかを判定
+    fn is_current_file_in_target(&self) -> bool {
+        let target_dir = match &self.config.target_dir {
+            Some(dir) => dir,
+            None => return false,
+        };
+
+        let file_id = match self.sources.last() {
+            Some(source) => source.file_id,
+            None => return false,
+        };
+
+        let path = self.files.get_path(file_id);
+        path.starts_with(target_dir)
+    }
+
     /// 全トークンを収集
     pub fn collect_tokens(&mut self) -> Result<Vec<Token>, CompileError> {
         let mut tokens = Vec::new();
@@ -2614,6 +2634,15 @@ impl TokenSource for Preprocessor {
 
     fn files(&self) -> &FileRegistry {
         &self.files
+    }
+
+    fn is_file_in_target(&self, file_id: crate::source::FileId) -> bool {
+        let target_dir = match &self.config.target_dir {
+            Some(dir) => dir,
+            None => return false,
+        };
+        let path = self.files.get_path(file_id);
+        path.starts_with(target_dir)
     }
 }
 

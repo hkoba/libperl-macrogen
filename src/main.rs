@@ -10,9 +10,9 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    generate, get_perl_config, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer,
-    MacroCategory, MacrogenBuilder, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict,
-    SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter, DEFAULT_TARGET_DIR,
+    generate, get_default_target_dir, get_perl_config, CompileError, ExternalDecl, FieldsDict,
+    FileId, MacroAnalyzer, MacroCategory, MacrogenBuilder, PPConfig, Parser, Preprocessor,
+    RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -128,6 +128,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             include_paths: perl_cfg.include_paths,
             predefined: defines,
             debug_pp: cli.debug_pp,
+            target_dir: cli.target_dir.clone(),
         }
     } else {
         // 従来通り CLI 引数から
@@ -135,6 +136,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             include_paths: cli.include,
             predefined: parse_defines(&cli.define),
             debug_pp: cli.debug_pp,
+            target_dir: cli.target_dir.clone(),
         }
     };
 
@@ -259,15 +261,9 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
 }
 
 /// 構造体フィールド辞書をダンプ
-fn run_dump_fields_dict(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
-
-    // ターゲットディレクトリを設定
-    let target_dir_str = target_dir
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| DEFAULT_TARGET_DIR.to_string());
-    fields_dict.set_target_dir(&target_dir_str);
 
     let mut parser = match Parser::new(pp) {
         Ok(p) => p,
@@ -275,9 +271,9 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> 
     };
 
     // パースしながらフィールド情報を収集
-    parser.parse_each(|result, _loc, path, interner| {
+    parser.parse_each(|result, _loc, _path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path, interner);
+            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -306,8 +302,11 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
     // ターゲットディレクトリを設定
     let target_dir_str = target_dir
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| DEFAULT_TARGET_DIR.to_string());
-    fields_dict.set_target_dir(&target_dir_str);
+        .unwrap_or_else(|| {
+            get_default_target_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
 
     // パースしてフィールド辞書を構築
     let mut parser = match Parser::new(pp) {
@@ -315,9 +314,9 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
         Err(e) => return Err(format_error(&e, pp).into()),
     };
 
-    parser.parse_each(|result, _loc, path, interner| {
+    parser.parse_each(|result, _loc, _path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path, interner);
+            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -342,7 +341,7 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
     // マクロ解析
     let interner = pp.interner();
     let files = pp.files();
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
@@ -396,7 +395,11 @@ fn run_gen_rust_fns_lib(
 fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
     // フィールド辞書を作成
     let mut fields_dict = FieldsDict::new();
-    fields_dict.set_target_dir(DEFAULT_TARGET_DIR);
+
+    // ターゲットディレクトリを設定
+    let target_dir_str = get_default_target_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
 
     // パースしてフィールド辞書を構築
     let mut parser = match Parser::new(pp) {
@@ -408,15 +411,16 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
 
     parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, path, interner);
+            // フィールド情報を収集
+            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
             // inline関数を即座に出力
-            let path_str = path.to_string_lossy();
-            if path_str.contains("/usr/lib64/perl5/CORE") {
+            if decl.is_target() {
                 if let ExternalDecl::FunctionDef(func_def) = decl {
                     if func_def.specs.is_inline {
                         if let Some(name) = func_def.declarator.name {
                             let name_str = interner.get(name);
+                            let path_str = path.to_string_lossy();
                             println!("// INLINE: {} (from {})", name_str, path_str);
                             inline_count += 1;
                         }
@@ -447,7 +451,7 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
     // マクロ解析
     let interner = pp.interner();
     let files = pp.files();
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict);
+    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 

@@ -16,6 +16,7 @@ fn parse(source: &str) -> Vec<ExternalDecl> {
         include_paths: vec![],
         predefined: vec![],
         debug_pp: false,
+        target_dir: None,
     };
 
     let mut pp = Preprocessor::new(config);

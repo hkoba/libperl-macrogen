@@ -21,6 +21,16 @@ pub enum ExternalDecl {
     Declaration(Declaration),
 }
 
+impl ExternalDecl {
+    /// ターゲットディレクトリで定義されたかどうか
+    pub fn is_target(&self) -> bool {
+        match self {
+            ExternalDecl::FunctionDef(f) => f.is_target,
+            ExternalDecl::Declaration(d) => d.is_target,
+        }
+    }
+}
+
 /// 関数定義
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
@@ -29,6 +39,8 @@ pub struct FunctionDef {
     pub body: CompoundStmt,
     pub loc: SourceLocation,
     pub comments: Vec<Comment>,
+    /// ターゲットディレクトリで定義されたかどうか
+    pub is_target: bool,
 }
 
 /// 宣言
@@ -38,6 +50,8 @@ pub struct Declaration {
     pub declarators: Vec<InitDeclarator>,
     pub loc: SourceLocation,
     pub comments: Vec<Comment>,
+    /// ターゲットディレクトリで定義されたかどうか
+    pub is_target: bool,
 }
 
 /// 宣言指定子

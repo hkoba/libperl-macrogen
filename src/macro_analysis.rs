@@ -75,22 +75,20 @@ pub struct MacroAnalyzer<'a> {
     thx_functions: HashSet<String>,
 }
 
-/// デフォルトのターゲットディレクトリ
-pub const DEFAULT_TARGET_DIR: &str = "/usr/lib64/perl5/CORE";
-
 impl<'a> MacroAnalyzer<'a> {
     /// 新しい解析器を作成
     pub fn new(
         interner: &'a StringInterner,
         files: &'a FileRegistry,
         fields_dict: &'a FieldsDict,
+        target_dir: &str,
     ) -> Self {
         Self {
             interner,
             files,
             info: HashMap::new(),
             fields_dict,
-            target_dir: DEFAULT_TARGET_DIR.to_string(),
+            target_dir: target_dir.to_string(),
             typedefs: HashSet::new(),
             constant_macros: HashSet::new(),
             bindings_consts: HashSet::new(),
@@ -102,11 +100,6 @@ impl<'a> MacroAnalyzer<'a> {
     /// typedef名のセットを設定
     pub fn set_typedefs(&mut self, typedefs: HashSet<InternedStr>) {
         self.typedefs = typedefs;
-    }
-
-    /// 対象ディレクトリを設定
-    pub fn set_target_dir(&mut self, dir: &str) {
-        self.target_dir = dir.to_string();
     }
 
     /// bindings.rs の定数名を設定

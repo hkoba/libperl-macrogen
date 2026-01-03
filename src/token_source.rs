@@ -21,6 +21,13 @@ pub trait TokenSource {
 
     /// FileRegistry への参照を取得
     fn files(&self) -> &FileRegistry;
+
+    /// 指定されたファイルがターゲットディレクトリ内かどうかを判定
+    /// デフォルト実装は常に false を返す（TokenSlice など）
+    fn is_file_in_target(&self, file_id: crate::source::FileId) -> bool {
+        let _ = file_id;
+        false
+    }
 }
 
 /// トークン列からトークンを供給する実装

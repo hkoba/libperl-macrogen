@@ -14,6 +14,7 @@ fn preprocess(source: &str) -> Preprocessor {
         include_paths: vec![],
         predefined: vec![],
         debug_pp: false,
+        target_dir: None,
     };
 
     let mut pp = Preprocessor::new(config);
@@ -218,6 +219,7 @@ fn test_predefined_macros() {
         include_paths: vec![],
         predefined: vec![("TEST_MACRO".to_string(), Some("123".to_string()))],
         debug_pp: false,
+        target_dir: None,
     };
 
     let mut file = NamedTempFile::new().unwrap();

@@ -135,6 +135,16 @@ fn get_ccopts_defines() -> Result<Vec<(String, Option<String>)>, PerlConfigError
     Ok(defines)
 }
 
+/// Perl のデフォルトターゲットディレクトリを取得
+/// archlib/CORE (例: /usr/lib64/perl5/CORE)
+pub fn get_default_target_dir() -> Result<PathBuf, PerlConfigError> {
+    let archlib = get_config_value("archlib")?;
+    if archlib.is_empty() {
+        return Err(PerlConfigError::ConfigNotFound("archlib".to_string()));
+    }
+    Ok(PathBuf::from(&archlib).join("CORE"))
+}
+
 /// Perl Config.pm から設定を取得
 pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
     // インクルードパスを取得

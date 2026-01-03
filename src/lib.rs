@@ -42,7 +42,7 @@ pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, Parser};
-pub use perl_config::{get_perl_config, PerlConfig, PerlConfigError};
+pub use perl_config::{get_default_target_dir, get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{PPConfig, Preprocessor};
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
@@ -53,7 +53,6 @@ pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 // マクロ生成ライブラリ
 pub use macrogen::{
     generate, MacrogenBuilder, MacrogenConfig, MacrogenError, MacrogenResult, MacrogenStats,
-    DEFAULT_TARGET_DIR,
 };
 
 #[cfg(test)]

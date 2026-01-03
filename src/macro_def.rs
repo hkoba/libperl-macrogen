@@ -35,6 +35,8 @@ pub struct MacroDef {
     pub leading_comments: Vec<Comment>,
     /// ビルトインマクロかどうか
     pub is_builtin: bool,
+    /// ターゲットディレクトリで定義されたマクロかどうか
+    pub is_target: bool,
 }
 
 impl MacroDef {
@@ -51,6 +53,7 @@ impl MacroDef {
             def_loc,
             leading_comments: Vec::new(),
             is_builtin: false,
+            is_target: false,
         }
     }
 
@@ -69,7 +72,14 @@ impl MacroDef {
             def_loc,
             leading_comments: Vec::new(),
             is_builtin: false,
+            is_target: false,
         }
+    }
+
+    /// ターゲットディレクトリのマクロとして設定
+    pub fn with_target(mut self, is_target: bool) -> Self {
+        self.is_target = is_target;
+        self
     }
 
     /// コメント付きで作成

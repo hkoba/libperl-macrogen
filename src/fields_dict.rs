@@ -4,7 +4,6 @@
 //! マッピングと、フィールドの型情報を記録する。
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StructSpec, TypeSpec};
 use crate::intern::{InternedStr, StringInterner};
@@ -24,8 +23,6 @@ pub struct FieldsDict {
     field_to_structs: HashMap<InternedStr, HashSet<InternedStr>>,
     /// (構造体名, フィールド名) -> フィールド型
     field_types: HashMap<(InternedStr, InternedStr), FieldType>,
-    /// 収集対象のディレクトリパス（単一）
-    target_dir: Option<String>,
 }
 
 impl FieldsDict {
@@ -34,32 +31,16 @@ impl FieldsDict {
         Self::default()
     }
 
-    /// 収集対象ディレクトリを設定
-    pub fn set_target_dir(&mut self, dir: &str) {
-        self.target_dir = Some(dir.to_string());
-    }
-
-    /// 指定されたパスが収集対象かどうかを判定
-    fn is_target_path(&self, path: &Path) -> bool {
-        match &self.target_dir {
-            None => true, // ターゲットが指定されていなければ全て対象
-            Some(dir) => {
-                let path_str = path.to_string_lossy();
-                path_str.starts_with(dir)
-            }
-        }
-    }
-
     /// 外部宣言からフィールド情報を収集
-    /// interner はパース中のインターナーへの参照を渡す
+    /// is_target: この宣言がターゲットディレクトリ内で定義されたかどうか
     pub fn collect_from_external_decl(
         &mut self,
         decl: &ExternalDecl,
-        path: &Path,
+        is_target: bool,
         interner: &StringInterner,
     ) {
-        // パスが収集対象かチェック
-        if !self.is_target_path(path) {
+        // ターゲットディレクトリ内の宣言のみ収集
+        if !is_target {
             return;
         }
 
