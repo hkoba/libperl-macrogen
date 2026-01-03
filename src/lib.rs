@@ -25,6 +25,8 @@ pub mod sexp;
 pub mod source;
 pub mod token;
 pub mod token_source;
+pub mod type_registry;
+pub mod unified_type;
 
 // 主要な型を再エクスポート
 pub use apidoc::{ApidocArg, ApidocDict, ApidocEntry, ApidocFlags, ApidocStats, Nullability};
@@ -50,6 +52,8 @@ pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
+pub use type_registry::{TypeEquality, TypeRegistry, TypeRegistryStats};
+pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
 
 // マクロ生成ライブラリ
 pub use macrogen::{
