@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::io;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
@@ -13,6 +14,7 @@ use crate::{
     InferenceContext, MacroAnalyzer, MacroCategory, MacroKind, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, extract_called_functions,
     get_default_target_dir, get_perl_config, PerlConfigError,
+    TypedSexpPrinter,
 };
 
 /// Rust関数生成の設定
@@ -589,6 +591,17 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                     continue;
                 }
             };
+
+            // println!("parsed expr: {:?}", expr);
+            {
+                eprint!("macro {}: ", name_str);
+                let stderr = io::stderr();
+                let mut handle = stderr.lock();
+                let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
+                let _ = printer.print_expr(& expr);
+                handle.flush()?;
+                eprint!("\n");
+            }
 
             if let MacroKind::Function { ref params, .. } = def.kind {
                 let called_fns = extract_called_functions(&expr, interner);

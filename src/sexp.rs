@@ -1157,7 +1157,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     }
 
     /// 式を出力（型注釈付き）
-    fn print_expr(&mut self, expr: &Expr) -> Result<()> {
+    pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         match expr {
             Expr::Ident(id, _) => {
                 write!(self.writer, "(ident {})", self.interner.get(*id))?;
