@@ -848,39 +848,9 @@ impl<'a> MacroAnalyzer2<'a> {
 
     /// C型文字列をRust型文字列に変換
     fn c_type_to_rust(&self, c_type: &str) -> String {
-        let trimmed = c_type.trim();
-
-        // ポインタ型
-        if let Some(base) = trimmed.strip_suffix('*') {
-            let base = base.trim();
-            if let Some(inner) = base.strip_prefix("const ") {
-                return format!("*const {}", self.c_type_to_rust(inner.trim()));
-            }
-            return format!("*mut {}", self.c_type_to_rust(base));
-        }
-
-        // 基本型
-        match trimmed {
-            "void" => "()".to_string(),
-            "char" => "c_char".to_string(),
-            "int" => "c_int".to_string(),
-            "unsigned" | "unsigned int" => "c_uint".to_string(),
-            "long" => "c_long".to_string(),
-            "unsigned long" => "c_ulong".to_string(),
-            "short" => "c_short".to_string(),
-            "unsigned short" => "c_ushort".to_string(),
-            "float" => "c_float".to_string(),
-            "double" => "c_double".to_string(),
-            "size_t" | "Size_t" | "STRLEN" => "usize".to_string(),
-            "SSize_t" => "isize".to_string(),
-            "bool" | "_Bool" => "bool".to_string(),
-            "I32" => "i32".to_string(),
-            "U32" => "u32".to_string(),
-            "IV" => "isize".to_string(),
-            "UV" => "usize".to_string(),
-            "NV" => "c_double".to_string(),
-            _ => trimmed.to_string(),
-        }
+        // iterative_infer の c_type_to_rust を使用
+        // こちらは "SV * const" などのパターンを正しく処理する
+        crate::iterative_infer::c_type_to_rust(c_type)
     }
 
     // ========================================================================
