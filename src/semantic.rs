@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
+use crate::apidoc::ApidocDict;
 use crate::ast::*;
+use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::source::SourceLocation;
 
@@ -254,11 +256,19 @@ pub struct SemanticAnalyzer<'a> {
     union_defs: HashMap<InternedStr, Vec<(InternedStr, Type)>>,
     /// typedef定義 (名前 -> 型)
     typedef_defs: HashMap<InternedStr, Type>,
+    /// Apidoc辞書（関数/マクロのシグネチャ情報）
+    apidoc: Option<&'a ApidocDict>,
+    /// フィールド辞書（構造体フィールドの型情報）
+    fields_dict: Option<&'a FieldsDict>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
     /// 新しい意味解析器を作成
-    pub fn new(interner: &'a StringInterner) -> Self {
+    pub fn new(
+        interner: &'a StringInterner,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+    ) -> Self {
         let global_scope = Scope::new(None);
         Self {
             interner,
@@ -267,6 +277,8 @@ impl<'a> SemanticAnalyzer<'a> {
             struct_defs: HashMap::new(),
             union_defs: HashMap::new(),
             typedef_defs: HashMap::new(),
+            apidoc,
+            fields_dict,
         }
     }
 
@@ -580,16 +592,20 @@ impl<'a> SemanticAnalyzer<'a> {
             Expr::Call { func, .. } => {
                 let func_ty = self.infer_expr_type(func);
                 if let Type::Function { return_type, .. } = func_ty {
-                    *return_type
-                } else if let Type::Pointer(inner, _) = func_ty {
-                    if let Type::Function { return_type, .. } = *inner {
-                        *return_type
-                    } else {
-                        Type::Unknown
-                    }
-                } else {
-                    Type::Unknown
+                    return *return_type;
                 }
+                if let Type::Pointer(inner, _) = func_ty {
+                    if let Type::Function { return_type, .. } = *inner {
+                        return *return_type;
+                    }
+                }
+                // シンボルテーブルで見つからない場合、ApidocDict を検索
+                if let Expr::Ident(func_name, _) = func.as_ref() {
+                    if let Some(ret_ty) = self.lookup_apidoc_return_type(*func_name) {
+                        return ret_ty;
+                    }
+                }
+                Type::Unknown
             }
 
             // メンバーアクセス
@@ -706,7 +722,8 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                     }
                 }
-                Type::Unknown
+                // FieldsDictから検索
+                self.lookup_field_type_from_dict(member)
             }
             Type::Union { name, members } => {
                 if let Some(m) = members {
@@ -725,10 +742,25 @@ impl<'a> SemanticAnalyzer<'a> {
                         }
                     }
                 }
-                Type::Unknown
+                // FieldsDictから検索
+                self.lookup_field_type_from_dict(member)
+            }
+            // 基底型が不明な場合もFieldsDictを試す
+            Type::TypedefName(_) | Type::Unknown => {
+                self.lookup_field_type_from_dict(member)
             }
             _ => Type::Unknown,
         }
+    }
+
+    /// FieldsDictからフィールド型を検索
+    fn lookup_field_type_from_dict(&self, field: InternedStr) -> Type {
+        if let Some(fields_dict) = self.fields_dict {
+            if let Some(field_type) = fields_dict.get_unique_field_type(field) {
+                return self.parse_rust_type_string(&field_type.rust_type);
+            }
+        }
+        Type::Unknown
     }
 
     /// 通常の算術変換
@@ -859,6 +891,103 @@ impl<'a> SemanticAnalyzer<'a> {
             _ => {}
         }
     }
+
+    /// ApidocDict から関数/マクロの戻り値型を検索
+    fn lookup_apidoc_return_type(&self, func_name: InternedStr) -> Option<Type> {
+        let apidoc = self.apidoc?;
+        let func_name_str = self.interner.get(func_name);
+        let entry = apidoc.get(func_name_str)?;
+        let return_type_str = entry.return_type.as_ref()?;
+
+        // C型文字列をType に変換
+        Some(self.parse_c_type_string(return_type_str))
+    }
+
+    /// C型文字列を Type に変換
+    fn parse_c_type_string(&self, type_str: &str) -> Type {
+        let trimmed = type_str.trim();
+
+        // ポインタ型
+        if let Some(base) = trimmed.strip_suffix('*') {
+            let base = base.trim();
+            if let Some(inner) = base.strip_prefix("const ") {
+                return Type::Pointer(
+                    Box::new(self.parse_c_type_string(inner.trim())),
+                    TypeQualifiers { is_const: true, ..Default::default() },
+                );
+            }
+            return Type::Pointer(
+                Box::new(self.parse_c_type_string(base)),
+                TypeQualifiers::default(),
+            );
+        }
+
+        // 基本型
+        match trimmed {
+            "void" => Type::Void,
+            "char" => Type::Char,
+            "int" => Type::Int,
+            "unsigned" | "unsigned int" => Type::UnsignedInt,
+            "long" => Type::Long,
+            "unsigned long" => Type::UnsignedLong,
+            "size_t" | "Size_t" | "STRLEN" => Type::UnsignedLong,
+            "SSize_t" => Type::Long,
+            "bool" | "_Bool" | "bool_t" => Type::Bool,
+            "I32" => Type::Int,
+            "U32" => Type::UnsignedInt,
+            "IV" => Type::Long,
+            "UV" => Type::UnsignedLong,
+            "NV" => Type::Double,
+            _ => {
+                // typedef名として扱う (SV, AV, HV など)
+                if let Some(interned) = self.interner.lookup(trimmed) {
+                    Type::TypedefName(interned)
+                } else {
+                    Type::Unknown
+                }
+            }
+        }
+    }
+
+    /// Rust型文字列を Type に変換
+    fn parse_rust_type_string(&self, type_str: &str) -> Type {
+        let trimmed = type_str.trim();
+
+        // ポインタ型
+        if let Some(rest) = trimmed.strip_prefix("*mut ") {
+            return Type::Pointer(
+                Box::new(self.parse_rust_type_string(rest)),
+                TypeQualifiers::default(),
+            );
+        }
+        if let Some(rest) = trimmed.strip_prefix("*const ") {
+            return Type::Pointer(
+                Box::new(self.parse_rust_type_string(rest)),
+                TypeQualifiers { is_const: true, ..Default::default() },
+            );
+        }
+
+        // 基本型
+        match trimmed {
+            "()" => Type::Void,
+            "c_char" => Type::Char,
+            "c_int" => Type::Int,
+            "c_uint" => Type::UnsignedInt,
+            "c_long" => Type::Long,
+            "c_ulong" => Type::UnsignedLong,
+            "bool" => Type::Bool,
+            "usize" => Type::UnsignedLong,
+            "isize" => Type::Long,
+            _ => {
+                // typedef名として扱う
+                if let Some(interned) = self.interner.lookup(trimmed) {
+                    Type::TypedefName(interned)
+                } else {
+                    Type::Unknown
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -881,7 +1010,7 @@ mod tests {
     fn test_scope_management() {
         let mut interner = StringInterner::new();
         let x = interner.intern("x");
-        let mut analyzer = SemanticAnalyzer::new(&interner);
+        let mut analyzer = SemanticAnalyzer::new(&interner, None, None);
 
         // グローバルスコープでxを定義
         analyzer.define_symbol(Symbol {

@@ -4,7 +4,9 @@
 
 use std::io::{Result, Write};
 
+use crate::apidoc::ApidocDict;
 use crate::ast::*;
+use crate::fields_dict::FieldsDict;
 use crate::intern::StringInterner;
 use crate::semantic::{SemanticAnalyzer, Type};
 
@@ -692,11 +694,16 @@ pub struct TypedSexpPrinter<'a, W: Write> {
 
 impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     /// 新しいプリンターを作成
-    pub fn new(writer: W, interner: &'a StringInterner) -> Self {
+    pub fn new(
+        writer: W,
+        interner: &'a StringInterner,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+    ) -> Self {
         Self {
             writer,
             interner,
-            analyzer: SemanticAnalyzer::new(interner),
+            analyzer: SemanticAnalyzer::new(interner, apidoc, fields_dict),
             indent: 0,
         }
     }

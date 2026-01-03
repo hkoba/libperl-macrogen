@@ -32,7 +32,7 @@ fn run_test_case(name: &str) {
     // 型注釈付き S-expression を生成
     let mut output = Vec::new();
     {
-        let mut printer = TypedSexpPrinter::new(&mut output, pp.interner());
+        let mut printer = TypedSexpPrinter::new(&mut output, pp.interner(), None, None);
         for decl in &tu.decls {
             printer.print_external_decl(decl).unwrap();
         }

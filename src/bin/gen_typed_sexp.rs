@@ -35,7 +35,7 @@ fn main() {
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
+    let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
     for decl in &tu.decls {
         printer.print_external_decl(decl).unwrap();
     }

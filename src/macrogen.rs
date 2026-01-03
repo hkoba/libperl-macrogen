@@ -597,7 +597,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 eprint!("macro {}: ", name_str);
                 let stderr = io::stderr();
                 let mut handle = stderr.lock();
-                let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
+                let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
                 let _ = printer.print_expr(& expr);
                 handle.flush()?;
                 eprint!("\n");

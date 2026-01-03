@@ -545,7 +545,7 @@ fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(),
     if let Some(output_path) = output {
         let file = File::create(output_path)?;
         let mut writer = BufWriter::new(file);
-        let mut printer = TypedSexpPrinter::new(&mut writer, pp.interner());
+        let mut printer = TypedSexpPrinter::new(&mut writer, pp.interner(), None, None);
         for decl in &tu.decls {
             printer.print_external_decl(decl)?;
         }
@@ -553,7 +553,7 @@ fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(),
     } else {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
+        let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
         for decl in &tu.decls {
             printer.print_external_decl(decl)?;
         }
