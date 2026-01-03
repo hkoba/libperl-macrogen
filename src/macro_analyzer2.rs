@@ -583,45 +583,13 @@ impl<'a> MacroAnalyzer2<'a> {
     }
 
     /// Type を Rust型文字列に変換
+    ///
+    /// UnifiedType を使用した統一的な型変換を行う
     fn type_to_rust_string(&self, ty: &Type) -> Option<String> {
-        match ty {
-            Type::Void => Some("()".to_string()),
-            Type::Char => Some("c_char".to_string()),
-            Type::SignedChar => Some("c_schar".to_string()),
-            Type::UnsignedChar => Some("c_uchar".to_string()),
-            Type::Short => Some("c_short".to_string()),
-            Type::UnsignedShort => Some("c_ushort".to_string()),
-            Type::Int => Some("c_int".to_string()),
-            Type::UnsignedInt => Some("c_uint".to_string()),
-            Type::Long => Some("c_long".to_string()),
-            Type::UnsignedLong => Some("c_ulong".to_string()),
-            Type::LongLong => Some("c_longlong".to_string()),
-            Type::UnsignedLongLong => Some("c_ulonglong".to_string()),
-            Type::Float => Some("c_float".to_string()),
-            Type::Double => Some("c_double".to_string()),
-            Type::LongDouble => Some("c_double".to_string()),
-            Type::Bool => Some("bool".to_string()),
-            Type::Int128 => Some("i128".to_string()),
-            Type::UnsignedInt128 => Some("u128".to_string()),
-            Type::Pointer(inner, quals) => {
-                let inner_str = self.type_to_rust_string(inner)?;
-                if quals.is_const {
-                    Some(format!("*const {}", inner_str))
-                } else {
-                    Some(format!("*mut {}", inner_str))
-                }
-            }
-            Type::TypedefName(name) => {
-                Some(self.interner.get(*name).to_string())
-            }
-            Type::Struct { name: Some(name), .. } => {
-                Some(self.interner.get(*name).to_string())
-            }
-            Type::Union { name: Some(name), .. } => {
-                Some(self.interner.get(*name).to_string())
-            }
-            Type::Unknown => None,
-            _ => None,
+        let unified = ty.to_unified(self.interner);
+        match unified {
+            crate::unified_type::UnifiedType::Unknown => None,
+            _ => Some(unified.to_rust_string()),
         }
     }
 

@@ -10,6 +10,7 @@ use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::rust_decl::RustDeclDict;
 use crate::source::SourceLocation;
+use crate::unified_type::{IntSize, UnifiedType};
 
 /// 型変数 ID (制約ベース型推論用)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -212,6 +213,66 @@ impl Type {
     /// ポインタ型かどうか
     pub fn is_pointer(&self) -> bool {
         matches!(self, Type::Pointer(_, _))
+    }
+
+    /// UnifiedType に変換
+    pub fn to_unified(&self, interner: &StringInterner) -> UnifiedType {
+        match self {
+            Type::Void => UnifiedType::Void,
+            Type::Bool => UnifiedType::Bool,
+
+            Type::Char => UnifiedType::Char { signed: None },
+            Type::SignedChar => UnifiedType::Char { signed: Some(true) },
+            Type::UnsignedChar => UnifiedType::Char { signed: Some(false) },
+
+            Type::Short => UnifiedType::Int { signed: true, size: IntSize::Short },
+            Type::UnsignedShort => UnifiedType::Int { signed: false, size: IntSize::Short },
+            Type::Int => UnifiedType::Int { signed: true, size: IntSize::Int },
+            Type::UnsignedInt => UnifiedType::Int { signed: false, size: IntSize::Int },
+            Type::Long => UnifiedType::Int { signed: true, size: IntSize::Long },
+            Type::UnsignedLong => UnifiedType::Int { signed: false, size: IntSize::Long },
+            Type::LongLong => UnifiedType::Int { signed: true, size: IntSize::LongLong },
+            Type::UnsignedLongLong => UnifiedType::Int { signed: false, size: IntSize::LongLong },
+            Type::Int128 => UnifiedType::Int { signed: true, size: IntSize::Int128 },
+            Type::UnsignedInt128 => UnifiedType::Int { signed: false, size: IntSize::Int128 },
+
+            Type::Float => UnifiedType::Float,
+            Type::Double => UnifiedType::Double,
+            Type::LongDouble => UnifiedType::LongDouble,
+
+            Type::Pointer(inner, quals) => UnifiedType::Pointer {
+                inner: Box::new(inner.to_unified(interner)),
+                is_const: quals.is_const,
+            },
+
+            Type::Array(inner, size) => UnifiedType::Array {
+                inner: Box::new(inner.to_unified(interner)),
+                size: *size,
+            },
+
+            Type::Struct { name: Some(n), .. } => {
+                UnifiedType::Named(interner.get(*n).to_string())
+            }
+            Type::Struct { name: None, .. } => UnifiedType::Unknown,
+
+            Type::Union { name: Some(n), .. } => {
+                UnifiedType::Named(interner.get(*n).to_string())
+            }
+            Type::Union { name: None, .. } => UnifiedType::Unknown,
+
+            Type::Enum { name: Some(n) } => {
+                UnifiedType::Named(interner.get(*n).to_string())
+            }
+            Type::Enum { name: None } => UnifiedType::Int { signed: true, size: IntSize::Int },
+
+            Type::TypedefName(name) => {
+                UnifiedType::Named(interner.get(*name).to_string())
+            }
+
+            Type::Function { .. } => UnifiedType::Unknown, // 関数型は未サポート
+
+            Type::Unknown => UnifiedType::Unknown,
+        }
     }
 }
 

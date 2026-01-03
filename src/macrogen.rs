@@ -11,12 +11,12 @@ use std::path::PathBuf;
 
 use crate::{
     ApidocDict, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
-    InferenceContext, MacroAnalyzer2, MacroCategory2, MacroInfo2, MacroKind, MacroTable, PPConfig, Parser,
+    InferenceContext, MacroAnalyzer2, MacroCategory2, MacroKind, MacroTable, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, StringInterner, TokenKind,
+    TypeEquality, TypeRegistry,
     extract_called_functions, get_default_target_dir, get_perl_config, PerlConfigError,
     TypedSexpPrinter,
 };
-use std::collections::HashSet;
 
 /// Rust関数生成の設定
 #[derive(Debug, Clone)]
@@ -636,6 +636,18 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
             eprintln!("Extracted {} type aliases from macros", macro_type_aliases.len());
         }
 
+        // TypeRegistry を作成（型エイリアス解決と比較に使用）
+        let type_registry = TypeRegistry::from_sources(&rust_decls, macros, interner);
+        if config.verbose {
+            let type_stats = type_registry.stats();
+            eprintln!(
+                "TypeRegistry: {} rust aliases, {} structs, {} macro aliases",
+                type_stats.rust_alias_count,
+                type_stats.rust_struct_count,
+                type_stats.macro_alias_count
+            );
+        }
+
         let mut macro_exprs: HashMap<String, crate::Expr> = HashMap::new();
         let mut macro_parse_failures: Vec<(String, String)> = Vec::new();
 
@@ -852,8 +864,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                     params,
                     &apidoc,
                     interner,
-                    &rust_decls,
-                    &macro_type_aliases,
+                    &type_registry,
                 ) {
                     stats.apidoc_comparable += 1;
                     match result.return_type_result {
@@ -1008,83 +1019,6 @@ fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
 }
 
 // ==================== Apidoc 型比較 ====================
-
-/// C型をRust型に正規化して比較可能にする
-fn normalize_c_type_for_comparison(c_type: &str) -> String {
-    crate::iterative_infer::c_type_to_rust(c_type)
-}
-
-/// Rust型を正規化（空白除去、ポインタ表記統一）
-fn normalize_rust_type(rust_type: &str) -> String {
-    let mut s = rust_type.trim().to_string();
-    // 空白を除去
-    s = s.replace(" ", "");
-    // ::std:: プレフィックスを std:: に統一
-    s = s.replace("::std::", "std::");
-    // std::ffi:: プレフィックスを除去
-    s = s.replace("std::ffi::", "");
-    // std::os::raw:: プレフィックスを除去
-    s = s.replace("std::os::raw::", "");
-    s
-}
-
-/// 型エイリアスを解決する
-/// bindings.rs の型エイリアス（例: STRLEN = usize）を使って展開する
-fn resolve_type_alias(
-    ty: &str,
-    rust_decls: &RustDeclDict,
-    macro_type_aliases: &HashMap<String, String>,
-) -> String {
-    let normalized = normalize_rust_type(ty);
-
-    // ポインタ型の場合は中身を解決
-    if normalized.starts_with("*mut") {
-        let inner = normalized.strip_prefix("*mut").unwrap().trim();
-        let resolved = resolve_base_type_for_comparison(inner, rust_decls, macro_type_aliases);
-        return format!("*mut{}", resolved);
-    }
-    if normalized.starts_with("*const") {
-        let inner = normalized.strip_prefix("*const").unwrap().trim();
-        let resolved = resolve_base_type_for_comparison(inner, rust_decls, macro_type_aliases);
-        return format!("*const{}", resolved);
-    }
-
-    resolve_base_type_for_comparison(&normalized, rust_decls, macro_type_aliases)
-}
-
-/// 基本型のエイリアスを解決する（比較用）
-fn resolve_base_type_for_comparison(
-    ty: &str,
-    rust_decls: &RustDeclDict,
-    macro_type_aliases: &HashMap<String, String>,
-) -> String {
-    // まず bindings.rs のエイリアスをチェック
-    if let Some(alias) = rust_decls.types.get(ty) {
-        // エイリアスを再帰的に解決
-        return normalize_rust_type(&alias.ty);
-    }
-
-    // マクロ定義の型エイリアスを経由して解決
-    // 例: Size_t -> size_t -> usize
-    if let Some(base_type) = macro_type_aliases.get(ty) {
-        return resolve_base_type_for_comparison(base_type, rust_decls, macro_type_aliases);
-    }
-
-    // 標準的な型変換（void → c_void など）
-    // c_type_to_rust との整合性を保つ
-    match ty {
-        "void" | "()" => "c_void".to_string(),
-        "size_t" => "usize".to_string(),
-        "ssize_t" => "isize".to_string(),
-        "off_t" | "off64_t" => "i64".to_string(),
-        _ => ty.to_string(),
-    }
-}
-
-/// const/mut を除いたポインタ型を取得（比較用）
-fn strip_const_mut(ty: &str) -> String {
-    ty.replace("*mut", "*").replace("*const", "*")
-}
 
 /// apidoc の C 型を bindings.rs に存在する Rust 型に変換
 ///
@@ -1256,46 +1190,22 @@ fn resolve_base_type_from_bindings(
     }
 }
 
-/// 2つの型を比較して結果を返す
-/// - c_type: apidoc の C型 (例: "SV *", "const char *")
-/// - rust_type: 推論された Rust型 (例: "*mut SV", "*const c_char")
-/// - rust_decls: bindings.rs から読み込んだ型エイリアス
-/// - macro_type_aliases: マクロ定義から抽出した型エイリアス
-fn types_match_with_aliases(
-    c_type: &str,
-    rust_type: &str,
-    rust_decls: &RustDeclDict,
-    macro_type_aliases: &HashMap<String, String>,
-) -> TypeMatchResult {
-    let normalized_c = normalize_rust_type(&normalize_c_type_for_comparison(c_type));
-    let normalized_rust = normalize_rust_type(rust_type);
-
-    // 型エイリアスを解決
-    let resolved_c = resolve_type_alias(&normalized_c, rust_decls, macro_type_aliases);
-    let resolved_rust = resolve_type_alias(&normalized_rust, rust_decls, macro_type_aliases);
-
-    // 完全一致
-    if resolved_c == resolved_rust {
-        return TypeMatchResult::Match;
-    }
-
-    // const/mut の違いのみかチェック
-    let stripped_c = strip_const_mut(&resolved_c);
-    let stripped_rust = strip_const_mut(&resolved_rust);
-
-    if stripped_c == stripped_rust {
-        TypeMatchResult::ConstMutOnly
-    } else {
-        TypeMatchResult::Mismatch
-    }
-}
-
 /// マクロの型シグネチャ比較結果
 pub struct SignatureCompareResult {
     pub return_type_result: TypeMatchResult,
     pub param_match: usize,
     pub param_const_mut_only: usize,
     pub param_mismatch: usize,
+}
+
+/// TypeEquality を TypeMatchResult に変換
+fn type_equality_to_match_result(eq: TypeEquality) -> TypeMatchResult {
+    match eq {
+        TypeEquality::Exact => TypeMatchResult::Match,
+        TypeEquality::ConstMutDiff => TypeMatchResult::ConstMutOnly,
+        TypeEquality::CaseDiff => TypeMatchResult::Mismatch, // 大文字小文字違いは不一致として扱う
+        TypeEquality::Incompatible => TypeMatchResult::Mismatch,
+    }
 }
 
 /// マクロの型シグネチャを apidoc と比較
@@ -1305,14 +1215,16 @@ fn compare_macro_signature(
     param_names: &[crate::InternedStr],
     apidoc: &ApidocDict,
     interner: &crate::StringInterner,
-    rust_decls: &RustDeclDict,
-    macro_type_aliases: &HashMap<String, String>,
+    type_registry: &TypeRegistry,
 ) -> Option<SignatureCompareResult> {
     let entry = apidoc.get(macro_name)?;
 
     // 戻り値型の比較
     let return_type_result = match (&entry.return_type, &info.return_type) {
-        (Some(c_type), Some(rust_type)) => types_match_with_aliases(c_type, rust_type, rust_decls, macro_type_aliases),
+        (Some(c_type), Some(rust_type)) => {
+            let eq = type_registry.compare_c_rust(c_type, rust_type);
+            type_equality_to_match_result(eq)
+        }
         (None, None) => TypeMatchResult::Match,  // 両方なし = void
         (None, Some(rust_type)) => {
             if rust_type == "()" || rust_type == "void" {
@@ -1339,7 +1251,8 @@ fn compare_macro_signature(
         if let Some(apidoc_arg) = entry.args.get(i) {
             let param_name = interner.get(*param_id);
             if let Some(inferred_type) = info.param_types.get(param_id) {
-                match types_match_with_aliases(&apidoc_arg.ty, inferred_type, rust_decls, macro_type_aliases) {
+                let eq = type_registry.compare_c_rust(&apidoc_arg.ty, inferred_type);
+                match type_equality_to_match_result(eq) {
                     TypeMatchResult::Match => param_match += 1,
                     TypeMatchResult::ConstMutOnly => {
                         param_const_mut_only += 1;
@@ -1375,20 +1288,15 @@ fn compare_macro_signature(
 mod tests {
     use super::*;
 
-    /// テスト用ヘルパー: 型エイリアスなしで型を比較
-    fn types_match(c_type: &str, rust_type: &str) -> bool {
-        let empty_decls = RustDeclDict::new();
-        let empty_macro_aliases = HashMap::new();
-        matches!(
-            types_match_with_aliases(c_type, rust_type, &empty_decls, &empty_macro_aliases),
-            TypeMatchResult::Match
-        )
+    /// テスト用ヘルパー: TypeRegistry を使用して型を比較
+    fn compare_types(c_type: &str, rust_type: &str) -> TypeEquality {
+        let registry = TypeRegistry::new();
+        registry.compare_c_rust(c_type, rust_type)
     }
 
-    /// テスト用ヘルパー: 型エイリアス付きで型を比較
-    fn types_match_with_decls(c_type: &str, rust_type: &str, decls: &RustDeclDict) -> TypeMatchResult {
-        let empty_macro_aliases = HashMap::new();
-        types_match_with_aliases(c_type, rust_type, decls, &empty_macro_aliases)
+    /// テスト用ヘルパー: TypeEquality が Match 相当かチェック
+    fn types_match(c_type: &str, rust_type: &str) -> bool {
+        compare_types(c_type, rust_type) == TypeEquality::Exact
     }
 
     #[test]
@@ -1468,54 +1376,44 @@ mod tests {
     fn test_types_mismatch() {
         // Different types should not match
         assert!(!types_match("int", "c_long"));
-        // mut vs const は ConstMutOnly として扱われる
-        let empty_decls = RustDeclDict::new();
-        let empty_macro_aliases = HashMap::new();
-        assert_eq!(
-            types_match_with_aliases("SV *", "*const SV", &empty_decls, &empty_macro_aliases),
-            TypeMatchResult::ConstMutOnly
-        );
+        // mut vs const は ConstMutDiff として扱われる
+        assert_eq!(compare_types("SV *", "*const SV"), TypeEquality::ConstMutDiff);
         assert!(!types_match("char *", "*mut SV"));  // different base type
     }
 
     #[test]
     fn test_types_match_with_alias() {
         // bindings.rs のような型エイリアス付きでの比較
+        // TypeRegistry を使用
         let decls = RustDeclDict::parse("pub type STRLEN = usize;");
+        let interner = crate::StringInterner::new();
+        let macros = crate::MacroTable::new();
+        let registry = TypeRegistry::from_sources(&decls, &macros, &interner);
 
-        // STRLEN と usize が一致するはず
+        // STRLEN (C型) と usize (Rust型) が一致するはず
+        // STRLEN -> rust_aliases で usize に解決 -> Int { signed: false, size: Long }
+        // usize -> from_rust_str で Int { signed: false, size: Long }
         assert_eq!(
-            types_match_with_decls("STRLEN", "usize", &decls),
-            TypeMatchResult::Match
+            registry.compare_c_rust("STRLEN", "usize"),
+            TypeEquality::Exact
         );
 
-        // 逆方向も一致
+        // STRLEN ポインタも一致するはず
         assert_eq!(
-            types_match_with_decls("usize", "STRLEN", &decls),
-            TypeMatchResult::Match
+            registry.compare_c_rust("STRLEN *", "*mut usize"),
+            TypeEquality::Exact
         );
     }
 
     #[test]
     fn test_const_mut_only() {
-        let empty_decls = RustDeclDict::new();
-        let empty_macro_aliases = HashMap::new();
+        // TypeRegistry を使用した const/mut 比較
+        // *mut vs *const は ConstMutDiff
+        assert_eq!(compare_types("SV *", "*const SV"), TypeEquality::ConstMutDiff);
+        assert_eq!(compare_types("const SV *", "*mut SV"), TypeEquality::ConstMutDiff);
 
-        // *mut vs *const は ConstMutOnly
-        assert_eq!(
-            types_match_with_aliases("SV *", "*const SV", &empty_decls, &empty_macro_aliases),
-            TypeMatchResult::ConstMutOnly
-        );
-        assert_eq!(
-            types_match_with_aliases("const SV *", "*mut SV", &empty_decls, &empty_macro_aliases),
-            TypeMatchResult::ConstMutOnly
-        );
-
-        // 完全に異なる型は Mismatch
-        assert_eq!(
-            types_match_with_aliases("SV *", "*mut AV", &empty_decls, &empty_macro_aliases),
-            TypeMatchResult::Mismatch
-        );
+        // 完全に異なる型は Incompatible
+        assert_eq!(compare_types("SV *", "*mut AV"), TypeEquality::Incompatible);
     }
 
     #[test]
@@ -1558,29 +1456,17 @@ mod tests {
     #[test]
     fn test_types_match_with_macro_aliases() {
         // マクロ定義の型エイリアスを使った比較
-        // #define Size_t size_t のようなマクロを模擬
-        let empty_decls = RustDeclDict::new();
-        let mut macro_aliases = HashMap::new();
-        macro_aliases.insert("Size_t".to_string(), "size_t".to_string());
-        macro_aliases.insert("SSize_t".to_string(), "ssize_t".to_string());
-        macro_aliases.insert("Off_t".to_string(), "off64_t".to_string());
+        // TypeRegistry 経由でテスト（TypeRegistry のテストで詳細にカバー済み）
+        // ここでは基本的な動作確認のみ
 
-        // Size_t と usize が一致するはず（Size_t -> size_t -> usize）
-        assert_eq!(
-            types_match_with_aliases("Size_t", "usize", &empty_decls, &macro_aliases),
-            TypeMatchResult::Match
-        );
+        // 標準型の変換は UnifiedType の resolve で処理される
+        // size_t -> usize
+        assert_eq!(compare_types("size_t", "usize"), TypeEquality::Exact);
 
-        // SSize_t と isize が一致するはず（SSize_t -> ssize_t -> isize）
-        assert_eq!(
-            types_match_with_aliases("SSize_t", "isize", &empty_decls, &macro_aliases),
-            TypeMatchResult::Match
-        );
+        // ssize_t -> isize
+        assert_eq!(compare_types("ssize_t", "isize"), TypeEquality::Exact);
 
-        // Off_t と i64 が一致するはず（Off_t -> off64_t -> i64）
-        assert_eq!(
-            types_match_with_aliases("Off_t", "i64", &empty_decls, &macro_aliases),
-            TypeMatchResult::Match
-        );
+        // off64_t -> i64
+        assert_eq!(compare_types("off64_t", "i64"), TypeEquality::Exact);
     }
 }

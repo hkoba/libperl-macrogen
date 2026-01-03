@@ -213,15 +213,9 @@ impl UnifiedType {
             // bool
             "bool" | "_Bool" => Self::Bool,
 
-            // size_t, ssize_t などの標準型
-            "size_t" => Self::Int {
-                signed: false,
-                size: IntSize::Long,
-            },
-            "ssize_t" | "ptrdiff_t" => Self::Int {
-                signed: true,
-                size: IntSize::Long,
-            },
+            // size_t, ssize_t などの標準型は Named として保持
+            // （to_rust_string で usize/isize に変換される）
+            "size_t" | "ssize_t" | "ptrdiff_t" => Self::Named(base.to_string()),
 
             // その他は名前付き型
             _ => {
@@ -285,6 +279,18 @@ impl UnifiedType {
 
     /// Rust の基本型をパース
     fn parse_rust_basic_type(s: &str) -> Self {
+        // std:: プレフィックスを除去
+        let s = s
+            .strip_prefix("::")
+            .unwrap_or(s);
+        let s = s
+            .strip_prefix("std::")
+            .unwrap_or(s);
+        let s = s
+            .strip_prefix("ffi::")
+            .or_else(|| s.strip_prefix("os::raw::"))
+            .unwrap_or(s);
+
         match s {
             "()" => Self::Void,
             "c_void" => Self::Void,
@@ -376,7 +382,15 @@ impl UnifiedType {
                 }
             }
 
-            Self::Named(name) => name.clone(),
+            Self::Named(name) => {
+                // C標準型をRust型に変換
+                match name.as_str() {
+                    "size_t" => "usize".to_string(),
+                    "ssize_t" | "ptrdiff_t" => "isize".to_string(),
+                    "off_t" | "off64_t" => "i64".to_string(),
+                    _ => name.clone(),
+                }
+            }
 
             Self::Unknown => "UnknownType".to_string(),
         }

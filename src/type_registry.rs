@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::intern::{InternedStr, StringInterner};
-use crate::macro_def::{MacroKind, MacroTable};
+use crate::intern::StringInterner;
+use crate::macro_def::MacroTable;
 use crate::rust_decl::RustDeclDict;
 use crate::token::TokenKind;
 use crate::unified_type::UnifiedType;
