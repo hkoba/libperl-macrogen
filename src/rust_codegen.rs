@@ -651,6 +651,11 @@ impl<'a> RustCodeGen<'a> {
 
     /// マクロをRust関数に変換
     pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo2, expr: &Expr) -> CodeFragment {
+        // ジェネリックパラメータがあればジェネリック関数として生成
+        if !info.generic_params.is_empty() {
+            return self.macro_to_generic_rust_fn(def, info, expr);
+        }
+
         let name = self.interner.get(def.name);
 
         // パラメータを構築
@@ -671,6 +676,253 @@ impl<'a> RustCodeGen<'a> {
         result.merge_issues(&params_frag);
         result.merge_issues(&body_frag);
         result
+    }
+
+    /// ジェネリックなマクロをRust関数に変換
+    ///
+    /// SV ファミリーの polymorphic フィールドアクセスをジェネリック関数として生成:
+    /// ```text
+    /// #[inline]
+    /// pub unsafe fn SvANY<T, R>(sv: *mut T) -> *mut R {
+    ///     (*(sv as *const sv)).sv_any as *mut R
+    /// }
+    /// ```
+    fn macro_to_generic_rust_fn(&self, def: &MacroDef, info: &MacroInfo2, expr: &Expr) -> CodeFragment {
+        let name = self.interner.get(def.name);
+
+        // ジェネリック型パラメータ部分を生成 (e.g., "<T, R>" or "<T>")
+        let type_params = self.format_generic_type_params(info);
+
+        // パラメータを構築（ジェネリック版）
+        let params_frag = self.format_generic_params(def, info);
+
+        // 戻り値型（ジェネリック戻り値があれば使用）
+        let ret_ty = if let Some(ref generic_ret) = info.generic_return {
+            if generic_ret.is_pointer {
+                format!("*mut {}", generic_ret.type_param)
+            } else {
+                generic_ret.type_param.clone()
+            }
+        } else {
+            info.return_type.as_deref().unwrap_or("()").to_string()
+        };
+
+        // 本体（ジェネリックキャスト付き）
+        let body_frag = self.expr_to_rust_with_generic_cast(expr, info);
+
+        let code = format!(
+            "#[inline]\npub unsafe fn {}{type_params}({}) -> {} {{\n    {}\n}}\n",
+            name, params_frag.code, ret_ty, body_frag.code
+        );
+
+        let mut result = CodeFragment::ok(code);
+        result.merge_issues(&params_frag);
+        result.merge_issues(&body_frag);
+        result
+    }
+
+    /// ジェネリック型パラメータ部分を生成 (e.g., "<T, R>" or "<T>")
+    fn format_generic_type_params(&self, info: &MacroInfo2) -> String {
+        let mut params: Vec<&str> = Vec::new();
+
+        // 入力パラメータの型パラメータを収集
+        let mut type_param_names: Vec<&str> = info.generic_params.values()
+            .map(|gp| gp.type_param.as_str())
+            .collect();
+        type_param_names.sort();
+        type_param_names.dedup();
+        params.extend(type_param_names);
+
+        // 戻り値の型パラメータ
+        if let Some(ref generic_ret) = info.generic_return {
+            params.push(&generic_ret.type_param);
+        }
+
+        if params.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", params.join(", "))
+        }
+    }
+
+    /// ジェネリックパラメータをフォーマット
+    fn format_generic_params(&self, def: &MacroDef, info: &MacroInfo2) -> CodeFragment {
+        if let MacroKind::Function { ref params, .. } = def.kind {
+            let mut all_issues = Vec::new();
+            let mut all_params: Vec<String> = Vec::new();
+
+            // THX依存なら先頭に my_perl を追加
+            if info.needs_my_perl {
+                all_params.push("my_perl: *mut PerlInterpreter".to_string());
+            }
+
+            // マクロのパラメータを追加
+            for p in params {
+                let name = self.interner.get(*p);
+
+                // ジェネリックパラメータかどうかチェック
+                if let Some(generic_info) = info.generic_params.get(p) {
+                    // ジェネリック: *mut T 形式
+                    all_params.push(format!("{}: *mut {}", name, generic_info.type_param));
+                } else {
+                    // 通常パラメータ: 推論された型を使用
+                    let ty = info.param_types.get(p)
+                        .map(|s| s.as_str())
+                        .unwrap_or_else(|| {
+                            all_issues.push(CodeIssue::new(
+                                CodeIssueKind::UnknownType,
+                                format!("unknown type for parameter '{}'", name),
+                            ));
+                            "/* unknown */"
+                        });
+                    all_params.push(format!("{}: {}", name, ty));
+                }
+            }
+
+            CodeFragment {
+                code: all_params.join(", "),
+                issues: all_issues,
+                used_constants: HashSet::new(),
+                needs_my_perl: false,
+            }
+        } else {
+            CodeFragment::ok(String::new())
+        }
+    }
+
+    /// ジェネリックキャスト付きで式を Rust に変換
+    ///
+    /// param->field を (*(param as *const base_type)).field に変換し、
+    /// sv_any などのジェネリック戻り値フィールドには `as *mut R` を付加
+    fn expr_to_rust_with_generic_cast(&self, expr: &Expr, info: &MacroInfo2) -> CodeFragment {
+        match expr {
+            // ptr->field パターン: ジェネリックキャストが必要な場合
+            Expr::PtrMember { expr: base, member, .. } => {
+                let member_str = self.interner.get(*member);
+
+                // ベースがジェネリックパラメータかどうかチェック
+                if let Expr::Ident(id, _) = base.as_ref() {
+                    if let Some(generic_info) = info.generic_params.get(id) {
+                        // ジェネリックパラメータなので基底型にキャスト
+                        let param_name = self.interner.get(*id);
+                        let base_cast = format!(
+                            "(*({} as *const {}))",
+                            param_name,
+                            generic_info.base_type
+                        );
+
+                        // sv_any はジェネリック戻り値が必要
+                        let field_access = if info.generic_return.is_some() && member_str == "sv_any" {
+                            format!("{}.{} as *mut R", base_cast, member_str)
+                        } else {
+                            format!("{}.{}", base_cast, member_str)
+                        };
+
+                        return CodeFragment::ok(field_access);
+                    }
+                }
+
+                // 通常の変換にフォールバック
+                let expr_frag = self.expr_to_rust_with_generic_cast(base, info);
+                let mut result = CodeFragment::ok(format!("(*{}).{}", expr_frag.code, member_str));
+                result.merge_issues(&expr_frag);
+                result
+            }
+
+            // キャストを通した PtrMember
+            Expr::Cast { expr: inner, type_name, .. } => {
+                if let Expr::PtrMember { .. } = inner.as_ref() {
+                    // 内部のPtrMemberを先に処理
+                    let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
+                    let ty_frag = self.type_name_to_rust(type_name);
+                    let mut result = CodeFragment::ok(format!("({} as {})", inner_frag.code, ty_frag.code));
+                    result.merge_issues(&inner_frag);
+                    result.merge_issues(&ty_frag);
+                    return result;
+                }
+                // 通常のキャスト
+                self.expr_to_rust(expr)
+            }
+
+            // 二項演算子
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let left = self.expr_to_rust_with_generic_cast(lhs, info);
+                let right = self.expr_to_rust_with_generic_cast(rhs, info);
+                let op_str = self.bin_op_to_rust(op);
+                let mut result = CodeFragment::ok(format!("({} {} {})", left.code, op_str, right.code));
+                result.merge_issues(&left);
+                result.merge_issues(&right);
+                result
+            }
+
+            // 単項演算子
+            Expr::Deref(inner, _) => {
+                let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
+                let mut result = CodeFragment::ok(format!("(*{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
+            }
+
+            Expr::AddrOf(inner, _) => {
+                let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
+                let mut result = CodeFragment::ok(format!("(&{})", inner_frag.code));
+                result.merge_issues(&inner_frag);
+                result
+            }
+
+            // 関数呼び出し
+            Expr::Call { func, args, .. } => {
+                let func_frag = self.expr_to_rust_with_generic_cast(func, info);
+                let args_frags: Vec<CodeFragment> = args.iter()
+                    .map(|a| self.expr_to_rust_with_generic_cast(a, info))
+                    .collect();
+
+                let args_str: Vec<&str> = args_frags.iter().map(|f| f.code.as_str()).collect();
+                let mut result = CodeFragment::ok(format!("{}({})", func_frag.code, args_str.join(", ")));
+                result.merge_issues(&func_frag);
+                for arg_frag in &args_frags {
+                    result.merge_issues(arg_frag);
+                }
+                result
+            }
+
+            // 条件演算子
+            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+                let cond_frag = self.expr_to_rust_with_generic_cast(cond, info);
+                let then_frag = self.expr_to_rust_with_generic_cast(then_expr, info);
+                let else_frag = self.expr_to_rust_with_generic_cast(else_expr, info);
+                let mut result = CodeFragment::ok(format!(
+                    "(if {} != 0 {{ {} }} else {{ {} }})",
+                    cond_frag.code, then_frag.code, else_frag.code
+                ));
+                result.merge_issues(&cond_frag);
+                result.merge_issues(&then_frag);
+                result.merge_issues(&else_frag);
+                result
+            }
+
+            // メンバアクセス (dot operator)
+            Expr::Member { expr: base, member, .. } => {
+                let expr_frag = self.expr_to_rust_with_generic_cast(base, info);
+                let member_str = self.interner.get(*member);
+                let mut result = CodeFragment::ok(format!("{}.{}", expr_frag.code, member_str));
+                result.merge_issues(&expr_frag);
+                result
+            }
+
+            // 配列添字
+            Expr::Index { expr: base, index, .. } => {
+                let expr_frag = self.expr_to_rust_with_generic_cast(base, info);
+                let index_frag = self.expr_to_rust_with_generic_cast(index, info);
+                let mut result = CodeFragment::ok(format!("{}[{} as usize]", expr_frag.code, index_frag.code));
+                result.merge_issues(&expr_frag);
+                result.merge_issues(&index_frag);
+                result
+            }
+
+            // その他の式は通常変換
+            _ => self.expr_to_rust(expr),
+        }
     }
 
     /// パラメータをフォーマット

@@ -291,6 +291,81 @@ impl FieldsDict {
         self.field_types.len()
     }
 
+    // ==================== Polymorphic Field Detection ====================
+
+    /// SV ファミリーのメンバー構造体名
+    /// Perl の _SV_HEAD マクロにより同一レイアウトを共有する構造体群
+    const SV_FAMILY_MEMBERS: &'static [&'static str] = &[
+        "sv", "av", "hv", "gv", "cv", "io", "p5rx", "invlist", "STRUCT_SV",
+    ];
+
+    /// SV_HEAD マクロで定義される共通フィールド
+    /// これらのフィールドは SV ファミリー全体で共有される
+    const SV_HEAD_FIELDS: &'static [&'static str] = &[
+        "sv_any", "sv_refcnt", "sv_flags", "sv_u",
+    ];
+
+    /// フィールドが複数構造体に共有されているか (polymorphic か)
+    pub fn is_polymorphic_field(&self, field_name: InternedStr) -> bool {
+        self.field_to_structs
+            .get(&field_name)
+            .map(|structs| structs.len() > 1)
+            .unwrap_or(false)
+    }
+
+    /// フィールドを持つ全構造体を取得
+    pub fn get_structs_with_field(&self, field_name: InternedStr) -> Option<&HashSet<InternedStr>> {
+        self.field_to_structs.get(&field_name)
+    }
+
+    /// 構造体セットが SV ファミリーか判定
+    /// すべての構造体が SV_FAMILY_MEMBERS に含まれていれば true
+    pub fn is_sv_family(&self, structs: &HashSet<InternedStr>, interner: &StringInterner) -> bool {
+        if structs.is_empty() {
+            return false;
+        }
+
+        structs.iter().all(|s| {
+            let name = interner.get(*s);
+            Self::SV_FAMILY_MEMBERS.contains(&name)
+        })
+    }
+
+    /// SV ファミリーの基底型 ("sv") の InternedStr を取得
+    /// interner に "sv" が登録されていない場合は None
+    pub fn get_sv_family_base_type(&self, interner: &StringInterner) -> Option<InternedStr> {
+        interner.lookup("sv")
+    }
+
+    /// フィールドが SV ファミリーの共有フィールドかどうか判定
+    ///
+    /// 以下のいずれかを満たす場合に true:
+    /// 1. フィールドが SV_HEAD_FIELDS に含まれ、"sv" 構造体に属している
+    /// 2. フィールドが複数の SV ファミリー構造体に属している
+    pub fn is_sv_family_field(&self, field_name: InternedStr, interner: &StringInterner) -> bool {
+        let field_str = interner.get(field_name);
+
+        // SV_HEAD フィールドは常に SV ファミリー共有
+        if Self::SV_HEAD_FIELDS.contains(&field_str) {
+            // "sv" 構造体に属しているか確認
+            if let Some(structs) = self.field_to_structs.get(&field_name) {
+                return structs.iter().any(|s| {
+                    let name = interner.get(*s);
+                    name == "sv"
+                });
+            }
+        }
+
+        // 複数の SV ファミリー構造体に属している場合
+        if let Some(structs) = self.field_to_structs.get(&field_name) {
+            structs.len() > 1 && self.is_sv_family(structs, interner)
+        } else {
+            false
+        }
+    }
+
+    // ==================== Dump and Debug ====================
+
     /// 辞書をダンプ
     pub fn dump(&self, interner: &StringInterner) -> String {
         let mut result = String::new();

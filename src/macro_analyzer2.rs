@@ -31,6 +31,27 @@ pub enum MacroCategory {
     Other,
 }
 
+/// ジェネリックパラメータの情報
+/// polymorphic なフィールドアクセスを持つパラメータに対して生成される
+#[derive(Debug, Clone)]
+pub struct GenericParamInfo {
+    /// 型パラメータ名 (e.g., "T", "T1", "T2")
+    pub type_param: String,
+    /// ポインタキャスト用の基底型 (e.g., "sv")
+    pub base_type: String,
+    /// ジェネリック検出のトリガーとなったフィールド
+    pub polymorphic_field: InternedStr,
+}
+
+/// ジェネリック戻り値の情報
+#[derive(Debug, Clone)]
+pub struct GenericReturnInfo {
+    /// 型パラメータ名 (e.g., "R")
+    pub type_param: String,
+    /// ポインタ型かどうか
+    pub is_pointer: bool,
+}
+
 /// マクロの解析結果
 #[derive(Debug, Clone)]
 pub struct MacroInfo2 {
@@ -52,6 +73,22 @@ pub struct MacroInfo2 {
     pub def_loc: SourceLocation,
     /// 使用しているマクロの集合
     pub uses: HashSet<InternedStr>,
+
+    // ==================== Generic Type Parameters ====================
+    /// ジェネリック型パラメータ情報
+    /// パラメータ名 -> GenericParamInfo
+    pub generic_params: HashMap<InternedStr, GenericParamInfo>,
+    /// ジェネリック戻り値型情報
+    pub generic_return: Option<GenericReturnInfo>,
+}
+
+/// Expression マクロの解析結果（内部用）
+struct ExpressionMacroAnalysis {
+    expr: Option<Expr>,
+    return_type: Option<String>,
+    param_types: HashMap<InternedStr, String>,
+    generic_params: HashMap<InternedStr, GenericParamInfo>,
+    generic_return: Option<GenericReturnInfo>,
 }
 
 /// SemanticAnalyzer ベースのマクロ解析器
@@ -309,10 +346,16 @@ impl<'a> MacroAnalyzer2<'a> {
             let category = self.classify_macro_body(def, macros);
 
             // パースとAST生成（Expressionマクロのみ）
-            let (parsed_expr, return_type, param_types) = if category == MacroCategory::Expression && is_target {
+            let analysis = if category == MacroCategory::Expression && is_target {
                 self.analyze_expression_macro(def, macros)
             } else {
-                (None, None, HashMap::new())
+                ExpressionMacroAnalysis {
+                    expr: None,
+                    return_type: None,
+                    param_types: HashMap::new(),
+                    generic_params: HashMap::new(),
+                    generic_return: None,
+                }
             };
 
             self.info.insert(
@@ -320,24 +363,26 @@ impl<'a> MacroAnalyzer2<'a> {
                 MacroInfo2 {
                     name: *name,
                     category,
-                    return_type,
-                    param_types,
+                    return_type: analysis.return_type,
+                    param_types: analysis.param_types,
                     is_target,
                     needs_my_perl: false,
-                    parsed_expr,
+                    parsed_expr: analysis.expr,
                     def_loc: def.def_loc.clone(),
                     uses,
+                    generic_params: analysis.generic_params,
+                    generic_return: analysis.generic_return,
                 },
             );
         }
     }
 
-    /// Expression マクロを解析（パース、型推論）
+    /// Expression マクロを解析（パース、型推論、ジェネリック検出）
     fn analyze_expression_macro(
         &self,
         def: &MacroDef,
         macros: &MacroTable,
-    ) -> (Option<Expr>, Option<String>, HashMap<InternedStr, String>) {
+    ) -> ExpressionMacroAnalysis {
         // マクロ本体をパース
         let (_, parse_result) = self.parse_macro_body(def, macros);
 
@@ -361,9 +406,32 @@ impl<'a> MacroAnalyzer2<'a> {
                     _ => HashMap::new(),
                 };
 
-                (Some(expr), return_type, param_types)
+                // ジェネリックパラメータを検出
+                let generic_params = match &def.kind {
+                    MacroKind::Function { params, .. } if !params.is_empty() => {
+                        self.detect_generic_params_for_macro(&expr, params)
+                    }
+                    _ => HashMap::new(),
+                };
+
+                // ジェネリック戻り値を検出
+                let generic_return = self.detect_generic_return(&expr);
+
+                ExpressionMacroAnalysis {
+                    expr: Some(expr),
+                    return_type,
+                    param_types,
+                    generic_params,
+                    generic_return,
+                }
             }
-            Err(_) => (None, None, HashMap::new()),
+            Err(_) => ExpressionMacroAnalysis {
+                expr: None,
+                return_type: None,
+                param_types: HashMap::new(),
+                generic_params: HashMap::new(),
+                generic_return: None,
+            },
         }
     }
 
@@ -646,6 +714,135 @@ impl<'a> MacroAnalyzer2<'a> {
             // キャストを通して識別子をチェック
             Expr::Cast { expr: inner, .. } => self.is_param_ident(inner, param),
             _ => false,
+        }
+    }
+
+    // ==================== Generic Parameter Detection ====================
+
+    /// パラメータのジェネリック情報を検出
+    /// SVファミリーの共有フィールドへのアクセスがあればジェネリックパラメータとして扱う
+    fn detect_generic_param(
+        &self,
+        expr: &Expr,
+        param: InternedStr,
+    ) -> Option<GenericParamInfo> {
+        match expr {
+            // パターン: param->field (SVファミリーの共有フィールド)
+            Expr::PtrMember { expr: base, member, .. } => {
+                if self.is_param_ident(base, param) {
+                    // SVファミリーの共有フィールドかチェック
+                    if self.fields_dict.is_sv_family_field(*member, self.interner) {
+                        return Some(GenericParamInfo {
+                            type_param: "T".to_string(),
+                            base_type: "sv".to_string(),
+                            polymorphic_field: *member,
+                        });
+                    }
+                }
+                // 再帰的に探索
+                self.detect_generic_param(base, param)
+            }
+
+            // 二項演算子
+            Expr::Binary { lhs, rhs, .. } => {
+                self.detect_generic_param(lhs, param)
+                    .or_else(|| self.detect_generic_param(rhs, param))
+            }
+
+            // 関数呼び出し
+            Expr::Call { func, args, .. } => {
+                for arg in args {
+                    if let Some(info) = self.detect_generic_param(arg, param) {
+                        return Some(info);
+                    }
+                }
+                self.detect_generic_param(func, param)
+            }
+
+            // 単項演算子
+            Expr::PreInc(inner, _)
+            | Expr::PreDec(inner, _)
+            | Expr::AddrOf(inner, _)
+            | Expr::Deref(inner, _)
+            | Expr::UnaryPlus(inner, _)
+            | Expr::UnaryMinus(inner, _)
+            | Expr::BitNot(inner, _)
+            | Expr::LogNot(inner, _)
+            | Expr::PostInc(inner, _)
+            | Expr::PostDec(inner, _)
+            | Expr::Sizeof(inner, _) => {
+                self.detect_generic_param(inner, param)
+            }
+
+            // キャスト
+            Expr::Cast { expr: inner, .. } => {
+                self.detect_generic_param(inner, param)
+            }
+
+            // 条件演算子
+            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+                self.detect_generic_param(cond, param)
+                    .or_else(|| self.detect_generic_param(then_expr, param))
+                    .or_else(|| self.detect_generic_param(else_expr, param))
+            }
+
+            // 配列添字
+            Expr::Index { expr: base, index, .. } => {
+                self.detect_generic_param(base, param)
+                    .or_else(|| self.detect_generic_param(index, param))
+            }
+
+            // メンバアクセス
+            Expr::Member { expr: base, .. } => {
+                self.detect_generic_param(base, param)
+            }
+
+            _ => None,
+        }
+    }
+
+    /// マクロのジェネリックパラメータを検出して設定
+    fn detect_generic_params_for_macro(
+        &self,
+        expr: &Expr,
+        params: &[InternedStr],
+    ) -> HashMap<InternedStr, GenericParamInfo> {
+        let mut result = HashMap::new();
+        let mut type_param_counter = 0;
+
+        for param in params {
+            if let Some(mut info) = self.detect_generic_param(expr, *param) {
+                // 複数のジェネリックパラメータがある場合は番号付け
+                if type_param_counter > 0 || params.len() > 1 {
+                    info.type_param = format!("T{}", type_param_counter);
+                }
+                result.insert(*param, info);
+                type_param_counter += 1;
+            }
+        }
+
+        result
+    }
+
+    /// 戻り値がジェネリックかどうか検出
+    /// SVファミリーの sv_any フィールドへのアクセスで戻り値が決まる場合
+    fn detect_generic_return(&self, expr: &Expr) -> Option<GenericReturnInfo> {
+        // トップレベルで sv_any へのアクセスがあれば戻り値もジェネリック
+        match expr {
+            Expr::PtrMember { member, .. } => {
+                let member_str = self.interner.get(*member);
+                // sv_any は構造体ごとに型が異なるのでジェネリック戻り値が必要
+                if member_str == "sv_any" {
+                    return Some(GenericReturnInfo {
+                        type_param: "R".to_string(),
+                        is_pointer: true,
+                    });
+                }
+                None
+            }
+            // キャストを通した場合も検出
+            Expr::Cast { expr: inner, .. } => self.detect_generic_return(inner),
+            _ => None,
         }
     }
 
