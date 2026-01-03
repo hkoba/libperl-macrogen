@@ -548,6 +548,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     analyzer.set_typedefs(typedefs.clone());
     analyzer.set_bindings_consts(bindings_consts.clone());
     analyzer.set_thx_functions(thx_functions.clone());
+    analyzer.set_rust_decl_dict(&rust_decls);
     analyzer.identify_constant_macros(pp.macros());
     analyzer.analyze(pp.macros());
 
@@ -1083,6 +1084,7 @@ fn strip_const_mut(ty: &str) -> String {
 /// 例:
 /// - "UV" -> Some("UV") (bindings.rs に `pub type UV = ...` があれば)
 /// - "SV *" -> Some("*mut SV") (bindings.rs に SV 構造体があれば)
+/// - "SV **" -> Some("*mut *mut SV") (多重ポインタも正しく処理)
 /// - "Size_t" -> Some("usize") (マクロで `#define Size_t size_t` があれば)
 /// - "const char *" -> Some("*const c_char")
 /// - "unknown_type" -> None
@@ -1093,26 +1095,38 @@ fn resolve_apidoc_type_to_rust(
 ) -> Option<String> {
     let trimmed = c_type.trim();
 
-    // ポインタ型かチェック
+    // ポインタ型かチェック（末尾の * を1つだけ削除して再帰処理）
     if trimmed.ends_with('*') {
-        // "SV *" or "const SV *" のパターン
-        let without_star = trimmed.trim_end_matches('*').trim();
-        let (is_const, base_type) = if without_star.starts_with("const ") {
-            (true, without_star.strip_prefix("const ").unwrap().trim())
+        // "SV *" or "const SV *" or "SV **" のパターン
+        // 末尾の * を1つだけ削除
+        let without_one_star = trimmed[..trimmed.len() - 1].trim();
+
+        // const ポインタかチェック
+        let (is_const, inner_type) = if without_one_star.ends_with("const") {
+            // "SV * const" パターン
+            let before_const = without_one_star[..without_one_star.len() - 5].trim();
+            (true, before_const)
         } else {
-            (false, without_star)
+            (false, without_one_star)
         };
 
-        // 基本型を解決
-        if let Some(rust_base) = resolve_base_type_from_bindings(base_type, rust_decls, macro_type_aliases) {
+        // 内部型を再帰的に解決
+        if let Some(rust_inner) = resolve_apidoc_type_to_rust(inner_type, rust_decls, macro_type_aliases) {
             let ptr_kind = if is_const { "*const" } else { "*mut" };
-            return Some(format!("{} {}", ptr_kind, rust_base));
+            return Some(format!("{} {}", ptr_kind, rust_inner));
         }
         return None;
     }
 
+    // const プレフィックス処理（非ポインタ基本型の場合）
+    let base_type = if trimmed.starts_with("const ") {
+        trimmed.strip_prefix("const ").unwrap().trim()
+    } else {
+        trimmed
+    };
+
     // 非ポインタ型
-    resolve_base_type_from_bindings(trimmed, rust_decls, macro_type_aliases)
+    resolve_base_type_from_bindings(base_type, rust_decls, macro_type_aliases)
 }
 
 /// マクロテーブルから型エイリアスを抽出

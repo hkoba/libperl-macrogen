@@ -8,7 +8,28 @@ use crate::apidoc::ApidocDict;
 use crate::ast::*;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
+use crate::rust_decl::RustDeclDict;
 use crate::source::SourceLocation;
+
+/// 型変数 ID (制約ベース型推論用)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeVar(usize);
+
+/// 型制約 (マクロ引数の型推論用)
+#[derive(Debug, Clone)]
+pub enum TypeConstraint {
+    /// 関数呼び出しの引数として使用
+    FunctionArg {
+        var: TypeVar,
+        func_name: InternedStr,
+        arg_index: usize,
+    },
+    /// フィールドアクセスの基底として使用
+    HasField {
+        var: TypeVar,
+        field: InternedStr,
+    },
+}
 
 /// 解決済み型
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +281,16 @@ pub struct SemanticAnalyzer<'a> {
     apidoc: Option<&'a ApidocDict>,
     /// フィールド辞書（構造体フィールドの型情報）
     fields_dict: Option<&'a FieldsDict>,
+    /// RustDeclDict への参照 (bindings.rs の関数型情報)
+    rust_decl_dict: Option<&'a RustDeclDict>,
+    /// 型変数マップ (引数名 -> TypeVar)
+    type_vars: HashMap<InternedStr, TypeVar>,
+    /// 次の型変数ID
+    next_type_var: usize,
+    /// 収集された制約
+    constraints: Vec<TypeConstraint>,
+    /// 制約収集モードか
+    constraint_mode: bool,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -268,6 +299,16 @@ impl<'a> SemanticAnalyzer<'a> {
         interner: &'a StringInterner,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
+    ) -> Self {
+        Self::with_rust_decl_dict(interner, apidoc, fields_dict, None)
+    }
+
+    /// RustDeclDict を指定して意味解析器を作成
+    pub fn with_rust_decl_dict(
+        interner: &'a StringInterner,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+        rust_decl_dict: Option<&'a RustDeclDict>,
     ) -> Self {
         let global_scope = Scope::new(None);
         Self {
@@ -279,6 +320,11 @@ impl<'a> SemanticAnalyzer<'a> {
             typedef_defs: HashMap::new(),
             apidoc,
             fields_dict,
+            rust_decl_dict,
+            type_vars: HashMap::new(),
+            next_type_var: 0,
+            constraints: Vec::new(),
+            constraint_mode: false,
         }
     }
 
@@ -314,6 +360,115 @@ impl<'a> SemanticAnalyzer<'a> {
             scope_id = scope.parent;
         }
         None
+    }
+
+    // ========================================
+    // 制約ベース型推論 (マクロ引数用)
+    // ========================================
+
+    /// 制約収集モードを開始し、パラメータを型変数として登録
+    pub fn begin_param_inference(&mut self, params: &[InternedStr]) {
+        self.constraint_mode = true;
+        self.type_vars.clear();
+        self.constraints.clear();
+        self.next_type_var = 0;
+
+        for &param in params {
+            let var = TypeVar(self.next_type_var);
+            self.next_type_var += 1;
+            self.type_vars.insert(param, var);
+        }
+    }
+
+    /// 制約を解いて引数型を取得し、制約収集モードを終了
+    pub fn end_param_inference(&mut self) -> HashMap<InternedStr, Type> {
+        self.constraint_mode = false;
+        let solutions = self.solve_constraints();
+
+        // 型変数名から Type へのマップを構築
+        let mut result = HashMap::new();
+        for (&name, &var) in &self.type_vars {
+            if let Some(ty) = solutions.get(&var) {
+                result.insert(name, ty.clone());
+            }
+        }
+
+        // クリーンアップ
+        self.type_vars.clear();
+        self.constraints.clear();
+        self.next_type_var = 0;
+
+        result
+    }
+
+    /// 制約を追加
+    fn add_constraint(&mut self, constraint: TypeConstraint) {
+        self.constraints.push(constraint);
+    }
+
+    /// 制約を解く
+    fn solve_constraints(&self) -> HashMap<TypeVar, Type> {
+        let mut solutions = HashMap::new();
+
+        for constraint in &self.constraints {
+            match constraint {
+                TypeConstraint::FunctionArg { var, func_name, arg_index } => {
+                    if solutions.contains_key(var) {
+                        continue;
+                    }
+
+                    // RustDeclDict (bindings.rs) から関数シグネチャを取得
+                    if let Some(ty) = self.lookup_rust_decl_param_type(*func_name, *arg_index) {
+                        solutions.insert(*var, ty);
+                    }
+                }
+                TypeConstraint::HasField { var, field } => {
+                    if solutions.contains_key(var) {
+                        continue;
+                    }
+
+                    // FieldsDict からフィールドを持つ構造体を特定
+                    if let Some(fields_dict) = self.fields_dict {
+                        if let Some(struct_name) = fields_dict.lookup_unique(*field) {
+                            // struct_name は既に InternedStr なので直接使用
+                            solutions.insert(
+                                *var,
+                                Type::Pointer(
+                                    Box::new(Type::TypedefName(struct_name)),
+                                    TypeQualifiers::default(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        solutions
+    }
+
+    /// RustDeclDict から関数の引数型を取得
+    fn lookup_rust_decl_param_type(&self, func_name: InternedStr, arg_index: usize) -> Option<Type> {
+        let rust_decl_dict = self.rust_decl_dict?;
+        let func_name_str = self.interner.get(func_name);
+        let rust_fn = rust_decl_dict.fns.get(func_name_str)?;
+        let param = rust_fn.params.get(arg_index)?;
+        // Rust型文字列 (e.g., "*mut *mut SV") を Type に変換
+        Some(self.parse_rust_type_string(&param.ty))
+    }
+
+    /// 式から引数に対する制約を収集
+    fn collect_arg_constraint(&mut self, arg: &Expr, func_name: InternedStr, arg_index: usize) {
+        // 引数が型変数として登録されている識別子かチェック
+        if let Expr::Ident(name, _) = arg {
+            if let Some(&var) = self.type_vars.get(name) {
+                self.add_constraint(TypeConstraint::FunctionArg {
+                    var,
+                    func_name,
+                    arg_index,
+                });
+            }
+        }
     }
 
     /// DeclSpecs から Type を構築
@@ -518,7 +673,7 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     /// 式の型を推論
-    pub fn infer_expr_type(&self, expr: &Expr) -> Type {
+    pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
         match expr {
             // リテラル
             Expr::IntLit(_, _) => Type::Int,
@@ -589,7 +744,16 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 関数呼び出し
-            Expr::Call { func, .. } => {
+            Expr::Call { func, args, .. } => {
+                // 制約収集モードの場合、引数の制約を収集
+                if self.constraint_mode {
+                    if let Expr::Ident(func_name, _) = func.as_ref() {
+                        for (i, arg) in args.iter().enumerate() {
+                            self.collect_arg_constraint(arg, *func_name, i);
+                        }
+                    }
+                }
+
                 let func_ty = self.infer_expr_type(func);
                 if let Type::Function { return_type, .. } = func_ty {
                     return *return_type;
@@ -616,6 +780,18 @@ impl<'a> SemanticAnalyzer<'a> {
 
             // ポインタメンバーアクセス
             Expr::PtrMember { expr: base, member, .. } => {
+                // 制約収集モードの場合、フィールドアクセス制約を収集
+                if self.constraint_mode {
+                    if let Expr::Ident(name, _) = base.as_ref() {
+                        if let Some(&var) = self.type_vars.get(name) {
+                            self.add_constraint(TypeConstraint::HasField {
+                                var,
+                                field: *member,
+                            });
+                        }
+                    }
+                }
+
                 let base_ty = self.infer_expr_type(base);
                 if let Type::Pointer(inner, _) = base_ty {
                     self.lookup_member_type(&inner, *member)
@@ -951,7 +1127,11 @@ impl<'a> SemanticAnalyzer<'a> {
 
     /// Rust型文字列を Type に変換
     fn parse_rust_type_string(&self, type_str: &str) -> Type {
-        let trimmed = type_str.trim();
+        // synのto_token_stream().to_string()は "* mut" のようにスペースを入れるため正規化
+        let normalized = type_str
+            .replace("* mut", "*mut")
+            .replace("* const", "*const");
+        let trimmed = normalized.trim();
 
         // ポインタ型
         if let Some(rest) = trimmed.strip_prefix("*mut ") {

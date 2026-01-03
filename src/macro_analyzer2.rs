@@ -16,6 +16,7 @@ use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::parser::parse_expression_from_tokens_ref;
+use crate::rust_decl::RustDeclDict;
 use crate::semantic::{SemanticAnalyzer, Type};
 use crate::source::{FileRegistry, SourceLocation};
 use crate::token::{Token, TokenKind};
@@ -101,6 +102,8 @@ pub struct MacroAnalyzer2<'a> {
     apidoc: &'a ApidocDict,
     /// フィールド辞書
     fields_dict: &'a FieldsDict,
+    /// RustDeclDict (bindings.rs の関数/型情報)
+    rust_decl_dict: Option<&'a RustDeclDict>,
     /// 対象ディレクトリ
     target_dir: String,
     /// typedef名のセット（パース時のキャスト式判定用）
@@ -133,6 +136,7 @@ impl<'a> MacroAnalyzer2<'a> {
             files,
             apidoc,
             fields_dict,
+            rust_decl_dict: None,
             target_dir: target_dir.to_string(),
             typedefs: HashSet::new(),
             info: HashMap::new(),
@@ -141,6 +145,11 @@ impl<'a> MacroAnalyzer2<'a> {
             thx_macros: HashSet::new(),
             thx_functions: HashSet::new(),
         }
+    }
+
+    /// RustDeclDict を設定
+    pub fn set_rust_decl_dict(&mut self, rust_decl_dict: &'a RustDeclDict) {
+        self.rust_decl_dict = Some(rust_decl_dict);
     }
 
     /// typedef名のセットを設定
@@ -388,22 +397,38 @@ impl<'a> MacroAnalyzer2<'a> {
 
         match parse_result {
             Ok(expr) => {
-                // SemanticAnalyzer で型推論
-                let semantic = SemanticAnalyzer::new(
+                // SemanticAnalyzer で型推論 (RustDeclDict を渡す)
+                let mut semantic = SemanticAnalyzer::with_rust_decl_dict(
                     self.interner,
                     Some(self.apidoc),
                     Some(self.fields_dict),
+                    self.rust_decl_dict,
                 );
 
-                // 戻り値型を推論
-                let return_type = self.infer_return_type(&semantic, &expr);
+                // パラメータの型変数を登録
+                let params = match &def.kind {
+                    MacroKind::Function { params, .. } => params.clone(),
+                    _ => vec![],
+                };
 
-                // パラメータ型を推論
-                let param_types = match &def.kind {
-                    MacroKind::Function { params, .. } if !params.is_empty() => {
-                        self.infer_param_types(&expr, params)
-                    }
-                    _ => HashMap::new(),
+                if !params.is_empty() {
+                    semantic.begin_param_inference(&params);
+                }
+
+                // 戻り値型を推論 (同時に制約も収集される)
+                let return_type = self.infer_return_type(&mut semantic, &expr);
+
+                // 制約を解いてパラメータ型を取得
+                let param_types = if !params.is_empty() {
+                    let inferred = semantic.end_param_inference();
+                    inferred
+                        .into_iter()
+                        .filter_map(|(name, ty)| {
+                            self.type_to_rust_string(&ty).map(|s| (name, s))
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
                 };
 
                 // ジェネリックパラメータを検出
@@ -552,7 +577,7 @@ impl<'a> MacroAnalyzer2<'a> {
     // ========================================================================
 
     /// SemanticAnalyzer で戻り値型を推論
-    fn infer_return_type(&self, semantic: &SemanticAnalyzer, expr: &Expr) -> Option<String> {
+    fn infer_return_type(&self, semantic: &mut SemanticAnalyzer, expr: &Expr) -> Option<String> {
         let ty = semantic.infer_expr_type(expr);
         self.type_to_rust_string(&ty)
     }
@@ -600,112 +625,7 @@ impl<'a> MacroAnalyzer2<'a> {
         }
     }
 
-    /// パラメータ型を推論
-    fn infer_param_types(
-        &self,
-        expr: &Expr,
-        params: &[InternedStr],
-    ) -> HashMap<InternedStr, String> {
-        let mut result = HashMap::new();
-
-        for param in params {
-            if let Some(ty) = self.infer_param_type_from_usage(expr, *param) {
-                result.insert(*param, ty);
-            }
-        }
-
-        result
-    }
-
-    /// 式中でのパラメータ使用箇所から型を推論
-    fn infer_param_type_from_usage(&self, expr: &Expr, param: InternedStr) -> Option<String> {
-        match expr {
-            // パターン1: param->field
-            Expr::PtrMember { expr: base, member, .. } => {
-                if self.is_param_ident(base, param) {
-                    if let Some(struct_name) = self.fields_dict.lookup_unique(*member) {
-                        return Some(format!("*mut {}", self.interner.get(struct_name)));
-                    }
-                }
-                // 再帰的に探索
-                self.infer_param_type_from_usage(base, param)
-            }
-
-            // パターン2: param.field
-            Expr::Member { expr: base, member, .. } => {
-                if self.is_param_ident(base, param) {
-                    if let Some(struct_name) = self.fields_dict.lookup_unique(*member) {
-                        return Some(self.interner.get(struct_name).to_string());
-                    }
-                }
-                self.infer_param_type_from_usage(base, param)
-            }
-
-            // パターン3: func(param) - 関数の引数型から推論
-            Expr::Call { func, args, .. } => {
-                if let Expr::Ident(func_name, _) = func.as_ref() {
-                    if let Some(entry) = self.apidoc.get(self.interner.get(*func_name)) {
-                        for (i, arg) in args.iter().enumerate() {
-                            if self.is_param_ident(arg, param) {
-                                if let Some(arg_info) = entry.args.get(i) {
-                                    return Some(self.c_type_to_rust(&arg_info.ty));
-                                }
-                            }
-                        }
-                    }
-                }
-                // 引数を再帰的に探索
-                for arg in args {
-                    if let Some(ty) = self.infer_param_type_from_usage(arg, param) {
-                        return Some(ty);
-                    }
-                }
-                // 関数式も探索
-                self.infer_param_type_from_usage(func, param)
-            }
-
-            // 二項演算子
-            Expr::Binary { lhs, rhs, .. } => {
-                self.infer_param_type_from_usage(lhs, param)
-                    .or_else(|| self.infer_param_type_from_usage(rhs, param))
-            }
-
-            // 単項演算子（個別のバリアントを処理）
-            Expr::PreInc(inner, _)
-            | Expr::PreDec(inner, _)
-            | Expr::AddrOf(inner, _)
-            | Expr::Deref(inner, _)
-            | Expr::UnaryPlus(inner, _)
-            | Expr::UnaryMinus(inner, _)
-            | Expr::BitNot(inner, _)
-            | Expr::LogNot(inner, _)
-            | Expr::PostInc(inner, _)
-            | Expr::PostDec(inner, _)
-            | Expr::Sizeof(inner, _) => {
-                self.infer_param_type_from_usage(inner, param)
-            }
-
-            // キャスト
-            Expr::Cast { expr: inner, .. } => {
-                self.infer_param_type_from_usage(inner, param)
-            }
-
-            // 条件演算子
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
-                self.infer_param_type_from_usage(cond, param)
-                    .or_else(|| self.infer_param_type_from_usage(then_expr, param))
-                    .or_else(|| self.infer_param_type_from_usage(else_expr, param))
-            }
-
-            // 配列添字
-            Expr::Index { expr: base, index, .. } => {
-                self.infer_param_type_from_usage(base, param)
-                    .or_else(|| self.infer_param_type_from_usage(index, param))
-            }
-
-            _ => None,
-        }
-    }
+    // ==================== Generic Parameter Detection ====================
 
     /// 式がパラメータ識別子かどうか
     fn is_param_ident(&self, expr: &Expr, param: InternedStr) -> bool {
@@ -716,8 +636,6 @@ impl<'a> MacroAnalyzer2<'a> {
             _ => false,
         }
     }
-
-    // ==================== Generic Parameter Detection ====================
 
     /// パラメータのジェネリック情報を検出
     /// SVファミリーの共有フィールドへのアクセスがあればジェネリックパラメータとして扱う
@@ -844,13 +762,6 @@ impl<'a> MacroAnalyzer2<'a> {
             Expr::Cast { expr: inner, .. } => self.detect_generic_return(inner),
             _ => None,
         }
-    }
-
-    /// C型文字列をRust型文字列に変換
-    fn c_type_to_rust(&self, c_type: &str) -> String {
-        // iterative_infer の c_type_to_rust を使用
-        // こちらは "SV * const" などのパターンを正しく処理する
-        crate::iterative_infer::c_type_to_rust(c_type)
     }
 
     // ========================================================================
