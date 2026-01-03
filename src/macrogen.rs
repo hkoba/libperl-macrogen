@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::{
     ApidocDict, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
-    InferenceContext, MacroAnalyzer, MacroCategory, MacroKind, PPConfig, Parser,
+    InferenceContext, MacroAnalyzer2, MacroCategory2, MacroInfo2, MacroKind, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, extract_called_functions,
     get_default_target_dir, get_perl_config, PerlConfigError,
     TypedSexpPrinter,
@@ -381,13 +381,16 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
         eprintln!("After bindings.rs: {} confirmed", infer_ctx.confirmed_count());
     }
 
-    // 8. Apidocから型情報を読み込む（オプション）
+    // 8. Apidoc辞書を作成（MacroAnalyzer2で使用）
+    let mut apidoc = ApidocDict::new();
+
+    // 8.1 ファイルからApidocを読み込む（オプション）
     if let Some(ref apidoc_path) = config.apidoc {
-        let apidoc = ApidocDict::load_auto(apidoc_path)
+        let file_apidoc = ApidocDict::load_auto(apidoc_path)
             .map_err(|e| MacrogenError::Apidoc(e.to_string()))?;
 
         if config.verbose {
-            let apidoc_stats = apidoc.stats();
+            let apidoc_stats = file_apidoc.stats();
             eprintln!(
                 "Loaded apidoc: {} entries ({} functions, {} macros, {} inline)",
                 apidoc_stats.total,
@@ -397,7 +400,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
             );
         }
 
-        let added = infer_ctx.load_apidoc(&apidoc);
+        let added = infer_ctx.load_apidoc(&file_apidoc);
         stats.apidoc_loaded = added;
 
         if config.verbose {
@@ -407,6 +410,8 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 added
             );
         }
+
+        apidoc.merge(file_apidoc);
     }
 
     // 9. 読み込まれたターゲットファイルを収集
@@ -457,11 +462,13 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                     added
                 );
             }
+
+            apidoc.merge(header_apidoc);
         }
     }
 
-    // 10. 定数マクロを識別（inline関数とマクロ関数の両方で使用）
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
+    // 10. MacroAnalyzer2 を作成（SemanticAnalyzer ベースの新しい解析器）
+    let mut analyzer = MacroAnalyzer2::new(interner, files, &apidoc, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs.clone());
     analyzer.set_bindings_consts(bindings_consts.clone());
     analyzer.set_thx_functions(thx_functions.clone());
@@ -567,7 +574,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 continue;
             }
 
-            if info.category != MacroCategory::Expression {
+            if info.category != MacroCategory2::Expression {
                 macro_parse_failures.push((
                     name_str,
                     format!("not an expression macro (category: {:?})", info.category),
@@ -698,7 +705,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 continue;
             }
 
-            if info.category != MacroCategory::Expression {
+            if info.category != MacroCategory2::Expression {
                 continue;
             }
 

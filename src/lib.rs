@@ -5,13 +5,13 @@
 
 pub mod apidoc;
 pub mod ast;
-pub mod call_type_infer;
 pub mod error;
 pub mod fields_dict;
 pub mod intern;
 pub mod iterative_infer;
 pub mod lexer;
 pub mod macro_analysis;
+pub mod macro_analyzer2;
 pub mod macro_def;
 pub mod macrogen;
 pub mod parser;
@@ -37,6 +37,7 @@ pub use iterative_infer::{
     FunctionSignature, InferenceContext, PendingFunction,
 };
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
+pub use macro_analyzer2::{MacroAnalyzer2, MacroCategory as MacroCategory2, MacroInfo2};
 pub use rust_codegen::{CodeFragment, CodeIssue, CodeIssueKind, RustCodeGen};
 pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;

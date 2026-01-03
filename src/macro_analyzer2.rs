@@ -1,0 +1,812 @@
+//! マクロ解析モジュール v2
+//!
+//! SemanticAnalyzer を活用したマクロ解析を行う:
+//! - マクロ展開とAST変換
+//! - SemanticAnalyzer による型推論
+//! - THX 依存検出（my_perl の推移閉包）
+//! - マクロ分類（Expression/Statement/Other）
+//! - 定数マクロ識別
+
+use std::collections::{HashMap, HashSet};
+
+use crate::apidoc::ApidocDict;
+use crate::ast::Expr;
+use crate::error::Result;
+use crate::fields_dict::FieldsDict;
+use crate::intern::{InternedStr, StringInterner};
+use crate::macro_def::{MacroDef, MacroKind, MacroTable};
+use crate::parser::parse_expression_from_tokens_ref;
+use crate::semantic::{SemanticAnalyzer, Type};
+use crate::source::{FileRegistry, SourceLocation};
+use crate::token::{Token, TokenKind};
+
+/// マクロ展開結果の分類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroCategory {
+    /// 完全なC式として評価可能
+    Expression,
+    /// 文（末尾の`;`を除く）
+    Statement,
+    /// 式でも文でもない（不完全、複数文など）
+    Other,
+}
+
+/// マクロの解析結果
+#[derive(Debug, Clone)]
+pub struct MacroInfo2 {
+    /// マクロ名
+    pub name: InternedStr,
+    /// マクロのカテゴリ
+    pub category: MacroCategory,
+    /// 推論された戻り値型（Rust型文字列）
+    pub return_type: Option<String>,
+    /// パラメータの推論された型
+    pub param_types: HashMap<InternedStr, String>,
+    /// 対象ディレクトリ内かどうか
+    pub is_target: bool,
+    /// THX依存（my_perl引数が必要）
+    pub needs_my_perl: bool,
+    /// パース済みAST（Expressionマクロの場合）
+    pub parsed_expr: Option<Expr>,
+    /// 定義位置
+    pub def_loc: SourceLocation,
+    /// 使用しているマクロの集合
+    pub uses: HashSet<InternedStr>,
+}
+
+/// SemanticAnalyzer ベースのマクロ解析器
+pub struct MacroAnalyzer2<'a> {
+    /// 文字列インターナー
+    interner: &'a StringInterner,
+    /// ファイルレジストリ
+    files: &'a FileRegistry,
+    /// Apidoc辞書
+    apidoc: &'a ApidocDict,
+    /// フィールド辞書
+    fields_dict: &'a FieldsDict,
+    /// 対象ディレクトリ
+    target_dir: String,
+    /// typedef名のセット（パース時のキャスト式判定用）
+    typedefs: HashSet<InternedStr>,
+
+    // 分析結果
+    /// マクロ情報（マクロ名 -> 解析結果）
+    info: HashMap<InternedStr, MacroInfo2>,
+    /// 定数マクロの集合（展開を抑制する対象）
+    constant_macros: HashSet<InternedStr>,
+    /// bindings.rs に定義されている定数名
+    bindings_consts: HashSet<String>,
+    /// THX依存マクロの集合
+    thx_macros: HashSet<InternedStr>,
+    /// THX依存関数の集合（bindings.rsから取得）
+    thx_functions: HashSet<String>,
+}
+
+impl<'a> MacroAnalyzer2<'a> {
+    /// 新しい解析器を作成
+    pub fn new(
+        interner: &'a StringInterner,
+        files: &'a FileRegistry,
+        apidoc: &'a ApidocDict,
+        fields_dict: &'a FieldsDict,
+        target_dir: &str,
+    ) -> Self {
+        Self {
+            interner,
+            files,
+            apidoc,
+            fields_dict,
+            target_dir: target_dir.to_string(),
+            typedefs: HashSet::new(),
+            info: HashMap::new(),
+            constant_macros: HashSet::new(),
+            bindings_consts: HashSet::new(),
+            thx_macros: HashSet::new(),
+            thx_functions: HashSet::new(),
+        }
+    }
+
+    /// typedef名のセットを設定
+    pub fn set_typedefs(&mut self, typedefs: HashSet<InternedStr>) {
+        self.typedefs = typedefs;
+    }
+
+    /// bindings.rs の定数名を設定
+    pub fn set_bindings_consts(&mut self, consts: HashSet<String>) {
+        self.bindings_consts = consts;
+    }
+
+    /// THX依存関数の集合を設定（bindings.rsから）
+    pub fn set_thx_functions(&mut self, fns: HashSet<String>) {
+        self.thx_functions = fns;
+    }
+
+    // ========================================================================
+    // 定数マクロ識別
+    // ========================================================================
+
+    /// 定数マクロを識別する
+    ///
+    /// Object マクロで本体が定数式のものを反復的に特定する。
+    pub fn identify_constant_macros(&mut self, macros: &MacroTable) {
+        loop {
+            let mut found_new = false;
+
+            for (name, def) in macros.iter() {
+                if self.constant_macros.contains(name) {
+                    continue;
+                }
+
+                if def.is_function() {
+                    continue;
+                }
+
+                if self.is_constant_body(&def.body, macros) {
+                    self.constant_macros.insert(*name);
+                    found_new = true;
+                }
+            }
+
+            if !found_new {
+                break;
+            }
+        }
+    }
+
+    /// トークン列が定数式かどうかをチェック
+    fn is_constant_body(&self, tokens: &[Token], macros: &MacroTable) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+
+        for token in tokens {
+            match &token.kind {
+                TokenKind::IntLit(_) | TokenKind::UIntLit(_) => {}
+
+                TokenKind::Ident(id) => {
+                    let name_str = self.interner.get(*id);
+
+                    if self.bindings_consts.contains(name_str) {
+                        continue;
+                    }
+
+                    if self.constant_macros.contains(id) {
+                        continue;
+                    }
+
+                    if macros.is_defined(*id) {
+                        return false;
+                    }
+
+                    return false;
+                }
+
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Star
+                | TokenKind::Slash | TokenKind::Percent
+                | TokenKind::Pipe | TokenKind::Amp | TokenKind::Caret
+                | TokenKind::Tilde | TokenKind::LtLt | TokenKind::GtGt
+                | TokenKind::LParen | TokenKind::RParen => {}
+
+                _ => return false,
+            }
+        }
+
+        true
+    }
+
+    /// 指定された名前が定数マクロかどうか
+    pub fn is_constant_macro(&self, name: InternedStr) -> bool {
+        self.constant_macros.contains(&name)
+    }
+
+    /// 定数マクロの集合を取得
+    pub fn constant_macros(&self) -> &HashSet<InternedStr> {
+        &self.constant_macros
+    }
+
+    // ========================================================================
+    // THX 依存検出
+    // ========================================================================
+
+    /// THX依存マクロを識別する
+    ///
+    /// 以下のいずれかを含むマクロはTHX依存:
+    /// 1. 展開後のトークン列に `my_perl` を含む
+    /// 2. THX依存な関数/マクロを呼び出している（推移的）
+    pub fn identify_thx_dependent_macros(&mut self, macros: &MacroTable) {
+        // Phase 1: 直接 my_perl を含むマクロを識別
+        for (name, def) in macros.iter() {
+            let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+            if self.contains_my_perl(&expanded) {
+                self.thx_macros.insert(*name);
+            }
+        }
+
+        // Phase 2: 推移的依存を解決（収束するまで反復）
+        loop {
+            let mut found_new = false;
+            let current_thx: HashSet<InternedStr> = self.thx_macros.clone();
+
+            for (name, info) in &self.info {
+                if current_thx.contains(name) {
+                    continue;
+                }
+
+                for used in &info.uses {
+                    if current_thx.contains(used) || self.is_thx_function(*used) {
+                        self.thx_macros.insert(*name);
+                        found_new = true;
+                        break;
+                    }
+                }
+            }
+
+            if !found_new {
+                break;
+            }
+        }
+
+        // Phase 3: MacroInfo2のneeds_my_perlフラグを更新
+        let thx_macros = self.thx_macros.clone();
+        for (name, info) in self.info.iter_mut() {
+            if thx_macros.contains(name) {
+                info.needs_my_perl = true;
+            }
+        }
+    }
+
+    /// トークン列が my_perl を含むかチェック
+    fn contains_my_perl(&self, tokens: &[Token]) -> bool {
+        tokens.iter().any(|t| {
+            if let TokenKind::Ident(id) = &t.kind {
+                self.interner.get(*id) == "my_perl"
+            } else {
+                false
+            }
+        })
+    }
+
+    /// 指定された名前がTHX依存関数かどうか
+    fn is_thx_function(&self, name: InternedStr) -> bool {
+        let name_str = self.interner.get(name);
+        if name_str.starts_with("Perl_") {
+            return true;
+        }
+        self.thx_functions.contains(name_str)
+    }
+
+    /// 指定された名前がTHX依存マクロかどうか
+    pub fn is_thx_macro(&self, name: InternedStr) -> bool {
+        self.thx_macros.contains(&name)
+    }
+
+    /// THX依存マクロの集合を取得
+    pub fn thx_macros(&self) -> &HashSet<InternedStr> {
+        &self.thx_macros
+    }
+
+    // ========================================================================
+    // マクロ分析（メイン処理）
+    // ========================================================================
+
+    /// マクロテーブルを解析
+    pub fn analyze(&mut self, macros: &MacroTable) {
+        // Phase 1: 各マクロの使用関係を収集＋分類
+        for (name, def) in macros.iter() {
+            let is_target = self.is_target_location(&def.def_loc);
+
+            // 使用関係を収集
+            let mut uses = HashSet::new();
+            for token in &def.body {
+                if let TokenKind::Ident(ident) = token.kind {
+                    if macros.is_defined(ident) && ident != *name {
+                        uses.insert(ident);
+                    }
+                }
+            }
+
+            // マクロを分類
+            let category = self.classify_macro_body(def, macros);
+
+            // パースとAST生成（Expressionマクロのみ）
+            let (parsed_expr, return_type, param_types) = if category == MacroCategory::Expression && is_target {
+                self.analyze_expression_macro(def, macros)
+            } else {
+                (None, None, HashMap::new())
+            };
+
+            self.info.insert(
+                *name,
+                MacroInfo2 {
+                    name: *name,
+                    category,
+                    return_type,
+                    param_types,
+                    is_target,
+                    needs_my_perl: false,
+                    parsed_expr,
+                    def_loc: def.def_loc.clone(),
+                    uses,
+                },
+            );
+        }
+    }
+
+    /// Expression マクロを解析（パース、型推論）
+    fn analyze_expression_macro(
+        &self,
+        def: &MacroDef,
+        macros: &MacroTable,
+    ) -> (Option<Expr>, Option<String>, HashMap<InternedStr, String>) {
+        // マクロ本体をパース
+        let (_, parse_result) = self.parse_macro_body(def, macros);
+
+        match parse_result {
+            Ok(expr) => {
+                // SemanticAnalyzer で型推論
+                let semantic = SemanticAnalyzer::new(
+                    self.interner,
+                    Some(self.apidoc),
+                    Some(self.fields_dict),
+                );
+
+                // 戻り値型を推論
+                let return_type = self.infer_return_type(&semantic, &expr);
+
+                // パラメータ型を推論
+                let param_types = match &def.kind {
+                    MacroKind::Function { params, .. } if !params.is_empty() => {
+                        self.infer_param_types(&expr, params)
+                    }
+                    _ => HashMap::new(),
+                };
+
+                (Some(expr), return_type, param_types)
+            }
+            Err(_) => (None, None, HashMap::new()),
+        }
+    }
+
+    /// マクロ本体を分類
+    fn classify_macro_body(&self, def: &MacroDef, macros: &MacroTable) -> MacroCategory {
+        let body = &def.body;
+
+        if body.is_empty() {
+            return MacroCategory::Other;
+        }
+
+        let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+
+        if expanded.is_empty() {
+            return MacroCategory::Other;
+        }
+
+        // セミコロンで終わる場合は文
+        if matches!(expanded.last().map(|t| &t.kind), Some(TokenKind::Semi)) {
+            return MacroCategory::Statement;
+        }
+
+        // 式として妥当かチェック
+        if self.is_valid_expression(&expanded) {
+            MacroCategory::Expression
+        } else {
+            MacroCategory::Other
+        }
+    }
+
+    /// マクロ本体を再帰的に展開
+    fn expand_macro_body(
+        &self,
+        def: &MacroDef,
+        macros: &MacroTable,
+        visited: &mut HashSet<InternedStr>,
+    ) -> Vec<Token> {
+        if visited.contains(&def.name) {
+            return def.body.clone();
+        }
+        visited.insert(def.name);
+
+        let mut result = Vec::new();
+
+        for token in &def.body {
+            match &token.kind {
+                TokenKind::Ident(ident) => {
+                    // 定数マクロは展開しない
+                    if self.constant_macros.contains(ident) {
+                        result.push(token.clone());
+                        continue;
+                    }
+
+                    // bindings.rs の定数も展開しない
+                    let name_str = self.interner.get(*ident);
+                    if self.bindings_consts.contains(name_str) {
+                        result.push(token.clone());
+                        continue;
+                    }
+
+                    // オブジェクトマクロは展開
+                    if let Some(macro_def) = macros.get(*ident) {
+                        if !macro_def.is_function() {
+                            let expanded = self.expand_macro_body(macro_def, macros, visited);
+                            result.extend(expanded);
+                            continue;
+                        }
+                    }
+                    result.push(token.clone());
+                }
+                _ => {
+                    result.push(token.clone());
+                }
+            }
+        }
+
+        visited.remove(&def.name);
+        result
+    }
+
+    /// トークン列が妥当な式かどうかをチェック
+    fn is_valid_expression(&self, tokens: &[Token]) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+
+        let mut paren_depth = 0i32;
+        let mut brace_depth = 0i32;
+        let mut bracket_depth = 0i32;
+
+        for token in tokens {
+            match &token.kind {
+                TokenKind::LParen => paren_depth += 1,
+                TokenKind::RParen => paren_depth -= 1,
+                TokenKind::LBrace => brace_depth += 1,
+                TokenKind::RBrace => brace_depth -= 1,
+                TokenKind::LBracket => bracket_depth += 1,
+                TokenKind::RBracket => bracket_depth -= 1,
+                TokenKind::KwIf | TokenKind::KwWhile | TokenKind::KwFor
+                | TokenKind::KwSwitch | TokenKind::KwReturn | TokenKind::KwGoto => {
+                    if paren_depth == 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+
+            if paren_depth < 0 || brace_depth < 0 || bracket_depth < 0 {
+                return false;
+            }
+        }
+
+        paren_depth == 0 && brace_depth == 0 && bracket_depth == 0
+    }
+
+    // ========================================================================
+    // 型推論（SemanticAnalyzer ベース）
+    // ========================================================================
+
+    /// SemanticAnalyzer で戻り値型を推論
+    fn infer_return_type(&self, semantic: &SemanticAnalyzer, expr: &Expr) -> Option<String> {
+        let ty = semantic.infer_expr_type(expr);
+        self.type_to_rust_string(&ty)
+    }
+
+    /// Type を Rust型文字列に変換
+    fn type_to_rust_string(&self, ty: &Type) -> Option<String> {
+        match ty {
+            Type::Void => Some("()".to_string()),
+            Type::Char => Some("c_char".to_string()),
+            Type::SignedChar => Some("c_schar".to_string()),
+            Type::UnsignedChar => Some("c_uchar".to_string()),
+            Type::Short => Some("c_short".to_string()),
+            Type::UnsignedShort => Some("c_ushort".to_string()),
+            Type::Int => Some("c_int".to_string()),
+            Type::UnsignedInt => Some("c_uint".to_string()),
+            Type::Long => Some("c_long".to_string()),
+            Type::UnsignedLong => Some("c_ulong".to_string()),
+            Type::LongLong => Some("c_longlong".to_string()),
+            Type::UnsignedLongLong => Some("c_ulonglong".to_string()),
+            Type::Float => Some("c_float".to_string()),
+            Type::Double => Some("c_double".to_string()),
+            Type::LongDouble => Some("c_double".to_string()),
+            Type::Bool => Some("bool".to_string()),
+            Type::Int128 => Some("i128".to_string()),
+            Type::UnsignedInt128 => Some("u128".to_string()),
+            Type::Pointer(inner, quals) => {
+                let inner_str = self.type_to_rust_string(inner)?;
+                if quals.is_const {
+                    Some(format!("*const {}", inner_str))
+                } else {
+                    Some(format!("*mut {}", inner_str))
+                }
+            }
+            Type::TypedefName(name) => {
+                Some(self.interner.get(*name).to_string())
+            }
+            Type::Struct { name: Some(name), .. } => {
+                Some(self.interner.get(*name).to_string())
+            }
+            Type::Union { name: Some(name), .. } => {
+                Some(self.interner.get(*name).to_string())
+            }
+            Type::Unknown => None,
+            _ => None,
+        }
+    }
+
+    /// パラメータ型を推論
+    fn infer_param_types(
+        &self,
+        expr: &Expr,
+        params: &[InternedStr],
+    ) -> HashMap<InternedStr, String> {
+        let mut result = HashMap::new();
+
+        for param in params {
+            if let Some(ty) = self.infer_param_type_from_usage(expr, *param) {
+                result.insert(*param, ty);
+            }
+        }
+
+        result
+    }
+
+    /// 式中でのパラメータ使用箇所から型を推論
+    fn infer_param_type_from_usage(&self, expr: &Expr, param: InternedStr) -> Option<String> {
+        match expr {
+            // パターン1: param->field
+            Expr::PtrMember { expr: base, member, .. } => {
+                if self.is_param_ident(base, param) {
+                    if let Some(struct_name) = self.fields_dict.lookup_unique(*member) {
+                        return Some(format!("*mut {}", self.interner.get(struct_name)));
+                    }
+                }
+                // 再帰的に探索
+                self.infer_param_type_from_usage(base, param)
+            }
+
+            // パターン2: param.field
+            Expr::Member { expr: base, member, .. } => {
+                if self.is_param_ident(base, param) {
+                    if let Some(struct_name) = self.fields_dict.lookup_unique(*member) {
+                        return Some(self.interner.get(struct_name).to_string());
+                    }
+                }
+                self.infer_param_type_from_usage(base, param)
+            }
+
+            // パターン3: func(param) - 関数の引数型から推論
+            Expr::Call { func, args, .. } => {
+                if let Expr::Ident(func_name, _) = func.as_ref() {
+                    if let Some(entry) = self.apidoc.get(self.interner.get(*func_name)) {
+                        for (i, arg) in args.iter().enumerate() {
+                            if self.is_param_ident(arg, param) {
+                                if let Some(arg_info) = entry.args.get(i) {
+                                    return Some(self.c_type_to_rust(&arg_info.ty));
+                                }
+                            }
+                        }
+                    }
+                }
+                // 引数を再帰的に探索
+                for arg in args {
+                    if let Some(ty) = self.infer_param_type_from_usage(arg, param) {
+                        return Some(ty);
+                    }
+                }
+                // 関数式も探索
+                self.infer_param_type_from_usage(func, param)
+            }
+
+            // 二項演算子
+            Expr::Binary { lhs, rhs, .. } => {
+                self.infer_param_type_from_usage(lhs, param)
+                    .or_else(|| self.infer_param_type_from_usage(rhs, param))
+            }
+
+            // 単項演算子（個別のバリアントを処理）
+            Expr::PreInc(inner, _)
+            | Expr::PreDec(inner, _)
+            | Expr::AddrOf(inner, _)
+            | Expr::Deref(inner, _)
+            | Expr::UnaryPlus(inner, _)
+            | Expr::UnaryMinus(inner, _)
+            | Expr::BitNot(inner, _)
+            | Expr::LogNot(inner, _)
+            | Expr::PostInc(inner, _)
+            | Expr::PostDec(inner, _)
+            | Expr::Sizeof(inner, _) => {
+                self.infer_param_type_from_usage(inner, param)
+            }
+
+            // キャスト
+            Expr::Cast { expr: inner, .. } => {
+                self.infer_param_type_from_usage(inner, param)
+            }
+
+            // 条件演算子
+            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+                self.infer_param_type_from_usage(cond, param)
+                    .or_else(|| self.infer_param_type_from_usage(then_expr, param))
+                    .or_else(|| self.infer_param_type_from_usage(else_expr, param))
+            }
+
+            // 配列添字
+            Expr::Index { expr: base, index, .. } => {
+                self.infer_param_type_from_usage(base, param)
+                    .or_else(|| self.infer_param_type_from_usage(index, param))
+            }
+
+            _ => None,
+        }
+    }
+
+    /// 式がパラメータ識別子かどうか
+    fn is_param_ident(&self, expr: &Expr, param: InternedStr) -> bool {
+        match expr {
+            Expr::Ident(id, _) => *id == param,
+            // キャストを通して識別子をチェック
+            Expr::Cast { expr: inner, .. } => self.is_param_ident(inner, param),
+            _ => false,
+        }
+    }
+
+    /// C型文字列をRust型文字列に変換
+    fn c_type_to_rust(&self, c_type: &str) -> String {
+        let trimmed = c_type.trim();
+
+        // ポインタ型
+        if let Some(base) = trimmed.strip_suffix('*') {
+            let base = base.trim();
+            if let Some(inner) = base.strip_prefix("const ") {
+                return format!("*const {}", self.c_type_to_rust(inner.trim()));
+            }
+            return format!("*mut {}", self.c_type_to_rust(base));
+        }
+
+        // 基本型
+        match trimmed {
+            "void" => "()".to_string(),
+            "char" => "c_char".to_string(),
+            "int" => "c_int".to_string(),
+            "unsigned" | "unsigned int" => "c_uint".to_string(),
+            "long" => "c_long".to_string(),
+            "unsigned long" => "c_ulong".to_string(),
+            "short" => "c_short".to_string(),
+            "unsigned short" => "c_ushort".to_string(),
+            "float" => "c_float".to_string(),
+            "double" => "c_double".to_string(),
+            "size_t" | "Size_t" | "STRLEN" => "usize".to_string(),
+            "SSize_t" => "isize".to_string(),
+            "bool" | "_Bool" => "bool".to_string(),
+            "I32" => "i32".to_string(),
+            "U32" => "u32".to_string(),
+            "IV" => "isize".to_string(),
+            "UV" => "usize".to_string(),
+            "NV" => "c_double".to_string(),
+            _ => trimmed.to_string(),
+        }
+    }
+
+    // ========================================================================
+    // マクロ本体のパース
+    // ========================================================================
+
+    /// マクロ本体をパースしてASTを取得
+    pub fn parse_macro_body(&self, def: &MacroDef, macros: &MacroTable) -> (Vec<Token>, Result<Expr>) {
+        let expanded = self.expand_macro_body(def, macros, &mut HashSet::new());
+        let result = parse_expression_from_tokens_ref(
+            expanded.clone(),
+            self.interner,
+            self.files,
+            &self.typedefs,
+        );
+        (expanded, result)
+    }
+
+    // ========================================================================
+    // ユーティリティ
+    // ========================================================================
+
+    /// 位置が対象ディレクトリ内かチェック
+    fn is_target_location(&self, loc: &SourceLocation) -> bool {
+        let path = self.files.get_path(loc.file_id);
+        let path_str = path.to_string_lossy();
+        path_str.starts_with(&self.target_dir)
+    }
+
+    // ========================================================================
+    // クエリAPI
+    // ========================================================================
+
+    /// 解析結果を取得
+    pub fn get_info(&self, name: InternedStr) -> Option<&MacroInfo2> {
+        self.info.get(&name)
+    }
+
+    /// 全解析結果をイテレート
+    pub fn iter(&self) -> impl Iterator<Item = (&InternedStr, &MacroInfo2)> {
+        self.info.iter()
+    }
+
+    /// 式マクロのみをイテレート（対象ディレクトリ内）
+    pub fn expression_macros(&self) -> impl Iterator<Item = &MacroInfo2> {
+        self.info.values().filter(|info| {
+            info.category == MacroCategory::Expression && info.is_target
+        })
+    }
+
+    /// 統計情報をダンプ
+    pub fn dump_stats(&self) -> String {
+        let total = self.info.len();
+        let target = self.info.values().filter(|i| i.is_target).count();
+        let expressions = self.info.values()
+            .filter(|i| i.category == MacroCategory::Expression && i.is_target)
+            .count();
+        let statements = self.info.values()
+            .filter(|i| i.category == MacroCategory::Statement && i.is_target)
+            .count();
+        let other = self.info.values()
+            .filter(|i| i.category == MacroCategory::Other && i.is_target)
+            .count();
+        let with_type = self.info.values()
+            .filter(|i| i.return_type.is_some() && i.is_target)
+            .count();
+        let thx_count = self.thx_macros.len();
+        let const_count = self.constant_macros.len();
+
+        format!(
+            "=== MacroAnalyzer2 Stats ===\n\
+             Total macros: {}\n\
+             Target macros: {}\n\
+             Expression macros: {}\n\
+             Statement macros: {}\n\
+             Other macros: {}\n\
+             With inferred type: {}\n\
+             THX-dependent macros: {}\n\
+             Constant macros: {}\n",
+            total, target, expressions, statements, other, with_type, thx_count, const_count
+        )
+    }
+
+    /// Def-Use チェーンをダンプ
+    pub fn dump_def_use(&self) -> String {
+        let mut result = String::new();
+        result.push_str("=== Def-Use Chain ===\n");
+
+        let mut items: Vec<_> = self.info.iter()
+            .filter(|(_, info)| info.is_target)
+            .collect();
+        items.sort_by_key(|(name, _)| self.interner.get(**name));
+
+        for (name, info) in items {
+            let name_str = self.interner.get(*name);
+            result.push_str(&format!("{}:\n", name_str));
+
+            if !info.uses.is_empty() {
+                let mut uses: Vec<_> = info.uses.iter()
+                    .map(|n| self.interner.get(*n))
+                    .collect();
+                uses.sort();
+                result.push_str(&format!("  uses: {}\n", uses.join(", ")));
+            }
+
+            result.push_str(&format!("  category: {:?}\n", info.category));
+
+            if let Some(ref ty) = info.return_type {
+                result.push_str(&format!("  return_type: {}\n", ty));
+            }
+        }
+
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_macro_category() {
+        assert_eq!(MacroCategory::Expression, MacroCategory::Expression);
+        assert_ne!(MacroCategory::Expression, MacroCategory::Statement);
+    }
+}

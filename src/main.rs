@@ -10,8 +10,8 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    generate, get_default_target_dir, get_perl_config, CompileError, ExternalDecl, FieldsDict,
-    FileId, MacroAnalyzer, MacroCategory, MacrogenBuilder, PPConfig, Parser, Preprocessor,
+    generate, get_default_target_dir, get_perl_config, ApidocDict, CompileError, ExternalDecl, FieldsDict,
+    FileId, MacroAnalyzer2, MacroCategory2, MacrogenBuilder, PPConfig, Parser, Preprocessor,
     RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
@@ -341,7 +341,8 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
     // マクロ解析
     let interner = pp.interner();
     let files = pp.files();
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
+    let apidoc = ApidocDict::new(); // 空のApidocDict（分析モードでは使用しない）
+    let mut analyzer = MacroAnalyzer2::new(interner, files, &apidoc, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
@@ -451,7 +452,8 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
     // マクロ解析
     let interner = pp.interner();
     let files = pp.files();
-    let mut analyzer = MacroAnalyzer::new(interner, files, &fields_dict, &target_dir_str);
+    let apidoc = ApidocDict::new(); // 空のApidocDict
+    let mut analyzer = MacroAnalyzer2::new(interner, files, &apidoc, &fields_dict, &target_dir_str);
     analyzer.set_typedefs(typedefs);
     analyzer.analyze(pp.macros());
 
@@ -489,7 +491,7 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
             continue;
         }
 
-        if info.category != MacroCategory::Expression {
+        if info.category != MacroCategory2::Expression {
             println!("// FAILED: {} - category: {:?}", name_str, info.category);
             failure_count += 1;
             continue;

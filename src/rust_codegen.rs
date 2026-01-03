@@ -10,7 +10,7 @@ use crate::ast::{
 };
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
-use crate::macro_analysis::MacroInfo;
+use crate::macro_analyzer2::MacroInfo2;
 use crate::macro_def::{MacroDef, MacroKind};
 
 // ==================== CodeFragment (Synthesized Attribute) ====================
@@ -650,7 +650,7 @@ impl<'a> RustCodeGen<'a> {
     }
 
     /// マクロをRust関数に変換
-    pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo, expr: &Expr) -> CodeFragment {
+    pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo2, expr: &Expr) -> CodeFragment {
         let name = self.interner.get(def.name);
 
         // パラメータを構築
@@ -674,7 +674,7 @@ impl<'a> RustCodeGen<'a> {
     }
 
     /// パラメータをフォーマット
-    fn format_params(&self, def: &MacroDef, info: &MacroInfo) -> CodeFragment {
+    fn format_params(&self, def: &MacroDef, info: &MacroInfo2) -> CodeFragment {
         if let MacroKind::Function { ref params, .. } = def.kind {
             let mut all_issues = Vec::new();
             let mut all_params: Vec<String> = Vec::new();
