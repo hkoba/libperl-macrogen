@@ -221,6 +221,81 @@ pub struct MacrogenStats {
     pub inference_resolved: usize,
     /// 型推論の反復回数
     pub inference_iterations: usize,
+
+    // === apidoc 型一致評価 ===
+    /// apidocにエントリがあるマクロ数
+    pub apidoc_comparable: usize,
+    /// 戻り値型が一致したマクロ数
+    pub return_type_match: usize,
+    /// 戻り値型が不一致のマクロ数（const/mut違いのみ）
+    pub return_type_const_mut_only: usize,
+    /// 戻り値型が不一致のマクロ数
+    pub return_type_mismatch: usize,
+    /// パラメータ型が全て一致したマクロ数
+    pub params_all_match: usize,
+    /// パラメータ型に不一致があるマクロ数
+    pub params_has_mismatch: usize,
+    /// 一致したパラメータ型の総数
+    pub param_type_match: usize,
+    /// パラメータ型の不一致（const/mut違いのみ）
+    pub param_type_const_mut_only: usize,
+    /// 不一致のパラメータ型の総数
+    pub param_type_mismatch: usize,
+}
+
+/// 型一致の結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeMatchResult {
+    /// 完全一致
+    Match,
+    /// const/mut の違いのみ
+    ConstMutOnly,
+    /// 不一致
+    Mismatch,
+}
+
+impl MacrogenStats {
+    /// apidoc との戻り値型一致率を計算（const/mutのみの不一致も一致として扱う）
+    pub fn return_type_match_rate(&self) -> f64 {
+        let total = self.return_type_match + self.return_type_const_mut_only + self.return_type_mismatch;
+        if total == 0 {
+            0.0
+        } else {
+            (self.return_type_match + self.return_type_const_mut_only) as f64 / total as f64 * 100.0
+        }
+    }
+
+    /// apidoc とのパラメータ型一致率を計算（const/mutのみの不一致も一致として扱う）
+    pub fn param_type_match_rate(&self) -> f64 {
+        let total = self.param_type_match + self.param_type_const_mut_only + self.param_type_mismatch;
+        if total == 0 {
+            0.0
+        } else {
+            (self.param_type_match + self.param_type_const_mut_only) as f64 / total as f64 * 100.0
+        }
+    }
+
+    /// 統計情報のサマリを生成
+    pub fn apidoc_summary(&self) -> String {
+        format!(
+            "=== Apidoc Type Comparison ===\n\
+             Comparable macros (with apidoc entry): {}\n\
+             Return type: {} match, {} const/mut only, {} mismatch ({:.1}%)\n\
+             All params match: {} macros, has mismatch: {} macros\n\
+             Parameter types: {} match, {} const/mut only, {} mismatch ({:.1}%)\n",
+            self.apidoc_comparable,
+            self.return_type_match,
+            self.return_type_const_mut_only,
+            self.return_type_mismatch,
+            self.return_type_match_rate(),
+            self.params_all_match,
+            self.params_has_mismatch,
+            self.param_type_match,
+            self.param_type_const_mut_only,
+            self.param_type_mismatch,
+            self.param_type_match_rate(),
+        )
+    }
 }
 
 /// エラー型
@@ -741,6 +816,33 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 }
             }
 
+            // apidoc との型比較
+            if let MacroKind::Function { ref params, .. } = def.kind {
+                if let Some(result) = compare_macro_signature(
+                    &name_str,
+                    &info_with_inferred,
+                    params,
+                    &apidoc,
+                    interner,
+                    &rust_decls,
+                ) {
+                    stats.apidoc_comparable += 1;
+                    match result.return_type_result {
+                        TypeMatchResult::Match => stats.return_type_match += 1,
+                        TypeMatchResult::ConstMutOnly => stats.return_type_const_mut_only += 1,
+                        TypeMatchResult::Mismatch => stats.return_type_mismatch += 1,
+                    }
+                    stats.param_type_match += result.param_match;
+                    stats.param_type_const_mut_only += result.param_const_mut_only;
+                    stats.param_type_mismatch += result.param_mismatch;
+                    if result.param_mismatch == 0 && result.param_const_mut_only == 0 && result.param_match > 0 {
+                        stats.params_all_match += 1;
+                    } else if result.param_mismatch > 0 || result.param_const_mut_only > 0 {
+                        stats.params_has_mismatch += 1;
+                    }
+                }
+            }
+
             let frag = codegen.macro_to_rust_fn(def, &info_with_inferred, expr);
             all_used_constants.extend(frag.used_constants.iter().cloned());
             if frag.has_issues() {
@@ -765,6 +867,8 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 stats.macro_success + stats.inline_success,
                 stats.macro_failure + stats.inline_failure
             );
+            // apidoc 型比較サマリ
+            eprint!("{}", stats.apidoc_summary());
         }
     }
 
@@ -874,9 +978,188 @@ fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
     e.format_with_files(pp.files())
 }
 
+// ==================== Apidoc 型比較 ====================
+
+/// C型をRust型に正規化して比較可能にする
+fn normalize_c_type_for_comparison(c_type: &str) -> String {
+    crate::iterative_infer::c_type_to_rust(c_type)
+}
+
+/// Rust型を正規化（空白除去、ポインタ表記統一）
+fn normalize_rust_type(rust_type: &str) -> String {
+    let mut s = rust_type.trim().to_string();
+    // 空白を除去
+    s = s.replace(" ", "");
+    // 先頭のコロン（::std::...）を除去
+    s = s.trim_start_matches(':').to_string();
+    s = s.replace("::", "::");
+    // std::ffi:: プレフィックスを除去
+    s = s.replace("std::ffi::", "");
+    // std::os::raw:: プレフィックスを除去
+    s = s.replace("std::os::raw::", "");
+    s
+}
+
+/// 型エイリアスを解決する
+/// bindings.rs の型エイリアス（例: STRLEN = usize）を使って展開する
+fn resolve_type_alias(ty: &str, rust_decls: &RustDeclDict) -> String {
+    let normalized = normalize_rust_type(ty);
+
+    // ポインタ型の場合は中身を解決
+    if normalized.starts_with("*mut") {
+        let inner = normalized.strip_prefix("*mut").unwrap().trim();
+        let resolved = resolve_base_type(inner, rust_decls);
+        return format!("*mut{}", resolved);
+    }
+    if normalized.starts_with("*const") {
+        let inner = normalized.strip_prefix("*const").unwrap().trim();
+        let resolved = resolve_base_type(inner, rust_decls);
+        return format!("*const{}", resolved);
+    }
+
+    resolve_base_type(&normalized, rust_decls)
+}
+
+/// 基本型のエイリアスを解決する
+fn resolve_base_type(ty: &str, rust_decls: &RustDeclDict) -> String {
+    if let Some(alias) = rust_decls.types.get(ty) {
+        // エイリアスを再帰的に解決
+        normalize_rust_type(&alias.ty)
+    } else {
+        ty.to_string()
+    }
+}
+
+/// const/mut を除いたポインタ型を取得（比較用）
+fn strip_const_mut(ty: &str) -> String {
+    ty.replace("*mut", "*").replace("*const", "*")
+}
+
+/// 2つの型を比較して結果を返す
+/// - c_type: apidoc の C型 (例: "SV *", "const char *")
+/// - rust_type: 推論された Rust型 (例: "*mut SV", "*const c_char")
+/// - rust_decls: bindings.rs から読み込んだ型エイリアス
+fn types_match_with_aliases(c_type: &str, rust_type: &str, rust_decls: &RustDeclDict) -> TypeMatchResult {
+    let normalized_c = normalize_rust_type(&normalize_c_type_for_comparison(c_type));
+    let normalized_rust = normalize_rust_type(rust_type);
+
+    // 型エイリアスを解決
+    let resolved_c = resolve_type_alias(&normalized_c, rust_decls);
+    let resolved_rust = resolve_type_alias(&normalized_rust, rust_decls);
+
+    // 完全一致
+    if resolved_c == resolved_rust {
+        return TypeMatchResult::Match;
+    }
+
+    // const/mut の違いのみかチェック
+    let stripped_c = strip_const_mut(&resolved_c);
+    let stripped_rust = strip_const_mut(&resolved_rust);
+
+    if stripped_c == stripped_rust {
+        TypeMatchResult::ConstMutOnly
+    } else {
+        TypeMatchResult::Mismatch
+    }
+}
+
+/// マクロの型シグネチャ比較結果
+pub struct SignatureCompareResult {
+    pub return_type_result: TypeMatchResult,
+    pub param_match: usize,
+    pub param_const_mut_only: usize,
+    pub param_mismatch: usize,
+}
+
+/// マクロの型シグネチャを apidoc と比較
+fn compare_macro_signature(
+    macro_name: &str,
+    info: &crate::MacroInfo2,
+    param_names: &[crate::InternedStr],
+    apidoc: &ApidocDict,
+    interner: &crate::StringInterner,
+    rust_decls: &RustDeclDict,
+) -> Option<SignatureCompareResult> {
+    let entry = apidoc.get(macro_name)?;
+
+    // 戻り値型の比較
+    let return_type_result = match (&entry.return_type, &info.return_type) {
+        (Some(c_type), Some(rust_type)) => types_match_with_aliases(c_type, rust_type, rust_decls),
+        (None, None) => TypeMatchResult::Match,  // 両方なし = void
+        (None, Some(rust_type)) => {
+            if rust_type == "()" || rust_type == "void" {
+                TypeMatchResult::Match
+            } else {
+                TypeMatchResult::Mismatch
+            }
+        }
+        (Some(c_type), None) => {
+            if c_type.trim() == "void" {
+                TypeMatchResult::Match
+            } else {
+                TypeMatchResult::Mismatch
+            }
+        }
+    };
+
+    // パラメータ型の比較
+    let mut param_match = 0;
+    let mut param_const_mut_only = 0;
+    let mut param_mismatch = 0;
+
+    for (i, param_id) in param_names.iter().enumerate() {
+        if let Some(apidoc_arg) = entry.args.get(i) {
+            let param_name = interner.get(*param_id);
+            if let Some(inferred_type) = info.param_types.get(param_id) {
+                match types_match_with_aliases(&apidoc_arg.ty, inferred_type, rust_decls) {
+                    TypeMatchResult::Match => param_match += 1,
+                    TypeMatchResult::ConstMutOnly => {
+                        param_const_mut_only += 1;
+                        eprintln!(
+                            "  [const/mut] {}.{}: apidoc='{}' inferred='{}'",
+                            macro_name, param_name, apidoc_arg.ty, inferred_type
+                        );
+                    }
+                    TypeMatchResult::Mismatch => {
+                        param_mismatch += 1;
+                        eprintln!(
+                            "  [mismatch] {}.{}: apidoc='{}' inferred='{}'",
+                            macro_name, param_name, apidoc_arg.ty, inferred_type
+                        );
+                    }
+                }
+            } else {
+                // 型が推論されていない場合は不一致
+                param_mismatch += 1;
+            }
+        }
+    }
+
+    Some(SignatureCompareResult {
+        return_type_result,
+        param_match,
+        param_const_mut_only,
+        param_mismatch,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト用ヘルパー: 型エイリアスなしで型を比較
+    fn types_match(c_type: &str, rust_type: &str) -> bool {
+        let empty_decls = RustDeclDict::new();
+        matches!(
+            types_match_with_aliases(c_type, rust_type, &empty_decls),
+            TypeMatchResult::Match
+        )
+    }
+
+    /// テスト用ヘルパー: 型エイリアス付きで型を比較
+    fn types_match_with_decls(c_type: &str, rust_type: &str, decls: &RustDeclDict) -> TypeMatchResult {
+        types_match_with_aliases(c_type, rust_type, decls)
+    }
 
     #[test]
     fn test_builder_basic() {
@@ -909,5 +1192,130 @@ mod tests {
         assert_eq!(config.pp_config.predefined.len(), 2);
         assert!(config.include_inline_functions);
         assert!(!config.include_macro_functions);
+    }
+
+    #[test]
+    fn test_types_match_pointer() {
+        // C "SV *" should match Rust "*mut SV"
+        assert!(types_match("SV *", "*mut SV"));
+        // C "const SV *" should match Rust "*const SV"
+        assert!(types_match("const SV *", "*const SV"));
+        // C "char *" should match Rust "*mut c_char"
+        assert!(types_match("char *", "*mut c_char"));
+        // C "const char *" should match Rust "*const c_char"
+        assert!(types_match("const char *", "*const c_char"));
+    }
+
+    #[test]
+    fn test_types_match_basic() {
+        // C "int" should match Rust "c_int"
+        assert!(types_match("int", "c_int"));
+        // C "void" should match Rust "()"
+        assert!(types_match("void", "()"));
+        // C "unsigned int" should match Rust "c_uint"
+        assert!(types_match("unsigned int", "c_uint"));
+    }
+
+    #[test]
+    fn test_types_match_perl_types() {
+        // Perl-specific types are preserved as-is in c_type_to_rust
+        // (they're typedef names that exist in bindings.rs)
+        assert!(types_match("SSize_t", "SSize_t"));
+        assert!(types_match("Size_t", "Size_t"));
+        assert!(types_match("STRLEN", "STRLEN"));
+        assert!(types_match("IV", "IV"));
+        assert!(types_match("UV", "UV"));
+        assert!(types_match("SV *", "*mut SV"));
+        assert!(types_match("AV *", "*mut AV"));
+        assert!(types_match("HV *", "*mut HV"));
+    }
+
+    #[test]
+    fn test_types_mismatch() {
+        // Different types should not match
+        assert!(!types_match("int", "c_long"));
+        // mut vs const は ConstMutOnly として扱われる
+        let empty_decls = RustDeclDict::new();
+        assert_eq!(
+            types_match_with_aliases("SV *", "*const SV", &empty_decls),
+            TypeMatchResult::ConstMutOnly
+        );
+        assert!(!types_match("char *", "*mut SV"));  // different base type
+    }
+
+    #[test]
+    fn test_types_match_with_alias() {
+        // bindings.rs のような型エイリアス付きでの比較
+        let decls = RustDeclDict::parse("pub type STRLEN = usize;");
+
+        // STRLEN と usize が一致するはず
+        assert_eq!(
+            types_match_with_decls("STRLEN", "usize", &decls),
+            TypeMatchResult::Match
+        );
+
+        // 逆方向も一致
+        assert_eq!(
+            types_match_with_decls("usize", "STRLEN", &decls),
+            TypeMatchResult::Match
+        );
+    }
+
+    #[test]
+    fn test_const_mut_only() {
+        let empty_decls = RustDeclDict::new();
+
+        // *mut vs *const は ConstMutOnly
+        assert_eq!(
+            types_match_with_aliases("SV *", "*const SV", &empty_decls),
+            TypeMatchResult::ConstMutOnly
+        );
+        assert_eq!(
+            types_match_with_aliases("const SV *", "*mut SV", &empty_decls),
+            TypeMatchResult::ConstMutOnly
+        );
+
+        // 完全に異なる型は Mismatch
+        assert_eq!(
+            types_match_with_aliases("SV *", "*mut AV", &empty_decls),
+            TypeMatchResult::Mismatch
+        );
+    }
+
+    #[test]
+    fn test_stats_summary() {
+        let mut stats = MacrogenStats::default();
+        stats.apidoc_comparable = 10;
+        stats.return_type_match = 8;
+        stats.return_type_const_mut_only = 0;
+        stats.return_type_mismatch = 2;
+        stats.params_all_match = 6;
+        stats.params_has_mismatch = 4;
+        stats.param_type_match = 15;
+        stats.param_type_const_mut_only = 0;
+        stats.param_type_mismatch = 5;
+
+        assert!((stats.return_type_match_rate() - 80.0).abs() < 0.01);
+        assert!((stats.param_type_match_rate() - 75.0).abs() < 0.01);
+
+        let summary = stats.apidoc_summary();
+        assert!(summary.contains("80.0%"));
+        assert!(summary.contains("75.0%"));
+    }
+
+    #[test]
+    fn test_stats_with_const_mut() {
+        let mut stats = MacrogenStats::default();
+        stats.apidoc_comparable = 10;
+        stats.return_type_match = 6;
+        stats.return_type_const_mut_only = 2;
+        stats.return_type_mismatch = 2;
+        stats.param_type_match = 10;
+        stats.param_type_const_mut_only = 5;
+        stats.param_type_mismatch = 5;
+
+        // const/mut only は match として扱われる
+        assert!((stats.return_type_match_rate() - 80.0).abs() < 0.01);  // (6+2)/10 = 80%
+        assert!((stats.param_type_match_rate() - 75.0).abs() < 0.01);  // (10+5)/20 = 75%
     }
 }
