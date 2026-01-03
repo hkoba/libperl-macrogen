@@ -11,11 +11,12 @@ use std::path::PathBuf;
 
 use crate::{
     ApidocDict, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
-    InferenceContext, MacroAnalyzer2, MacroCategory2, MacroInfo2, MacroKind, PPConfig, Parser,
-    PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, extract_called_functions,
-    get_default_target_dir, get_perl_config, PerlConfigError,
+    InferenceContext, MacroAnalyzer2, MacroCategory2, MacroInfo2, MacroKind, MacroTable, PPConfig, Parser,
+    PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, StringInterner, TokenKind,
+    extract_called_functions, get_default_target_dir, get_perl_config, PerlConfigError,
     TypedSexpPrinter,
 };
+use std::collections::HashSet;
 
 /// Rust関数生成の設定
 #[derive(Debug, Clone)]
@@ -627,6 +628,13 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
 
         // マクロ関数をpendingとして追加
         let macros = pp.macros();
+
+        // マクロから型エイリアスを抽出（例: #define Size_t size_t）
+        let macro_type_aliases = extract_type_aliases_from_macros(macros, interner);
+        if config.verbose {
+            eprintln!("Extracted {} type aliases from macros", macro_type_aliases.len());
+        }
+
         let mut macro_exprs: HashMap<String, crate::Expr> = HashMap::new();
         let mut macro_parse_failures: Vec<(String, String)> = Vec::new();
 
@@ -816,6 +824,18 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 }
             }
 
+            // apidoc の型情報を適用（bindings.rs に存在する型のみ）
+            if let MacroKind::Function { ref params, .. } = def.kind {
+                apply_apidoc_types_to_params(
+                    &mut info_with_inferred,
+                    &name_str,
+                    params,
+                    &apidoc,
+                    &rust_decls,
+                    &macro_type_aliases,
+                );
+            }
+
             // apidoc との型比較
             if let MacroKind::Function { ref params, .. } = def.kind {
                 if let Some(result) = compare_macro_signature(
@@ -825,6 +845,7 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                     &apidoc,
                     interner,
                     &rust_decls,
+                    &macro_type_aliases,
                 ) {
                     stats.apidoc_comparable += 1;
                     match result.return_type_result {
@@ -1002,31 +1023,54 @@ fn normalize_rust_type(rust_type: &str) -> String {
 
 /// 型エイリアスを解決する
 /// bindings.rs の型エイリアス（例: STRLEN = usize）を使って展開する
-fn resolve_type_alias(ty: &str, rust_decls: &RustDeclDict) -> String {
+fn resolve_type_alias(
+    ty: &str,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) -> String {
     let normalized = normalize_rust_type(ty);
 
     // ポインタ型の場合は中身を解決
     if normalized.starts_with("*mut") {
         let inner = normalized.strip_prefix("*mut").unwrap().trim();
-        let resolved = resolve_base_type(inner, rust_decls);
+        let resolved = resolve_base_type_for_comparison(inner, rust_decls, macro_type_aliases);
         return format!("*mut{}", resolved);
     }
     if normalized.starts_with("*const") {
         let inner = normalized.strip_prefix("*const").unwrap().trim();
-        let resolved = resolve_base_type(inner, rust_decls);
+        let resolved = resolve_base_type_for_comparison(inner, rust_decls, macro_type_aliases);
         return format!("*const{}", resolved);
     }
 
-    resolve_base_type(&normalized, rust_decls)
+    resolve_base_type_for_comparison(&normalized, rust_decls, macro_type_aliases)
 }
 
-/// 基本型のエイリアスを解決する
-fn resolve_base_type(ty: &str, rust_decls: &RustDeclDict) -> String {
+/// 基本型のエイリアスを解決する（比較用）
+fn resolve_base_type_for_comparison(
+    ty: &str,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) -> String {
+    // まず bindings.rs のエイリアスをチェック
     if let Some(alias) = rust_decls.types.get(ty) {
         // エイリアスを再帰的に解決
-        normalize_rust_type(&alias.ty)
-    } else {
-        ty.to_string()
+        return normalize_rust_type(&alias.ty);
+    }
+
+    // マクロ定義の型エイリアスを経由して解決
+    // 例: Size_t -> size_t -> usize
+    if let Some(base_type) = macro_type_aliases.get(ty) {
+        return resolve_base_type_for_comparison(base_type, rust_decls, macro_type_aliases);
+    }
+
+    // 標準的な型変換（void → c_void など）
+    // c_type_to_rust との整合性を保つ
+    match ty {
+        "void" | "()" => "c_void".to_string(),
+        "size_t" => "usize".to_string(),
+        "ssize_t" => "isize".to_string(),
+        "off_t" | "off64_t" => "i64".to_string(),
+        _ => ty.to_string(),
     }
 }
 
@@ -1035,17 +1079,180 @@ fn strip_const_mut(ty: &str) -> String {
     ty.replace("*mut", "*").replace("*const", "*")
 }
 
+/// apidoc の C 型を bindings.rs に存在する Rust 型に変換
+///
+/// 例:
+/// - "UV" -> Some("UV") (bindings.rs に `pub type UV = ...` があれば)
+/// - "SV *" -> Some("*mut SV") (bindings.rs に SV 構造体があれば)
+/// - "Size_t" -> Some("usize") (マクロで `#define Size_t size_t` があれば)
+/// - "const char *" -> Some("*const c_char")
+/// - "unknown_type" -> None
+fn resolve_apidoc_type_to_rust(
+    c_type: &str,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let trimmed = c_type.trim();
+
+    // ポインタ型かチェック
+    if trimmed.ends_with('*') {
+        // "SV *" or "const SV *" のパターン
+        let without_star = trimmed.trim_end_matches('*').trim();
+        let (is_const, base_type) = if without_star.starts_with("const ") {
+            (true, without_star.strip_prefix("const ").unwrap().trim())
+        } else {
+            (false, without_star)
+        };
+
+        // 基本型を解決
+        if let Some(rust_base) = resolve_base_type_from_bindings(base_type, rust_decls, macro_type_aliases) {
+            let ptr_kind = if is_const { "*const" } else { "*mut" };
+            return Some(format!("{} {}", ptr_kind, rust_base));
+        }
+        return None;
+    }
+
+    // 非ポインタ型
+    resolve_base_type_from_bindings(trimmed, rust_decls, macro_type_aliases)
+}
+
+/// マクロテーブルから型エイリアスを抽出
+///
+/// `#define Size_t size_t` のようなマクロを型エイリアスとして解釈する
+/// 戻り値: 型名 → 基底型名 のマッピング
+fn extract_type_aliases_from_macros(
+    macros: &MacroTable,
+    interner: &StringInterner,
+) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+
+    for (name_id, def) in macros.iter() {
+        // オブジェクトマクロのみ対象
+        if def.is_function() {
+            continue;
+        }
+
+        // 本体が単一の識別子トークンの場合、型エイリアスと見なす
+        if def.body.len() == 1 {
+            if let TokenKind::Ident(base_id) = def.body[0].kind {
+                let name = interner.get(*name_id);
+                let base = interner.get(base_id);
+
+                // 型名らしいもののみ（大文字で始まる or _t で終わる）
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    || name.ends_with("_t")
+                {
+                    aliases.insert(name.to_string(), base.to_string());
+                }
+            }
+        }
+    }
+
+    aliases
+}
+
+/// apidoc の型情報をマクロのパラメータ型に適用
+///
+/// apidoc で指定された型が bindings.rs またはマクロ定義の型エイリアスに存在する場合、
+/// その型を優先して使用する
+fn apply_apidoc_types_to_params(
+    info: &mut crate::MacroInfo2,
+    macro_name: &str,
+    params: &[crate::InternedStr],
+    apidoc: &ApidocDict,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) {
+    let entry = match apidoc.get(macro_name) {
+        Some(e) => e,
+        None => return,
+    };
+
+    for (i, param_id) in params.iter().enumerate() {
+        if let Some(apidoc_arg) = entry.args.get(i) {
+            // apidoc の型を Rust 型に解決
+            if let Some(rust_ty) = resolve_apidoc_type_to_rust(&apidoc_arg.ty, rust_decls, macro_type_aliases) {
+                // apidoc の型で上書き（bindings.rs に存在する型のみ）
+                info.param_types.insert(*param_id, rust_ty);
+            }
+        }
+    }
+
+    // 注: 戻り値型は apidoc から適用しない
+    // apidoc は「期待される型」を示すが、実際のマクロ本体から推論された型を優先する
+    // 例: isDIGIT_A(c) が () を返すなら、isDIGIT も () を返すべき
+}
+
+/// 基本型名を bindings.rs から解決
+///
+/// - 型エイリアス (pub type UV = ...) があればその名前を返す
+/// - 構造体 (pub struct SV { ... }) があればその名前を返す
+/// - マクロ定義の型エイリアス (#define Size_t size_t) を経由して解決
+/// - char, int などの C 基本型は対応する Rust 型に変換
+fn resolve_base_type_from_bindings(
+    c_type: &str,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) -> Option<String> {
+    // bindings.rs の型エイリアスに存在するか
+    if rust_decls.types.contains_key(c_type) {
+        return Some(c_type.to_string());
+    }
+
+    // bindings.rs の構造体に存在するか
+    if rust_decls.structs.contains_key(c_type) {
+        return Some(c_type.to_string());
+    }
+
+    // マクロ定義の型エイリアスを経由して解決
+    // 例: Size_t -> size_t -> usize
+    if let Some(base_type) = macro_type_aliases.get(c_type) {
+        // 再帰的に解決（Size_t -> size_t -> usize）
+        if let Some(resolved) = resolve_base_type_from_bindings(base_type, rust_decls, macro_type_aliases) {
+            return Some(resolved);
+        }
+    }
+
+    // C の基本型を Rust 型に変換
+    match c_type {
+        "char" => Some("c_char".to_string()),
+        "unsigned char" => Some("c_uchar".to_string()),
+        "int" => Some("c_int".to_string()),
+        "unsigned int" | "unsigned" => Some("c_uint".to_string()),
+        "short" => Some("c_short".to_string()),
+        "unsigned short" => Some("c_ushort".to_string()),
+        "long" => Some("c_long".to_string()),
+        "unsigned long" => Some("c_ulong".to_string()),
+        "long long" => Some("c_longlong".to_string()),
+        "unsigned long long" => Some("c_ulonglong".to_string()),
+        "void" => Some("c_void".to_string()),
+        "float" => Some("c_float".to_string()),
+        "double" => Some("c_double".to_string()),
+        "bool" | "_Bool" => Some("bool".to_string()),
+        "size_t" => Some("usize".to_string()),
+        "ssize_t" => Some("isize".to_string()),
+        "off_t" | "off64_t" => Some("i64".to_string()),
+        _ => None,
+    }
+}
+
 /// 2つの型を比較して結果を返す
 /// - c_type: apidoc の C型 (例: "SV *", "const char *")
 /// - rust_type: 推論された Rust型 (例: "*mut SV", "*const c_char")
 /// - rust_decls: bindings.rs から読み込んだ型エイリアス
-fn types_match_with_aliases(c_type: &str, rust_type: &str, rust_decls: &RustDeclDict) -> TypeMatchResult {
+/// - macro_type_aliases: マクロ定義から抽出した型エイリアス
+fn types_match_with_aliases(
+    c_type: &str,
+    rust_type: &str,
+    rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
+) -> TypeMatchResult {
     let normalized_c = normalize_rust_type(&normalize_c_type_for_comparison(c_type));
     let normalized_rust = normalize_rust_type(rust_type);
 
     // 型エイリアスを解決
-    let resolved_c = resolve_type_alias(&normalized_c, rust_decls);
-    let resolved_rust = resolve_type_alias(&normalized_rust, rust_decls);
+    let resolved_c = resolve_type_alias(&normalized_c, rust_decls, macro_type_aliases);
+    let resolved_rust = resolve_type_alias(&normalized_rust, rust_decls, macro_type_aliases);
 
     // 完全一致
     if resolved_c == resolved_rust {
@@ -1079,12 +1286,13 @@ fn compare_macro_signature(
     apidoc: &ApidocDict,
     interner: &crate::StringInterner,
     rust_decls: &RustDeclDict,
+    macro_type_aliases: &HashMap<String, String>,
 ) -> Option<SignatureCompareResult> {
     let entry = apidoc.get(macro_name)?;
 
     // 戻り値型の比較
     let return_type_result = match (&entry.return_type, &info.return_type) {
-        (Some(c_type), Some(rust_type)) => types_match_with_aliases(c_type, rust_type, rust_decls),
+        (Some(c_type), Some(rust_type)) => types_match_with_aliases(c_type, rust_type, rust_decls, macro_type_aliases),
         (None, None) => TypeMatchResult::Match,  // 両方なし = void
         (None, Some(rust_type)) => {
             if rust_type == "()" || rust_type == "void" {
@@ -1111,7 +1319,7 @@ fn compare_macro_signature(
         if let Some(apidoc_arg) = entry.args.get(i) {
             let param_name = interner.get(*param_id);
             if let Some(inferred_type) = info.param_types.get(param_id) {
-                match types_match_with_aliases(&apidoc_arg.ty, inferred_type, rust_decls) {
+                match types_match_with_aliases(&apidoc_arg.ty, inferred_type, rust_decls, macro_type_aliases) {
                     TypeMatchResult::Match => param_match += 1,
                     TypeMatchResult::ConstMutOnly => {
                         param_const_mut_only += 1;
@@ -1150,15 +1358,17 @@ mod tests {
     /// テスト用ヘルパー: 型エイリアスなしで型を比較
     fn types_match(c_type: &str, rust_type: &str) -> bool {
         let empty_decls = RustDeclDict::new();
+        let empty_macro_aliases = HashMap::new();
         matches!(
-            types_match_with_aliases(c_type, rust_type, &empty_decls),
+            types_match_with_aliases(c_type, rust_type, &empty_decls, &empty_macro_aliases),
             TypeMatchResult::Match
         )
     }
 
     /// テスト用ヘルパー: 型エイリアス付きで型を比較
     fn types_match_with_decls(c_type: &str, rust_type: &str, decls: &RustDeclDict) -> TypeMatchResult {
-        types_match_with_aliases(c_type, rust_type, decls)
+        let empty_macro_aliases = HashMap::new();
+        types_match_with_aliases(c_type, rust_type, decls, &empty_macro_aliases)
     }
 
     #[test]
@@ -1236,8 +1446,9 @@ mod tests {
         assert!(!types_match("int", "c_long"));
         // mut vs const は ConstMutOnly として扱われる
         let empty_decls = RustDeclDict::new();
+        let empty_macro_aliases = HashMap::new();
         assert_eq!(
-            types_match_with_aliases("SV *", "*const SV", &empty_decls),
+            types_match_with_aliases("SV *", "*const SV", &empty_decls, &empty_macro_aliases),
             TypeMatchResult::ConstMutOnly
         );
         assert!(!types_match("char *", "*mut SV"));  // different base type
@@ -1264,20 +1475,21 @@ mod tests {
     #[test]
     fn test_const_mut_only() {
         let empty_decls = RustDeclDict::new();
+        let empty_macro_aliases = HashMap::new();
 
         // *mut vs *const は ConstMutOnly
         assert_eq!(
-            types_match_with_aliases("SV *", "*const SV", &empty_decls),
+            types_match_with_aliases("SV *", "*const SV", &empty_decls, &empty_macro_aliases),
             TypeMatchResult::ConstMutOnly
         );
         assert_eq!(
-            types_match_with_aliases("const SV *", "*mut SV", &empty_decls),
+            types_match_with_aliases("const SV *", "*mut SV", &empty_decls, &empty_macro_aliases),
             TypeMatchResult::ConstMutOnly
         );
 
         // 完全に異なる型は Mismatch
         assert_eq!(
-            types_match_with_aliases("SV *", "*mut AV", &empty_decls),
+            types_match_with_aliases("SV *", "*mut AV", &empty_decls, &empty_macro_aliases),
             TypeMatchResult::Mismatch
         );
     }
@@ -1317,5 +1529,34 @@ mod tests {
         // const/mut only は match として扱われる
         assert!((stats.return_type_match_rate() - 80.0).abs() < 0.01);  // (6+2)/10 = 80%
         assert!((stats.param_type_match_rate() - 75.0).abs() < 0.01);  // (10+5)/20 = 75%
+    }
+
+    #[test]
+    fn test_types_match_with_macro_aliases() {
+        // マクロ定義の型エイリアスを使った比較
+        // #define Size_t size_t のようなマクロを模擬
+        let empty_decls = RustDeclDict::new();
+        let mut macro_aliases = HashMap::new();
+        macro_aliases.insert("Size_t".to_string(), "size_t".to_string());
+        macro_aliases.insert("SSize_t".to_string(), "ssize_t".to_string());
+        macro_aliases.insert("Off_t".to_string(), "off64_t".to_string());
+
+        // Size_t と usize が一致するはず（Size_t -> size_t -> usize）
+        assert_eq!(
+            types_match_with_aliases("Size_t", "usize", &empty_decls, &macro_aliases),
+            TypeMatchResult::Match
+        );
+
+        // SSize_t と isize が一致するはず（SSize_t -> ssize_t -> isize）
+        assert_eq!(
+            types_match_with_aliases("SSize_t", "isize", &empty_decls, &macro_aliases),
+            TypeMatchResult::Match
+        );
+
+        // Off_t と i64 が一致するはず（Off_t -> off64_t -> i64）
+        assert_eq!(
+            types_match_with_aliases("Off_t", "i64", &empty_decls, &macro_aliases),
+            TypeMatchResult::Match
+        );
     }
 }
