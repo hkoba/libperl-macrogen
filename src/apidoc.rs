@@ -97,6 +97,9 @@ pub struct ApidocEntry {
     pub source_file: Option<String>,
     /// 行番号（分かる場合）
     pub line_number: Option<usize>,
+    /// トークン合成を行うマクロか（引数型が `"name"` のような引用符付きの場合）
+    #[serde(default)]
+    pub has_token_pasting: bool,
 }
 
 /// apidoc辞書（名前でエントリを検索可能）
@@ -334,6 +337,7 @@ impl ApidocEntry {
                 args: Vec::new(),
                 source_file: None,
                 line_number: None,
+                has_token_pasting: false,
             })
         }
     }
@@ -366,6 +370,12 @@ impl ApidocEntry {
             .filter_map(|arg| ApidocArg::parse(arg))
             .collect();
 
+        // トークン合成マクロかどうかをチェック
+        // 引数型が `"name"` のような引用符で囲まれた文字列の場合はトークン合成用
+        let has_token_pasting = args.iter().any(|arg| {
+            arg.ty.starts_with('"') && arg.ty.ends_with('"')
+        });
+
         Some(Self {
             flags,
             return_type,
@@ -373,6 +383,7 @@ impl ApidocEntry {
             args,
             source_file: None,
             line_number: None,
+            has_token_pasting,
         })
     }
 

@@ -793,6 +793,13 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 continue;
             }
 
+            // apidoc でトークン合成マクロと判定された場合はスキップ
+            if let Some(entry) = apidoc.get(&name_str) {
+                if entry.has_token_pasting {
+                    continue;
+                }
+            }
+
             let expr = match macro_exprs.get(&name_str) {
                 Some(e) => e,
                 None => continue,
