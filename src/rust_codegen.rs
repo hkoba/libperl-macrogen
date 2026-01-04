@@ -501,12 +501,59 @@ impl<'a> RustCodeGen<'a> {
                 )
             }
 
-            Expr::StmtExpr(_, _) => {
-                CodeFragment::with_issue(
-                    "/* statement expression */",
-                    CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "statement expression"),
-                )
+            Expr::StmtExpr(compound, _) => {
+                // ({ T x = expr; x; }) パターンを認識して簡略化を試みる
+                if let Some(simplified) = self.try_simplify_stmt_expr(compound) {
+                    self.expr_to_rust(&simplified)
+                } else {
+                    CodeFragment::with_issue(
+                        "/* statement expression */",
+                        CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "statement expression"),
+                    )
+                }
             }
+        }
+    }
+
+    /// Statement expression の簡略化を試みる
+    ///
+    /// `({ T x = expr; x; })` パターンを認識し、`expr` を返す。
+    /// MUTABLE_PTR などのマクロがこのパターンを使用している。
+    fn try_simplify_stmt_expr(&self, compound: &CompoundStmt) -> Option<Expr> {
+        // パターン: 2つの項目（宣言 + 式文）
+        if compound.items.len() != 2 {
+            return None;
+        }
+
+        // 最初の項目は宣言であること
+        let decl = match &compound.items[0] {
+            BlockItem::Decl(d) => d,
+            _ => return None,
+        };
+
+        // 宣言が1つの宣言子を持ち、初期化式があること
+        if decl.declarators.len() != 1 {
+            return None;
+        }
+        let init_decl = &decl.declarators[0];
+        let decl_name = init_decl.declarator.name?;
+
+        // 初期化式を取得
+        let init_expr = match &init_decl.init {
+            Some(crate::ast::Initializer::Expr(e)) => (**e).clone(),
+            _ => return None,
+        };
+
+        // 2番目の項目は式文であること
+        let final_stmt = match &compound.items[1] {
+            BlockItem::Stmt(Stmt::Expr(Some(e), _)) => e,
+            _ => return None,
+        };
+
+        // 式文が宣言した変数への参照であること
+        match final_stmt.as_ref() {
+            Expr::Ident(id, _) if *id == decl_name => Some(init_expr),
+            _ => None,
         }
     }
 
