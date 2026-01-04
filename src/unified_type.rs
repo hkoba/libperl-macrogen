@@ -157,8 +157,30 @@ impl UnifiedType {
     fn parse_c_basic_type(s: &str) -> Self {
         let s = s.trim();
 
+        // const を除去（値型では const は無意味）
+        let s = s.strip_prefix("const ").unwrap_or(s);
+        let s = if s.ends_with(" const") {
+            &s[..s.len() - 6]
+        } else {
+            s
+        };
+        let s = s.trim();
+
+        // struct/union/enum プレフィックスを除去
+        let s = s
+            .strip_prefix("struct ")
+            .or_else(|| s.strip_prefix("union "))
+            .or_else(|| s.strip_prefix("enum "))
+            .unwrap_or(s);
+
         // unsigned/signed の処理
-        let (is_unsigned, base) = if s.starts_with("unsigned ") {
+        let (is_unsigned, base) = if s == "unsigned" {
+            // "unsigned" alone means "unsigned int"
+            (true, "")
+        } else if s == "signed" {
+            // "signed" alone means "signed int"
+            (false, "")
+        } else if s.starts_with("unsigned ") {
             (true, s[9..].trim())
         } else if s.starts_with("signed ") {
             (false, s[7..].trim())
@@ -729,5 +751,42 @@ mod tests {
             is_const: false,
         };
         assert!(ptr_sv_upper.equals_ignoring_case(&ptr_sv_lower));
+    }
+
+    #[test]
+    fn test_const_value_type() {
+        // const U32 should be the same as U32
+        assert_eq!(
+            UnifiedType::from_c_str("const U32"),
+            UnifiedType::Named("U32".to_string())
+        );
+        assert_eq!(
+            UnifiedType::from_c_str("const STRLEN"),
+            UnifiedType::Named("STRLEN".to_string())
+        );
+        assert_eq!(
+            UnifiedType::from_c_str("const int"),
+            UnifiedType::Int { signed: true, size: IntSize::Int }
+        );
+        assert_eq!(
+            UnifiedType::from_c_str("const bool"),
+            UnifiedType::Bool
+        );
+    }
+
+    #[test]
+    fn test_struct_prefix() {
+        // struct X should be the same as X
+        assert_eq!(
+            UnifiedType::from_c_str("struct refcounted_he *"),
+            UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Named("refcounted_he".to_string())),
+                is_const: false,
+            }
+        );
+        assert_eq!(
+            UnifiedType::from_c_str("struct SV"),
+            UnifiedType::Named("SV".to_string())
+        );
     }
 }

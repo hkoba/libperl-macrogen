@@ -1038,17 +1038,36 @@ fn resolve_apidoc_type_to_rust(
 ) -> Option<String> {
     let trimmed = c_type.trim();
 
+    // "HV *const" パターン: 末尾が "*const" or "* const" の場合
+    // これはポインタ自体がconstだが、データはmutableを意味する
+    // Rustでは単に *mut として扱う（Cのポインタconst性はRustでは通常無視）
+    if let Some(before_const) = trimmed.strip_suffix("const") {
+        let before_const = before_const.trim();
+        if before_const.ends_with('*') {
+            // "HV *" の部分を取得し、* を除去して内部型を取得
+            let without_star = before_const[..before_const.len() - 1].trim();
+            if let Some(rust_inner) = resolve_apidoc_type_to_rust(without_star, rust_decls, macro_type_aliases) {
+                // ポインタ自体のconstは無視し、*mut として返す
+                return Some(format!("*mut {}", rust_inner));
+            }
+            return None;
+        }
+    }
+
     // ポインタ型かチェック（末尾の * を1つだけ削除して再帰処理）
     if trimmed.ends_with('*') {
         // "SV *" or "const SV *" or "SV **" のパターン
         // 末尾の * を1つだけ削除
         let without_one_star = trimmed[..trimmed.len() - 1].trim();
 
-        // const ポインタかチェック
+        // const ポインタかチェック（データがconst: "const SV *" → *const SV）
         let (is_const, inner_type) = if without_one_star.ends_with("const") {
-            // "SV * const" パターン
+            // "SV * const *" パターン（中間にconst）
             let before_const = without_one_star[..without_one_star.len() - 5].trim();
             (true, before_const)
+        } else if without_one_star.starts_with("const ") {
+            // "const SV" パターン
+            (true, without_one_star.strip_prefix("const ").unwrap().trim())
         } else {
             (false, without_one_star)
         };

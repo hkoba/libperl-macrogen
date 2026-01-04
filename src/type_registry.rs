@@ -98,18 +98,35 @@ impl TypeRegistry {
                 continue;
             }
 
-            // 本体が単一の識別子トークンの場合、型エイリアスと見なす
+            // 本体が単一トークンの場合、型エイリアスと見なす
             if def.body.len() == 1 {
-                if let TokenKind::Ident(base_id) = def.body[0].kind {
-                    let name = interner.get(*name_id);
-                    let base = interner.get(base_id);
+                let name = interner.get(*name_id);
 
-                    // 型名らしいもののみ（大文字で始まる or _t で終わる）
-                    if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                        || name.ends_with("_t")
-                    {
-                        self.macro_aliases.insert(name.to_string(), base.to_string());
-                    }
+                // 型名らしいもののみ（大文字で始まる or _t で終わる）
+                if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && !name.ends_with("_t")
+                {
+                    continue;
+                }
+
+                // 識別子または型キーワードを抽出
+                let base_name: Option<String> = match def.body[0].kind {
+                    TokenKind::Ident(base_id) => Some(interner.get(base_id).to_string()),
+                    // 基本型キーワード
+                    TokenKind::KwChar => Some("char".to_string()),
+                    TokenKind::KwInt => Some("int".to_string()),
+                    TokenKind::KwShort => Some("short".to_string()),
+                    TokenKind::KwLong => Some("long".to_string()),
+                    TokenKind::KwFloat => Some("float".to_string()),
+                    TokenKind::KwDouble => Some("double".to_string()),
+                    TokenKind::KwVoid => Some("void".to_string()),
+                    TokenKind::KwBool => Some("bool".to_string()),
+                    TokenKind::KwInt128 => Some("__int128".to_string()),
+                    _ => None,
+                };
+
+                if let Some(base) = base_name {
+                    self.macro_aliases.insert(name.to_string(), base);
                 }
             }
         }
@@ -266,6 +283,16 @@ impl TypeRegistry {
             rust_struct_count: self.rust_structs.len(),
             macro_alias_count: self.macro_aliases.len(),
         }
+    }
+
+    /// マクロエイリアスを取得（デバッグ用）
+    pub fn get_macro_alias(&self, name: &str) -> Option<&str> {
+        self.macro_aliases.get(name).map(|s| s.as_str())
+    }
+
+    /// 全マクロエイリアスのイテレータ（デバッグ用）
+    pub fn macro_aliases_iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.macro_aliases.iter()
     }
 }
 
