@@ -695,17 +695,6 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                 }
             };
 
-            // println!("parsed expr: {:?}", expr);
-            {
-                eprint!("macro {}: ", name_str);
-                let stderr = io::stderr();
-                let mut handle = stderr.lock();
-                let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
-                let _ = printer.print_expr(& expr);
-                handle.flush()?;
-                eprint!("\n");
-            }
-
             if let MacroKind::Function { ref params, .. } = def.kind {
                 let called_fns = extract_called_functions(&expr, interner);
                 let known_types = info.param_types.clone();
@@ -881,6 +870,19 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
                         stats.params_has_mismatch += 1;
                     }
                 }
+            }
+
+            // println!("parsed expr: {:?}", expr);
+            {
+                eprint!("macro {}: ", name_str);
+                let stderr = io::stderr();
+                let mut handle = stderr.lock();
+                let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
+                if let Some(e) = info_with_inferred.parsed_expr.clone() {
+                    let _ = printer.print_expr(& e.clone());
+                }
+                handle.flush()?;
+                eprint!("\n");
             }
 
             let frag = codegen.macro_to_rust_fn(def, &info_with_inferred, expr);
