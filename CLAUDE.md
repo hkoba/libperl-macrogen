@@ -80,6 +80,20 @@ cargo run -- --auto -E --gcc-format samples/wrapper.h
 
 The `--auto` option automatically retrieves include paths and defines from Perl's `Config.pm`.
 
+### Testing Rust Function Generation (--gen-rust-fns)
+
+To test macro-to-Rust function generation with production data:
+
+```bash
+cargo run --bin libperl-macrogen -- samples/wrapper.h --auto --gen-rust-fns --bindings samples/bindings.rs --apidoc samples/embed.fnc
+```
+
+This command:
+- Uses `samples/wrapper.h` as input
+- Reads type information from `samples/bindings.rs`
+- Reads API documentation from `samples/embed.fnc`
+- Generates Rust functions from C macros
+
 ### Manual Options (alternative)
 
 If `--auto` doesn't work, use explicit options:
