@@ -14,7 +14,7 @@ use crate::lexer::Lexer;
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::pp_expr::PPExprEvaluator;
 use crate::source::{FileId, FileRegistry, SourceLocation};
-use crate::token::{Comment, Token, TokenKind};
+use crate::token::{Comment, Token, TokenId, TokenKind};
 
 /// インクルードパスの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,63 @@ struct CondState {
     seen_else: bool,
     /// ディレクティブの位置
     loc: SourceLocation,
+}
+
+/// 展開禁止情報の管理
+///
+/// トークンごとにマクロ展開禁止リストを管理する。
+/// 自己参照マクロの無限再帰を防止するために使用。
+#[derive(Debug, Default)]
+pub struct NoExpandRegistry {
+    map: HashMap<TokenId, HashSet<InternedStr>>,
+}
+
+impl NoExpandRegistry {
+    /// 新しいレジストリを作成
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    /// トークンに展開禁止マクロを追加
+    pub fn add(&mut self, token_id: TokenId, macro_id: InternedStr) {
+        self.map.entry(token_id).or_default().insert(macro_id);
+    }
+
+    /// トークンに複数の展開禁止マクロを追加
+    pub fn extend(&mut self, token_id: TokenId, macros: impl IntoIterator<Item = InternedStr>) {
+        self.map.entry(token_id).or_default().extend(macros);
+    }
+
+    /// 指定トークンで指定マクロの展開が禁止されているか
+    pub fn is_blocked(&self, token_id: TokenId, macro_id: InternedStr) -> bool {
+        self.map
+            .get(&token_id)
+            .map_or(false, |s| s.contains(&macro_id))
+    }
+
+    /// あるトークンの展開禁止リストを別のトークンに継承
+    pub fn inherit(&mut self, from: TokenId, to: TokenId) {
+        if let Some(set) = self.map.get(&from).cloned() {
+            self.map.entry(to).or_default().extend(set);
+        }
+    }
+
+    /// トークンの展開禁止リストを取得（テスト用）
+    pub fn get(&self, token_id: TokenId) -> Option<&HashSet<InternedStr>> {
+        self.map.get(&token_id)
+    }
+
+    /// レジストリが空かどうか
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// 登録されているトークン数
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 /// 入力ソース（ファイルまたはマクロ展開）
@@ -2790,5 +2847,118 @@ mod tests {
         assert!(!has_ident(&pp, &tokens, "x"));
         assert!(has_keyword(&tokens, TokenKind::KwFloat));
         assert!(has_ident(&pp, &tokens, "y"));
+    }
+
+    // NoExpandRegistry tests
+
+    #[test]
+    fn test_no_expand_registry_new() {
+        let registry = NoExpandRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_no_expand_registry_add() {
+        let mut interner = crate::intern::StringInterner::new();
+        let mut registry = NoExpandRegistry::new();
+
+        let token_id = TokenId::next();
+        let macro_name = interner.intern("FOO");
+
+        registry.add(token_id, macro_name);
+
+        assert!(registry.is_blocked(token_id, macro_name));
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_no_expand_registry_extend() {
+        let mut interner = crate::intern::StringInterner::new();
+        let mut registry = NoExpandRegistry::new();
+
+        let token_id = TokenId::next();
+        let macro1 = interner.intern("FOO");
+        let macro2 = interner.intern("BAR");
+        let macro3 = interner.intern("BAZ");
+
+        registry.extend(token_id, vec![macro1, macro2, macro3]);
+
+        assert!(registry.is_blocked(token_id, macro1));
+        assert!(registry.is_blocked(token_id, macro2));
+        assert!(registry.is_blocked(token_id, macro3));
+    }
+
+    #[test]
+    fn test_no_expand_registry_not_blocked() {
+        let mut interner = crate::intern::StringInterner::new();
+        let mut registry = NoExpandRegistry::new();
+
+        let token_id = TokenId::next();
+        let other_token_id = TokenId::next();
+        let macro_name = interner.intern("FOO");
+        let other_macro = interner.intern("BAR");
+
+        registry.add(token_id, macro_name);
+
+        // 異なるトークンIDではブロックされない
+        assert!(!registry.is_blocked(other_token_id, macro_name));
+        // 異なるマクロ名ではブロックされない
+        assert!(!registry.is_blocked(token_id, other_macro));
+    }
+
+    #[test]
+    fn test_no_expand_registry_inherit() {
+        let mut interner = crate::intern::StringInterner::new();
+        let mut registry = NoExpandRegistry::new();
+
+        let token1 = TokenId::next();
+        let token2 = TokenId::next();
+        let macro1 = interner.intern("FOO");
+        let macro2 = interner.intern("BAR");
+
+        // token1 に FOO と BAR を追加
+        registry.add(token1, macro1);
+        registry.add(token1, macro2);
+
+        // token1 の禁止リストを token2 に継承
+        registry.inherit(token1, token2);
+
+        // token2 も FOO と BAR がブロックされる
+        assert!(registry.is_blocked(token2, macro1));
+        assert!(registry.is_blocked(token2, macro2));
+    }
+
+    #[test]
+    fn test_no_expand_registry_inherit_merge() {
+        let mut interner = crate::intern::StringInterner::new();
+        let mut registry = NoExpandRegistry::new();
+
+        let token1 = TokenId::next();
+        let token2 = TokenId::next();
+        let macro1 = interner.intern("FOO");
+        let macro2 = interner.intern("BAR");
+        let macro3 = interner.intern("BAZ");
+
+        // token1 に FOO を追加
+        registry.add(token1, macro1);
+
+        // token2 に BAR を追加
+        registry.add(token2, macro2);
+
+        // token1 の禁止リストを token2 に継承（マージされる）
+        registry.inherit(token1, token2);
+
+        // token2 は FOO と BAR の両方がブロックされる
+        assert!(registry.is_blocked(token2, macro1));
+        assert!(registry.is_blocked(token2, macro2));
+
+        // token1 は元の FOO のみ（BAR はない）
+        assert!(registry.is_blocked(token1, macro1));
+        assert!(!registry.is_blocked(token1, macro2));
+
+        // どちらも BAZ はブロックされない
+        assert!(!registry.is_blocked(token1, macro3));
+        assert!(!registry.is_blocked(token2, macro3));
     }
 }
