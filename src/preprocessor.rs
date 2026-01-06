@@ -14,7 +14,9 @@ use crate::lexer::Lexer;
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::pp_expr::PPExprEvaluator;
 use crate::source::{FileId, FileRegistry, SourceLocation};
-use crate::token::{Comment, Token, TokenId, TokenKind};
+use crate::token::{
+    Comment, MacroBeginInfo, MacroEndInfo, MacroInvocationKind, Token, TokenId, TokenKind,
+};
 
 /// インクルードパスの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,8 @@ pub struct PPConfig {
     pub debug_pp: bool,
     /// ターゲットディレクトリ（このディレクトリ内で定義されたマクロにis_target=trueを設定）
     pub target_dir: Option<PathBuf>,
+    /// マクロ展開マーカーを出力するか（デバッグ/AST用）
+    pub emit_markers: bool,
 }
 
 /// 条件コンパイル状態
@@ -2224,7 +2228,15 @@ impl Preprocessor {
                 let expanded = self.expand_tokens(&def.body, &empty, &empty)?;
                 // 全トークンに no_expand と呼び出し位置を適用
                 let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
-                Ok(Some(marked))
+                // マーカーで囲む（emit_markers が有効な場合のみ）
+                let wrapped = self.wrap_with_markers(
+                    marked,
+                    id,
+                    token,
+                    MacroInvocationKind::Object,
+                    &call_loc,
+                );
+                Ok(Some(wrapped))
             }
             MacroKind::Function { params, is_variadic } => {
                 // C標準: 関数形式マクロの識別子と ( の間に空白（改行を含む）があっても良い
@@ -2304,7 +2316,15 @@ impl Preprocessor {
                 let expanded = self.expand_tokens(&def.body, &arg_map, &prescanned_args)?;
                 // 全トークンに no_expand と呼び出し位置を適用
                 let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
-                Ok(Some(marked))
+                // マーカーで囲む（emit_markers が有効な場合のみ）
+                let wrapped = self.wrap_with_markers(
+                    marked,
+                    id,
+                    token,
+                    MacroInvocationKind::Function { args },
+                    &call_loc,
+                );
+                Ok(Some(wrapped))
             }
         }
     }
@@ -2321,6 +2341,51 @@ impl Preprocessor {
             t.loc = call_loc.clone();
             t
         }).collect()
+    }
+
+    /// マクロ展開結果を MacroBegin/MacroEnd マーカーで囲む
+    ///
+    /// emit_markers が有効な場合にのみマーカーを追加する。
+    /// マーカーはパーサーがマクロ展開情報をASTに付与するために使用される。
+    fn wrap_with_markers(
+        &self,
+        tokens: Vec<Token>,
+        macro_name: InternedStr,
+        trigger_token: &Token,
+        kind: MacroInvocationKind,
+        call_loc: &SourceLocation,
+    ) -> Vec<Token> {
+        if !self.config.emit_markers {
+            return tokens;
+        }
+
+        let marker_id = TokenId::next();
+
+        // MacroBegin マーカーを作成
+        let begin_info = MacroBeginInfo {
+            marker_id,
+            trigger_token_id: trigger_token.id,
+            macro_name,
+            kind,
+            call_loc: call_loc.clone(),
+        };
+        let begin_token = Token::new(
+            TokenKind::MacroBegin(Box::new(begin_info)),
+            call_loc.clone(),
+        );
+
+        // MacroEnd マーカーを作成
+        let end_info = MacroEndInfo {
+            begin_marker_id: marker_id,
+        };
+        let end_token = Token::new(TokenKind::MacroEnd(end_info), call_loc.clone());
+
+        // [MacroBegin, ...tokens..., MacroEnd] の形式で返す
+        let mut result = Vec::with_capacity(tokens.len() + 2);
+        result.push(begin_token);
+        result.extend(tokens);
+        result.push(end_token);
+        result
     }
 
     /// マクロ引数を収集
@@ -2960,5 +3025,130 @@ mod tests {
         // どちらも BAZ はブロックされない
         assert!(!registry.is_blocked(token1, macro3));
         assert!(!registry.is_blocked(token2, macro3));
+    }
+
+    // マーカー出力テスト
+
+    #[test]
+    fn test_emit_markers_disabled() {
+        // emit_markers = false (デフォルト) の場合、マーカーは出力されない
+        let file = create_temp_file("#define FOO 42\nint x = FOO;");
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        let tokens = pp.collect_tokens().unwrap();
+
+        // マーカートークンが含まれていないことを確認
+        let has_marker = tokens.iter().any(|t| {
+            matches!(t.kind, TokenKind::MacroBegin(_) | TokenKind::MacroEnd(_))
+        });
+        assert!(!has_marker, "Markers should not be emitted when emit_markers is false");
+    }
+
+    #[test]
+    fn test_emit_markers_object_macro() {
+        // emit_markers = true の場合、オブジェクトマクロにマーカーが出力される
+        let file = create_temp_file("#define FOO 42\nint x = FOO;");
+        let config = PPConfig {
+            emit_markers: true,
+            ..Default::default()
+        };
+        let mut pp = Preprocessor::new(config);
+        pp.process_file(file.path()).unwrap();
+
+        let tokens = pp.collect_tokens().unwrap();
+
+        // MacroBegin と MacroEnd が出力されていることを確認
+        let begin_count = tokens.iter().filter(|t| {
+            matches!(t.kind, TokenKind::MacroBegin(_))
+        }).count();
+        let end_count = tokens.iter().filter(|t| {
+            matches!(t.kind, TokenKind::MacroEnd(_))
+        }).count();
+
+        assert_eq!(begin_count, 1, "Should have exactly one MacroBegin");
+        assert_eq!(end_count, 1, "Should have exactly one MacroEnd");
+
+        // マーカーの名前が正しいことを確認
+        for t in &tokens {
+            if let TokenKind::MacroBegin(info) = &t.kind {
+                assert_eq!(pp.interner().get(info.macro_name), "FOO");
+                assert!(matches!(info.kind, MacroInvocationKind::Object));
+            }
+        }
+    }
+
+    #[test]
+    fn test_emit_markers_function_macro() {
+        // 関数マクロにもマーカーが出力される
+        let file = create_temp_file("#define ADD(a, b) a + b\nint x = ADD(1, 2);");
+        let config = PPConfig {
+            emit_markers: true,
+            ..Default::default()
+        };
+        let mut pp = Preprocessor::new(config);
+        pp.process_file(file.path()).unwrap();
+
+        let tokens = pp.collect_tokens().unwrap();
+
+        // MacroBegin と MacroEnd が出力されていることを確認
+        let begin_count = tokens.iter().filter(|t| {
+            matches!(t.kind, TokenKind::MacroBegin(_))
+        }).count();
+        let end_count = tokens.iter().filter(|t| {
+            matches!(t.kind, TokenKind::MacroEnd(_))
+        }).count();
+
+        assert_eq!(begin_count, 1, "Should have exactly one MacroBegin");
+        assert_eq!(end_count, 1, "Should have exactly one MacroEnd");
+
+        // 関数マクロの引数が保持されていることを確認
+        for t in &tokens {
+            if let TokenKind::MacroBegin(info) = &t.kind {
+                assert_eq!(pp.interner().get(info.macro_name), "ADD");
+                if let MacroInvocationKind::Function { args } = &info.kind {
+                    assert_eq!(args.len(), 2, "ADD macro should have 2 arguments");
+                } else {
+                    panic!("Expected Function macro kind");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_emit_markers_begin_end_matching() {
+        // MacroBegin と MacroEnd の marker_id が一致することを確認
+        let file = create_temp_file("#define FOO 1\nint x = FOO;");
+        let config = PPConfig {
+            emit_markers: true,
+            ..Default::default()
+        };
+        let mut pp = Preprocessor::new(config);
+        pp.process_file(file.path()).unwrap();
+
+        let tokens = pp.collect_tokens().unwrap();
+
+        let mut begin_marker_id = None;
+        let mut end_marker_id = None;
+
+        for t in &tokens {
+            match &t.kind {
+                TokenKind::MacroBegin(info) => {
+                    begin_marker_id = Some(info.marker_id);
+                }
+                TokenKind::MacroEnd(info) => {
+                    end_marker_id = Some(info.begin_marker_id);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(begin_marker_id.is_some(), "Should have MacroBegin");
+        assert!(end_marker_id.is_some(), "Should have MacroEnd");
+        assert_eq!(
+            begin_marker_id.unwrap(),
+            end_marker_id.unwrap(),
+            "MacroBegin.marker_id should match MacroEnd.begin_marker_id"
+        );
     }
 }

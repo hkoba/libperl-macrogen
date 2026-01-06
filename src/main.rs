@@ -129,6 +129,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             predefined: defines,
             debug_pp: cli.debug_pp,
             target_dir: cli.target_dir.clone(),
+            emit_markers: false,
         }
     } else {
         // 従来通り CLI 引数から
@@ -137,6 +138,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             predefined: parse_defines(&cli.define),
             debug_pp: cli.debug_pp,
             target_dir: cli.target_dir.clone(),
+            emit_markers: false,
         }
     };
 

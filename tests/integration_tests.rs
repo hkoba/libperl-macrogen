@@ -18,6 +18,7 @@ fn parse_source(source: &str) -> Vec<ExternalDecl> {
         predefined: vec![],
         debug_pp: false,
         target_dir: None,
+        ..Default::default()
     };
 
     let mut pp = Preprocessor::new(config);
@@ -38,6 +39,7 @@ fn parse_to_sexp(source: &str) -> String {
         predefined: vec![],
         debug_pp: false,
         target_dir: None,
+        ..Default::default()
     };
 
     let mut pp = Preprocessor::new(config);
@@ -65,6 +67,7 @@ fn parse_streaming(source: &str) -> (Vec<ExternalDecl>, Option<String>) {
         predefined: vec![],
         debug_pp: false,
         target_dir: None,
+        ..Default::default()
     };
 
     let mut pp = Preprocessor::new(config);
@@ -246,6 +249,7 @@ fn test_predefined_macro_integration() {
         predefined: vec![("PREDEFINED".to_string(), Some("100".to_string()))],
         debug_pp: false,
         target_dir: None,
+        ..Default::default()
     };
 
     let mut pp = Preprocessor::new(config);
