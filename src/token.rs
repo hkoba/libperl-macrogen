@@ -40,6 +40,49 @@ impl std::fmt::Display for TokenId {
 }
 
 // ============================================================================
+// マクロ展開マーカー
+// ============================================================================
+
+/// マクロ呼び出しの種類
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroInvocationKind {
+    /// オブジェクトマクロ（引数なし）
+    Object,
+    /// 関数マクロ（引数あり）
+    Function {
+        /// 引数のトークン列（展開前の生トークン）
+        args: Vec<Vec<Token>>,
+    },
+}
+
+/// マクロ展開開始マーカーの情報
+///
+/// マクロ展開の開始位置を示し、展開元の情報を保持する。
+/// パーサーはこのマーカーを透過的に処理し、ASTにマクロ情報を付与する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroBeginInfo {
+    /// このマーカーのID（MacroEnd との対応付け用）
+    pub marker_id: TokenId,
+    /// 展開を引き起こしたトークンのID
+    pub trigger_token_id: TokenId,
+    /// マクロ名
+    pub macro_name: InternedStr,
+    /// マクロの種類と引数
+    pub kind: MacroInvocationKind,
+    /// 展開が発生した位置（マクロ呼び出し位置）
+    pub call_loc: SourceLocation,
+}
+
+/// マクロ展開終了マーカーの情報
+///
+/// 対応する MacroBegin との対を形成する。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroEndInfo {
+    /// 対応する MacroBegin のマーカーID
+    pub begin_marker_id: TokenId,
+}
+
+// ============================================================================
 // Comment
 // ============================================================================
 
@@ -53,7 +96,7 @@ pub enum CommentKind {
 }
 
 /// コメント
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
     pub kind: CommentKind,
     pub text: String,
@@ -262,6 +305,17 @@ pub enum TokenKind {
     Newline,
     /// 空白（スペース/タブ）- PARSE_FLAG_SPACES モード用
     Space,
+
+    // === マクロ展開マーカー ===
+    /// マクロ展開開始マーカー
+    ///
+    /// プリプロセッサがマクロ展開時に挿入し、パーサーが透過的に処理する。
+    /// AST構築時にマクロ展開情報を付与するために使用。
+    MacroBegin(Box<MacroBeginInfo>),
+    /// マクロ展開終了マーカー
+    ///
+    /// 対応する MacroBegin と対を形成する。
+    MacroEnd(MacroEndInfo),
 }
 
 impl TokenKind {
@@ -580,6 +634,13 @@ impl TokenKind {
             TokenKind::Newline => "\n".to_string(),
             TokenKind::Eof => "".to_string(),
             TokenKind::Space => " ".to_string(),
+            // マクロ展開マーカー
+            TokenKind::MacroBegin(info) => {
+                format!("/*<MACRO_BEGIN:{}>*/", interner.get(info.macro_name))
+            }
+            TokenKind::MacroEnd(info) => {
+                format!("/*<MACRO_END:{}>*/", info.begin_marker_id)
+            }
         }
     }
 }
@@ -626,7 +687,7 @@ fn escape_wide_string(s: &[u32]) -> String {
 }
 
 /// 位置情報付きトークン
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     /// トークンの一意識別子
     pub id: TokenId,
