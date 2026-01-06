@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use crate::{
-    ApidocDict, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
+    ApidocDict, CodeGenOptions, CompileError, DerivedDecl, ExternalDecl, FieldsDict, FunctionSignature,
     InferenceContext, MacroAnalyzer2, MacroCategory2, MacroKind, MacroTable, PPConfig, Parser,
     PendingFunction, Preprocessor, RustCodeGen, RustDeclDict, StringInterner, TokenKind,
     TypeEquality, TypeRegistry,
@@ -58,6 +58,9 @@ pub struct MacrogenConfig {
 
     /// 処理進行状況を表示 (stderr)
     pub progress: bool,
+
+    /// 生成コードにマクロ定義位置コメントを追加
+    pub emit_macro_comments: bool,
 }
 
 impl Default for MacrogenConfig {
@@ -74,6 +77,7 @@ impl Default for MacrogenConfig {
             include_macro_functions: true,
             verbose: false,
             progress: false,
+            emit_macro_comments: false,
         }
     }
 }
@@ -183,6 +187,12 @@ impl MacrogenBuilder {
     /// デバッグ出力を有効化
     pub fn debug_pp(mut self, debug: bool) -> Self {
         self.config.pp_config.debug_pp = debug;
+        self
+    }
+
+    /// マクロ定義位置コメントを有効化
+    pub fn emit_macro_comments(mut self, emit: bool) -> Self {
+        self.config.emit_macro_comments = emit;
         self
     }
 
@@ -445,6 +455,10 @@ pub fn generate(config: &MacrogenConfig) -> Result<MacrogenResult, MacrogenError
     // 6. RustCodeGen を作成
     let interner = pp.interner();
     let mut codegen = RustCodeGen::new(interner, &fields_dict);
+    codegen.set_files(pp.files());
+    codegen.set_options(CodeGenOptions {
+        emit_macro_comments: config.emit_macro_comments,
+    });
 
     // 6.5. bindings.rs の定数名を収集
     let bindings_consts: std::collections::HashSet<String> = rust_decls.consts.keys().cloned().collect();

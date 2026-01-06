@@ -94,6 +94,14 @@ struct Cli {
     /// 進行状況を表示
     #[arg(long = "progress")]
     progress: bool,
+
+    /// マクロ展開マーカーを出力（デバッグ用）
+    #[arg(long = "emit-macro-markers")]
+    emit_macro_markers: bool,
+
+    /// 生成コードにマクロ定義位置コメントを追加
+    #[arg(long = "macro-comments")]
+    macro_comments: bool,
 }
 
 fn main() {
@@ -129,23 +137,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             predefined: defines,
             debug_pp: cli.debug_pp,
             target_dir: cli.target_dir.clone(),
-            emit_markers: false,
+            emit_markers: cli.emit_macro_markers,
         }
     } else {
         // 従来通り CLI 引数から
         PPConfig {
-            include_paths: cli.include,
+            include_paths: cli.include.clone(),
             predefined: parse_defines(&cli.define),
             debug_pp: cli.debug_pp,
             target_dir: cli.target_dir.clone(),
-            emit_markers: false,
+            emit_markers: cli.emit_macro_markers,
         }
     };
 
     // --gen-rust-fnsはライブラリAPIを使用するため、プリプロセッサを作成しない
     if cli.gen_rust_fns {
         let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
-        return run_gen_rust_fns_lib(&input, &bindings, cli.apidoc.as_ref(), cli.output.as_ref(), &config, cli.progress);
+        return run_gen_rust_fns_lib(
+            &input,
+            &bindings,
+            cli.apidoc.as_ref(),
+            cli.output.as_ref(),
+            &config,
+            cli.progress,
+            cli.macro_comments,
+        );
     }
 
     // プリプロセッサを初期化してファイルを処理
@@ -365,6 +381,7 @@ fn run_gen_rust_fns_lib(
     output: Option<&PathBuf>,
     pp_config: &PPConfig,
     progress: bool,
+    macro_comments: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // MacrogenBuilderで設定を構築
     let mut builder = MacrogenBuilder::new(input, bindings_path)
@@ -373,7 +390,8 @@ fn run_gen_rust_fns_lib(
         .add_field_type("sv_refcnt", "sv")
         .add_field_type("sv_flags", "sv")
         .verbose(true)
-        .progress(progress);
+        .progress(progress)
+        .emit_macro_comments(macro_comments);
 
     if let Some(apidoc) = apidoc_path {
         builder = builder.apidoc(apidoc);

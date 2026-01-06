@@ -160,6 +160,26 @@ cargo run -- -E \
 
 When errors occur in macro-expanded code, the error location points to where the macro is **used**, not where it is **defined**. This makes debugging easier.
 
+### Macro Tracking CLI Options
+
+- `--emit-macro-markers`: Output MacroBegin/MacroEnd marker tokens during preprocessing (for debugging)
+- `--macro-comments`: Add definition location comments to generated Rust code (with `--gen-rust-fns`)
+
+Example with macro comments:
+```bash
+cargo run --bin libperl-macrogen -- samples/wrapper.h --auto --gen-rust-fns \
+  --bindings samples/bindings.rs --apidoc samples/embed.fnc --macro-comments
+```
+
+This generates code like:
+```rust
+// Defined at: sv.h:123
+#[inline]
+pub unsafe fn SvFLAGS(sv: *mut SV) -> U32 {
+    (*sv).sv_flags
+}
+```
+
 ## Current Status
 
 - **wrapper.h parsing**: Successfully parses 5529 declarations
