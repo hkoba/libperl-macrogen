@@ -6,6 +6,133 @@ use crate::intern::InternedStr;
 use crate::source::SourceLocation;
 use crate::token::Comment;
 
+// ============================================================================
+// マクロ展開情報
+// ============================================================================
+
+/// 単一のマクロ呼び出し情報
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroInvocation {
+    /// マクロ名
+    pub name: InternedStr,
+    /// 呼び出し位置
+    pub call_loc: SourceLocation,
+    /// 関数マクロの場合、引数のテキスト表現
+    pub args: Option<Vec<String>>,
+}
+
+impl MacroInvocation {
+    /// 新しいマクロ呼び出し情報を作成
+    pub fn new(name: InternedStr, call_loc: SourceLocation) -> Self {
+        Self {
+            name,
+            call_loc,
+            args: None,
+        }
+    }
+
+    /// 関数マクロの呼び出し情報を作成
+    pub fn with_args(name: InternedStr, call_loc: SourceLocation, args: Vec<String>) -> Self {
+        Self {
+            name,
+            call_loc,
+            args: Some(args),
+        }
+    }
+}
+
+/// マクロ展開の履歴情報
+///
+/// ネストしたマクロ展開を追跡するためのチェーン構造を持つ。
+/// 例: A が B を含み、B が C を含む場合: [A, B, C]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MacroExpansionInfo {
+    /// マクロ展開のチェーン（外側から内側へ）
+    pub chain: Vec<MacroInvocation>,
+}
+
+impl MacroExpansionInfo {
+    /// 新しい空のマクロ展開情報を作成
+    pub fn new() -> Self {
+        Self { chain: Vec::new() }
+    }
+
+    /// チェーンが空かどうか
+    pub fn is_empty(&self) -> bool {
+        self.chain.is_empty()
+    }
+
+    /// マクロ呼び出しを追加
+    pub fn push(&mut self, invocation: MacroInvocation) {
+        self.chain.push(invocation);
+    }
+
+    /// 最も内側のマクロ呼び出し
+    pub fn innermost(&self) -> Option<&MacroInvocation> {
+        self.chain.last()
+    }
+
+    /// 最も外側のマクロ呼び出し
+    pub fn outermost(&self) -> Option<&MacroInvocation> {
+        self.chain.first()
+    }
+
+    /// チェーンの長さ
+    pub fn len(&self) -> usize {
+        self.chain.len()
+    }
+}
+
+/// ASTノードの共通メタデータ
+///
+/// ソース位置とオプションのマクロ展開情報を保持する。
+/// Phase 5 で各ASTノードの `loc: SourceLocation` を `info: NodeInfo` に置き換える。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeInfo {
+    /// ソース位置
+    pub loc: SourceLocation,
+    /// マクロ展開情報（マクロ展開由来の場合のみ Some）
+    pub macro_expansion: Option<Box<MacroExpansionInfo>>,
+}
+
+impl NodeInfo {
+    /// 新しいNodeInfoを作成（マクロ情報なし）
+    pub fn new(loc: SourceLocation) -> Self {
+        Self {
+            loc,
+            macro_expansion: None,
+        }
+    }
+
+    /// マクロ情報付きのNodeInfoを作成
+    ///
+    /// マクロ情報が空の場合は None として保存する。
+    pub fn with_macro_info(loc: SourceLocation, macro_info: MacroExpansionInfo) -> Self {
+        Self {
+            loc,
+            macro_expansion: if macro_info.is_empty() {
+                None
+            } else {
+                Some(Box::new(macro_info))
+            },
+        }
+    }
+
+    /// マクロ展開由来かどうか
+    pub fn is_from_macro(&self) -> bool {
+        self.macro_expansion.is_some()
+    }
+
+    /// マクロ展開情報への参照を取得
+    pub fn macro_info(&self) -> Option<&MacroExpansionInfo> {
+        self.macro_expansion.as_deref()
+    }
+}
+
+// ============================================================================
+// AST 定義
+// ============================================================================
+
 /// 翻訳単位（ファイル全体）
 #[derive(Debug, Clone)]
 pub struct TranslationUnit {
@@ -509,6 +636,7 @@ pub enum AssignOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intern::StringInterner;
 
     #[test]
     fn test_type_qualifiers_is_empty() {
@@ -520,5 +648,129 @@ mod tests {
             ..Default::default()
         };
         assert!(!with_const.is_empty());
+    }
+
+    // MacroInvocation tests
+
+    #[test]
+    fn test_macro_invocation_new() {
+        let mut interner = StringInterner::new();
+        let name = interner.intern("FOO");
+        let loc = SourceLocation::default();
+
+        let inv = MacroInvocation::new(name, loc.clone());
+
+        assert_eq!(inv.name, name);
+        assert_eq!(inv.call_loc, loc);
+        assert!(inv.args.is_none());
+    }
+
+    #[test]
+    fn test_macro_invocation_with_args() {
+        let mut interner = StringInterner::new();
+        let name = interner.intern("ADD");
+        let loc = SourceLocation::default();
+        let args = vec!["a".to_string(), "b".to_string()];
+
+        let inv = MacroInvocation::with_args(name, loc.clone(), args.clone());
+
+        assert_eq!(inv.name, name);
+        assert_eq!(inv.call_loc, loc);
+        assert_eq!(inv.args, Some(args));
+    }
+
+    // MacroExpansionInfo tests
+
+    #[test]
+    fn test_macro_expansion_info_new() {
+        let info = MacroExpansionInfo::new();
+        assert!(info.is_empty());
+        assert_eq!(info.len(), 0);
+        assert!(info.innermost().is_none());
+        assert!(info.outermost().is_none());
+    }
+
+    #[test]
+    fn test_macro_expansion_info_push() {
+        let mut interner = StringInterner::new();
+        let mut info = MacroExpansionInfo::new();
+
+        let inv1 = MacroInvocation::new(interner.intern("FOO"), SourceLocation::default());
+        let inv2 = MacroInvocation::new(interner.intern("BAR"), SourceLocation::default());
+
+        info.push(inv1.clone());
+        assert_eq!(info.len(), 1);
+        assert!(!info.is_empty());
+
+        info.push(inv2.clone());
+        assert_eq!(info.len(), 2);
+
+        // outermost は最初に追加したもの
+        assert_eq!(info.outermost().unwrap().name, inv1.name);
+        // innermost は最後に追加したもの
+        assert_eq!(info.innermost().unwrap().name, inv2.name);
+    }
+
+    #[test]
+    fn test_macro_expansion_info_chain() {
+        let mut interner = StringInterner::new();
+        let mut info = MacroExpansionInfo::new();
+
+        // A → B → C のチェーン
+        info.push(MacroInvocation::new(interner.intern("A"), SourceLocation::default()));
+        info.push(MacroInvocation::new(interner.intern("B"), SourceLocation::default()));
+        info.push(MacroInvocation::new(interner.intern("C"), SourceLocation::default()));
+
+        assert_eq!(info.chain.len(), 3);
+        assert_eq!(interner.get(info.chain[0].name), "A");
+        assert_eq!(interner.get(info.chain[1].name), "B");
+        assert_eq!(interner.get(info.chain[2].name), "C");
+    }
+
+    // NodeInfo tests
+
+    #[test]
+    fn test_node_info_new() {
+        let loc = SourceLocation::new(crate::source::FileId::default(), 10, 5);
+        let info = NodeInfo::new(loc.clone());
+
+        assert_eq!(info.loc, loc);
+        assert!(!info.is_from_macro());
+        assert!(info.macro_info().is_none());
+    }
+
+    #[test]
+    fn test_node_info_with_empty_macro_info() {
+        let loc = SourceLocation::default();
+        let macro_info = MacroExpansionInfo::new();
+
+        let info = NodeInfo::with_macro_info(loc.clone(), macro_info);
+
+        // 空のマクロ情報は None として保存される
+        assert!(!info.is_from_macro());
+        assert!(info.macro_info().is_none());
+    }
+
+    #[test]
+    fn test_node_info_with_macro_info() {
+        let mut interner = StringInterner::new();
+        let loc = SourceLocation::default();
+
+        let mut macro_info = MacroExpansionInfo::new();
+        macro_info.push(MacroInvocation::new(interner.intern("FOO"), SourceLocation::default()));
+
+        let info = NodeInfo::with_macro_info(loc.clone(), macro_info);
+
+        assert!(info.is_from_macro());
+        assert!(info.macro_info().is_some());
+        assert_eq!(info.macro_info().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_node_info_default() {
+        let info = NodeInfo::default();
+
+        assert_eq!(info.loc, SourceLocation::default());
+        assert!(!info.is_from_macro());
     }
 }
