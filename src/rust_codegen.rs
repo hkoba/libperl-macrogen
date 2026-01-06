@@ -12,6 +12,16 @@ use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_analyzer2::MacroInfo2;
 use crate::macro_def::{MacroDef, MacroKind};
+use crate::source::FileRegistry;
+
+// ==================== CodeGenOptions ====================
+
+/// コード生成オプション
+#[derive(Debug, Clone, Default)]
+pub struct CodeGenOptions {
+    /// マクロ定義位置をコメントとして出力するか
+    pub emit_macro_comments: bool,
+}
 
 // ==================== CodeFragment (Synthesized Attribute) ====================
 
@@ -152,6 +162,10 @@ pub struct RustCodeGen<'a> {
     /// フィールド辞書（型推論用）
     #[allow(dead_code)]
     fields_dict: &'a FieldsDict,
+    /// ファイルレジストリ（パス解決用）
+    files: Option<&'a FileRegistry>,
+    /// コード生成オプション
+    options: CodeGenOptions,
     /// 定数マクロの集合（展開されずに識別子として残ったもの）
     constant_macros: HashSet<InternedStr>,
     /// THX依存マクロの集合
@@ -166,10 +180,22 @@ impl<'a> RustCodeGen<'a> {
         Self {
             interner,
             fields_dict,
+            files: None,
+            options: CodeGenOptions::default(),
             constant_macros: HashSet::new(),
             thx_macros: HashSet::new(),
             thx_functions: HashSet::new(),
         }
+    }
+
+    /// ファイルレジストリを設定
+    pub fn set_files(&mut self, files: &'a FileRegistry) {
+        self.files = Some(files);
+    }
+
+    /// コード生成オプションを設定
+    pub fn set_options(&mut self, options: CodeGenOptions) {
+        self.options = options;
     }
 
     /// 定数マクロ情報を設定
@@ -696,6 +722,34 @@ impl<'a> RustCodeGen<'a> {
         }
     }
 
+    /// マクロ定義位置をコメントとしてフォーマット
+    ///
+    /// 出力例: `// Defined at: CORE/sv.h:123`
+    fn format_macro_comment(&self, def: &MacroDef) -> Option<String> {
+        if !self.options.emit_macro_comments {
+            return None;
+        }
+
+        let files = self.files?;
+        let path = files.get_path(def.def_loc.file_id);
+
+        // パスからファイル名部分を抽出（長すぎる場合は末尾のみ）
+        let path_str = path.to_string_lossy();
+        let display_path = if path_str.len() > 60 {
+            // 長いパスは末尾のコンポーネントのみ表示
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path_str.into_owned())
+        } else {
+            path_str.into_owned()
+        };
+
+        Some(format!(
+            "// Defined at: {}:{}\n",
+            display_path, def.def_loc.line
+        ))
+    }
+
     /// マクロをRust関数に変換
     pub fn macro_to_rust_fn(&self, def: &MacroDef, info: &MacroInfo2, expr: &Expr) -> CodeFragment {
         // ジェネリックパラメータがあればジェネリック関数として生成
@@ -714,9 +768,12 @@ impl<'a> RustCodeGen<'a> {
         // 本体
         let body_frag = self.expr_to_rust(expr);
 
+        // マクロコメント（オプション）
+        let comment = self.format_macro_comment(def).unwrap_or_default();
+
         let code = format!(
-            "#[inline]\npub unsafe fn {}({}) -> {} {{\n    {}\n}}\n",
-            name, params_frag.code, ret_ty, body_frag.code
+            "{}#[inline]\npub unsafe fn {}({}) -> {} {{\n    {}\n}}\n",
+            comment, name, params_frag.code, ret_ty, body_frag.code
         );
 
         let mut result = CodeFragment::ok(code);
@@ -757,9 +814,12 @@ impl<'a> RustCodeGen<'a> {
         // 本体（ジェネリックキャスト付き）
         let body_frag = self.expr_to_rust_with_generic_cast(expr, info);
 
+        // マクロコメント（オプション）
+        let comment = self.format_macro_comment(def).unwrap_or_default();
+
         let code = format!(
-            "#[inline]\npub unsafe fn {}{type_params}({}) -> {} {{\n    {}\n}}\n",
-            name, params_frag.code, ret_ty, body_frag.code
+            "{}#[inline]\npub unsafe fn {}{type_params}({}) -> {} {{\n    {}\n}}\n",
+            comment, name, params_frag.code, ret_ty, body_frag.code
         );
 
         let mut result = CodeFragment::ok(code);
@@ -1011,6 +1071,33 @@ impl<'a> RustCodeGen<'a> {
 
     // ==================== Inline Function Conversion ====================
 
+    /// インライン関数定義位置をコメントとしてフォーマット
+    ///
+    /// 出力例: `// Defined at: CORE/util.c:123`
+    fn format_function_comment(&self, func: &FunctionDef) -> Option<String> {
+        if !self.options.emit_macro_comments {
+            return None;
+        }
+
+        let files = self.files?;
+        let path = files.get_path(func.info.loc.file_id);
+
+        // パスからファイル名部分を抽出（長すぎる場合は末尾のみ）
+        let path_str = path.to_string_lossy();
+        let display_path = if path_str.len() > 60 {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path_str.into_owned())
+        } else {
+            path_str.into_owned()
+        };
+
+        Some(format!(
+            "// Defined at: {}:{}\n",
+            display_path, func.info.loc.line
+        ))
+    }
+
     /// インライン関数をRust関数に変換
     pub fn inline_fn_to_rust(&self, func: &FunctionDef) -> CodeFragment {
         // 関数名を取得
@@ -1033,9 +1120,12 @@ impl<'a> RustCodeGen<'a> {
         // 関数本体を変換
         let body_frag = self.compound_stmt_to_rust(&func.body, 1);
 
+        // 定義位置コメント（オプション）
+        let comment = self.format_function_comment(func).unwrap_or_default();
+
         let code = format!(
-            "#[inline]\npub unsafe fn {}({}) -> {} {{\n{}}}\n",
-            name, params_frag.code, ret_frag.code, body_frag.code
+            "{}#[inline]\npub unsafe fn {}({}) -> {} {{\n{}}}\n",
+            comment, name, params_frag.code, ret_frag.code, body_frag.code
         );
 
         let mut result = CodeFragment::ok(code);
@@ -1458,7 +1548,8 @@ impl<'a> RustCodeGen<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::SourceLocation;
+    use crate::source::{FileRegistry, SourceLocation};
+    use crate::token::Token;
 
     fn make_interner() -> StringInterner {
         StringInterner::new()
@@ -1476,6 +1567,128 @@ mod tests {
 
         let expr = Expr::IntLit(42, SourceLocation::default());
         assert_eq!(codegen.expr_to_rust(&expr).code, "42");
+    }
+
+    #[test]
+    fn test_macro_comment_disabled() {
+        let mut interner = make_interner();
+        let fields = make_fields_dict();
+        let mut files = FileRegistry::new();
+        let file_id = files.register("test.h".into());
+
+        let name = interner.intern("TEST_MACRO");
+        let x = interner.intern("x");
+        let def = MacroDef::function(
+            name,
+            vec![x],
+            false,
+            vec![Token::new(crate::token::TokenKind::Ident(x), SourceLocation::default())],
+            SourceLocation { file_id, line: 10, column: 1 },
+        );
+
+        let info = crate::macro_analyzer2::MacroInfo2 {
+            name,
+            category: crate::macro_analyzer2::MacroCategory::Expression,
+            return_type: Some("c_int".to_string()),
+            param_types: std::collections::HashMap::new(),
+            is_target: true,
+            needs_my_perl: false,
+            parsed_expr: None,
+            def_loc: SourceLocation { file_id, line: 10, column: 1 },
+            uses: std::collections::HashSet::new(),
+            generic_params: std::collections::HashMap::new(),
+            generic_return: None,
+        };
+
+        let expr = Expr::Ident(x, SourceLocation::default());
+
+        let mut codegen = RustCodeGen::new(&interner, &fields);
+        codegen.set_files(&files);
+        // emit_macro_comments is false by default
+
+        let result = codegen.macro_to_rust_fn(&def, &info, &expr);
+        assert!(!result.code.contains("// Defined at:"));
+    }
+
+    #[test]
+    fn test_macro_comment_enabled() {
+        let mut interner = make_interner();
+        let fields = make_fields_dict();
+        let mut files = FileRegistry::new();
+        let file_id = files.register("test.h".into());
+
+        let name = interner.intern("TEST_MACRO");
+        let x = interner.intern("x");
+        let def = MacroDef::function(
+            name,
+            vec![x],
+            false,
+            vec![Token::new(crate::token::TokenKind::Ident(x), SourceLocation::default())],
+            SourceLocation { file_id, line: 10, column: 1 },
+        );
+
+        let info = crate::macro_analyzer2::MacroInfo2 {
+            name,
+            category: crate::macro_analyzer2::MacroCategory::Expression,
+            return_type: Some("c_int".to_string()),
+            param_types: std::collections::HashMap::new(),
+            is_target: true,
+            needs_my_perl: false,
+            parsed_expr: None,
+            def_loc: SourceLocation { file_id, line: 10, column: 1 },
+            uses: std::collections::HashSet::new(),
+            generic_params: std::collections::HashMap::new(),
+            generic_return: None,
+        };
+
+        let expr = Expr::Ident(x, SourceLocation::default());
+
+        let mut codegen = RustCodeGen::new(&interner, &fields);
+        codegen.set_files(&files);
+        codegen.set_options(CodeGenOptions { emit_macro_comments: true });
+
+        let result = codegen.macro_to_rust_fn(&def, &info, &expr);
+        assert!(result.code.contains("// Defined at: test.h:10"));
+    }
+
+    #[test]
+    fn test_macro_comment_without_files() {
+        let mut interner = make_interner();
+        let fields = make_fields_dict();
+
+        let name = interner.intern("TEST_MACRO");
+        let x = interner.intern("x");
+        let def = MacroDef::function(
+            name,
+            vec![x],
+            false,
+            vec![Token::new(crate::token::TokenKind::Ident(x), SourceLocation::default())],
+            SourceLocation::default(),
+        );
+
+        let info = crate::macro_analyzer2::MacroInfo2 {
+            name,
+            category: crate::macro_analyzer2::MacroCategory::Expression,
+            return_type: Some("c_int".to_string()),
+            param_types: std::collections::HashMap::new(),
+            is_target: true,
+            needs_my_perl: false,
+            parsed_expr: None,
+            def_loc: SourceLocation::default(),
+            uses: std::collections::HashSet::new(),
+            generic_params: std::collections::HashMap::new(),
+            generic_return: None,
+        };
+
+        let expr = Expr::Ident(x, SourceLocation::default());
+
+        let mut codegen = RustCodeGen::new(&interner, &fields);
+        // No files set
+        codegen.set_options(CodeGenOptions { emit_macro_comments: true });
+
+        let result = codegen.macro_to_rust_fn(&def, &info, &expr);
+        // Should not panic and should not include comment
+        assert!(!result.code.contains("// Defined at:"));
     }
 
     #[test]

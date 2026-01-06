@@ -40,7 +40,7 @@ pub use iterative_infer::{
 };
 pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
 pub use macro_analyzer2::{MacroAnalyzer2, MacroCategory as MacroCategory2, MacroInfo2};
-pub use rust_codegen::{CodeFragment, CodeIssue, CodeIssueKind, RustCodeGen};
+pub use rust_codegen::{CodeFragment, CodeGenOptions, CodeIssue, CodeIssueKind, RustCodeGen};
 pub use rust_decl::RustDeclDict;
 pub use lexer::Lexer;
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
