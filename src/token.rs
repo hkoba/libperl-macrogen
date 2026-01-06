@@ -1,7 +1,47 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::intern::{InternedStr, StringInterner};
 use crate::source::SourceLocation;
+
+// ============================================================================
+// TokenId - トークンの一意識別子
+// ============================================================================
+
+/// トークンID（一意の通し番号）
+///
+/// 各トークンに一意のIDを付与することで、マクロ展開の追跡や
+/// 展開禁止情報の管理に使用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TokenId(pub u64);
+
+/// TokenId 生成用のグローバルカウンター
+static TOKEN_ID_COUNTER: AtomicU64 = AtomicU64::new(1); // 0 は無効値として予約
+
+impl TokenId {
+    /// 新しい一意のIDを生成
+    pub fn next() -> Self {
+        Self(TOKEN_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 無効なID（ペアリングや初期化用）
+    pub const INVALID: Self = Self(0);
+
+    /// IDが有効かどうか
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl std::fmt::Display for TokenId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TokenId({})", self.0)
+    }
+}
+
+// ============================================================================
+// Comment
+// ============================================================================
 
 /// コメント種別
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,11 +628,14 @@ fn escape_wide_string(s: &[u32]) -> String {
 /// 位置情報付きトークン
 #[derive(Debug, Clone)]
 pub struct Token {
+    /// トークンの一意識別子
+    pub id: TokenId,
     pub kind: TokenKind,
     pub loc: SourceLocation,
     /// このトークンの直前にあったコメント群
     pub leading_comments: Vec<Comment>,
     /// マクロ展開禁止リスト（自己参照マクロの無限再帰防止用）
+    /// TODO: Phase 7 で NoExpandRegistry に移行後、削除予定
     pub no_expand: HashSet<InternedStr>,
 }
 
@@ -600,6 +643,7 @@ impl Token {
     /// 新しいトークンを作成
     pub fn new(kind: TokenKind, loc: SourceLocation) -> Self {
         Self {
+            id: TokenId::next(),
             kind,
             loc,
             leading_comments: Vec::new(),
@@ -610,6 +654,7 @@ impl Token {
     /// コメント付きでトークンを作成
     pub fn with_comments(kind: TokenKind, loc: SourceLocation, comments: Vec<Comment>) -> Self {
         Self {
+            id: TokenId::next(),
             kind,
             loc,
             leading_comments: comments,
@@ -620,10 +665,25 @@ impl Token {
     /// マクロ展開禁止リストを継承した新しいトークンを作成
     pub fn with_no_expand(kind: TokenKind, loc: SourceLocation, no_expand: HashSet<InternedStr>) -> Self {
         Self {
+            id: TokenId::next(),
             kind,
             loc,
             leading_comments: Vec::new(),
             no_expand,
+        }
+    }
+
+    /// 同じ内容で新しいIDを持つトークンを複製
+    ///
+    /// マクロ展開時に、定義トークンから新しいインスタンスを作成する際に使用。
+    /// 各展開インスタンスが独自のIDを持つことで、展開追跡が可能になる。
+    pub fn clone_with_new_id(&self) -> Self {
+        Self {
+            id: TokenId::next(),
+            kind: self.kind.clone(),
+            loc: self.loc.clone(),
+            leading_comments: self.leading_comments.clone(),
+            no_expand: self.no_expand.clone(),
         }
     }
 }
@@ -671,5 +731,52 @@ mod tests {
         assert_eq!(TokenKind::from_keyword("asm"), Some(TokenKind::KwAsm));
         assert_eq!(TokenKind::from_keyword("__asm"), Some(TokenKind::KwAsm2));
         assert_eq!(TokenKind::from_keyword("__asm__"), Some(TokenKind::KwAsm3));
+    }
+
+    #[test]
+    fn test_token_id_uniqueness() {
+        let id1 = TokenId::next();
+        let id2 = TokenId::next();
+        let id3 = TokenId::next();
+
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
+    }
+
+    #[test]
+    fn test_token_id_invalid() {
+        assert!(!TokenId::INVALID.is_valid());
+        assert!(TokenId::next().is_valid());
+    }
+
+    #[test]
+    fn test_token_has_unique_id() {
+        let loc = SourceLocation::default();
+        let t1 = Token::new(TokenKind::KwInt, loc.clone());
+        let t2 = Token::new(TokenKind::KwInt, loc.clone());
+
+        assert_ne!(t1.id, t2.id);
+    }
+
+    #[test]
+    fn test_clone_with_new_id() {
+        let loc = SourceLocation::default();
+        let t1 = Token::new(TokenKind::KwInt, loc);
+        let t2 = t1.clone_with_new_id();
+
+        // 内容は同じだがIDは異なる
+        assert_eq!(t1.kind, t2.kind);
+        assert_ne!(t1.id, t2.id);
+    }
+
+    #[test]
+    fn test_clone_preserves_id() {
+        let loc = SourceLocation::default();
+        let t1 = Token::new(TokenKind::KwInt, loc);
+        let t2 = t1.clone();
+
+        // 通常のcloneはIDも同じ
+        assert_eq!(t1.id, t2.id);
     }
 }
