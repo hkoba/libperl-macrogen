@@ -1049,7 +1049,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.define_symbol(Symbol {
                     name,
                     ty,
-                    loc: decl.loc.clone(),
+                    loc: decl.loc().clone(),
                     kind: SymbolKind::Variable,
                 });
             }
@@ -1066,7 +1066,7 @@ impl<'a> SemanticAnalyzer<'a> {
             self.define_symbol(Symbol {
                 name,
                 ty: func_ty.clone(),
-                loc: func.loc.clone(),
+                loc: func.loc().clone(),
                 kind: SymbolKind::Function,
             });
         }
@@ -1084,7 +1084,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                 self.define_symbol(Symbol {
                                     name,
                                     ty: param_ty.clone(),
-                                    loc: func.loc.clone(),
+                                    loc: func.loc().clone(),
                                     kind: SymbolKind::Variable,
                                 });
                             }

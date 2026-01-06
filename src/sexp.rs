@@ -742,7 +742,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
             self.analyzer.define_symbol(Symbol {
                 name,
                 ty: func_ty.clone(),
-                loc: func.loc.clone(),
+                loc: func.loc().clone(),
                 kind: SymbolKind::Function,
             });
         }
@@ -765,7 +765,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                                 self.analyzer.define_symbol(Symbol {
                                     name,
                                     ty: param_ty.clone(),
-                                    loc: func.loc.clone(),
+                                    loc: func.loc().clone(),
                                     kind: SymbolKind::Variable,
                                 });
                             }

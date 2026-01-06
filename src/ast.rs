@@ -164,10 +164,17 @@ pub struct FunctionDef {
     pub specs: DeclSpecs,
     pub declarator: Declarator,
     pub body: CompoundStmt,
-    pub loc: SourceLocation,
+    pub info: NodeInfo,
     pub comments: Vec<Comment>,
     /// ターゲットディレクトリで定義されたかどうか
     pub is_target: bool,
+}
+
+impl FunctionDef {
+    /// 後方互換性のための loc アクセサ
+    pub fn loc(&self) -> &SourceLocation {
+        &self.info.loc
+    }
 }
 
 /// 宣言
@@ -175,10 +182,17 @@ pub struct FunctionDef {
 pub struct Declaration {
     pub specs: DeclSpecs,
     pub declarators: Vec<InitDeclarator>,
-    pub loc: SourceLocation,
+    pub info: NodeInfo,
     pub comments: Vec<Comment>,
     /// ターゲットディレクトリで定義されたかどうか
     pub is_target: bool,
+}
+
+impl Declaration {
+    /// 後方互換性のための loc アクセサ
+    pub fn loc(&self) -> &SourceLocation {
+        &self.info.loc
+    }
 }
 
 /// 宣言指定子
@@ -434,7 +448,14 @@ pub enum ForInit {
 #[derive(Debug, Clone)]
 pub struct CompoundStmt {
     pub items: Vec<BlockItem>,
-    pub loc: SourceLocation,
+    pub info: NodeInfo,
+}
+
+impl CompoundStmt {
+    /// 後方互換性のための loc アクセサ
+    pub fn loc(&self) -> &SourceLocation {
+        &self.info.loc
+    }
 }
 
 /// ブロック内項目

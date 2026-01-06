@@ -126,7 +126,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             return Ok(ExternalDecl::Declaration(Declaration {
                 specs,
                 declarators: Vec::new(),
-                loc,
+                info: NodeInfo::new(loc),
                 comments,
                 is_target,
             }));
@@ -146,7 +146,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 specs,
                 declarator,
                 body,
-                loc,
+                info: NodeInfo::new(loc),
                 comments,
                 is_target,
             }));
@@ -194,7 +194,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         Ok(ExternalDecl::Declaration(Declaration {
             specs,
             declarators,
-            loc,
+            info: NodeInfo::new(loc),
             comments,
             is_target,
         }))
@@ -851,7 +851,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
 
         self.expect(&TokenKind::RBrace)?;
 
-        Ok(CompoundStmt { items, loc })
+        Ok(CompoundStmt { items, info: NodeInfo::new(loc) })
     }
 
     /// ブロック項目をパース
@@ -875,7 +875,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             return Ok(Declaration {
                 specs,
                 declarators: Vec::new(),
-                loc,
+                info: NodeInfo::new(loc),
                 comments,
                 is_target,
             });
@@ -920,7 +920,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         Ok(Declaration {
             specs,
             declarators,
-            loc,
+            info: NodeInfo::new(loc),
             comments,
             is_target,
         })
