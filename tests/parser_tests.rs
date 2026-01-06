@@ -443,3 +443,85 @@ fn test_local_variable_with_attribute() {
     let decls = parse("void foo(void) { int x __attribute__((unused)) = 1; }");
     assert_eq!(decls.len(), 1);
 }
+
+// ==================== Macro Marker Handling Tests ====================
+
+/// Helper to parse with macro markers enabled
+fn parse_with_markers(source: &str) -> Vec<ExternalDecl> {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(source.as_bytes()).unwrap();
+    file.flush().unwrap();
+
+    let config = PPConfig {
+        include_paths: vec![],
+        predefined: vec![],
+        debug_pp: false,
+        target_dir: None,
+        emit_markers: true,  // Enable marker emission
+        ..Default::default()
+    };
+
+    let mut pp = Preprocessor::new(config);
+    pp.process_file(file.path()).unwrap();
+
+    let mut parser = Parser::new(&mut pp).unwrap();
+    parser.set_handle_macro_markers(true).unwrap();  // Enable marker handling
+    let tu = parser.parse().unwrap();
+    tu.decls
+}
+
+#[test]
+fn test_parser_with_markers_simple() {
+    // Test that parser works normally with markers enabled but no macros
+    let decls = parse_with_markers("int x;");
+    assert_eq!(decls.len(), 1);
+}
+
+#[test]
+fn test_parser_with_markers_object_macro() {
+    // Test that parser handles object macro expansion markers
+    let decls = parse_with_markers("#define VALUE 42\nint x = VALUE;");
+    assert_eq!(decls.len(), 1);
+}
+
+#[test]
+fn test_parser_with_markers_function_macro() {
+    // Test that parser handles function macro expansion markers
+    let decls = parse_with_markers("#define ADD(a, b) ((a) + (b))\nint x = ADD(1, 2);");
+    assert_eq!(decls.len(), 1);
+}
+
+#[test]
+fn test_parser_with_markers_nested_macro() {
+    // Test that parser handles nested macro expansion markers
+    let decls = parse_with_markers(
+        "#define A B\n#define B 123\nint x = A;"
+    );
+    assert_eq!(decls.len(), 1);
+}
+
+#[test]
+fn test_parser_with_markers_multiple_decls() {
+    // Test that parser handles multiple declarations with macros
+    let decls = parse_with_markers(
+        "#define TYPE int\nTYPE a;\nTYPE b;\nTYPE c;"
+    );
+    assert_eq!(decls.len(), 3);
+}
+
+#[test]
+fn test_parser_with_markers_function_body() {
+    // Test that parser handles macros in function bodies
+    let decls = parse_with_markers(
+        "#define RETURN_ZERO return 0\nvoid foo(void) { RETURN_ZERO; }"
+    );
+    assert_eq!(decls.len(), 1);
+}
+
+#[test]
+fn test_parser_marker_state_not_leaked() {
+    // Test that macro context is properly cleaned up between parses
+    // (markers should always balance: MacroBegin followed by MacroEnd)
+    let decls = parse_with_markers("#define M(x) (x)\nint a = M(1);\nint b = M(2);\nint c = M(3);");
+    assert_eq!(decls.len(), 3);
+}

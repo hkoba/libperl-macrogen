@@ -8,8 +8,75 @@ use crate::ast::*;
 use crate::error::{CompileError, ParseError, Result};
 use crate::intern::{InternedStr, StringInterner};
 use crate::preprocessor::Preprocessor;
-use crate::token::{Token, TokenKind};
+use crate::source::SourceLocation;
+use crate::token::{MacroBeginInfo, Token, TokenKind};
 use crate::token_source::{TokenSliceRef, TokenSource};
+
+/// マクロ展開コンテキスト
+///
+/// パース中のマクロ展開状態を追跡する。
+/// MacroBegin マーカーを見つけたらプッシュし、MacroEnd を見つけたらポップする。
+#[derive(Debug, Default)]
+pub struct MacroContext {
+    /// 現在のマクロ展開スタック（外側から内側へ）
+    stack: Vec<MacroBeginInfo>,
+}
+
+impl MacroContext {
+    /// 新しいコンテキストを作成
+    pub fn new() -> Self {
+        Self { stack: Vec::new() }
+    }
+
+    /// マクロ展開を開始
+    pub fn push(&mut self, info: MacroBeginInfo) {
+        self.stack.push(info);
+    }
+
+    /// マクロ展開を終了
+    pub fn pop(&mut self) -> Option<MacroBeginInfo> {
+        self.stack.pop()
+    }
+
+    /// 現在マクロ展開中かどうか
+    pub fn is_in_macro(&self) -> bool {
+        !self.stack.is_empty()
+    }
+
+    /// 現在のマクロ展開情報から MacroExpansionInfo を構築
+    pub fn build_macro_info(&self, interner: &StringInterner) -> Option<MacroExpansionInfo> {
+        if self.stack.is_empty() {
+            return None;
+        }
+
+        let mut info = MacroExpansionInfo::new();
+        for begin_info in &self.stack {
+            let args = match &begin_info.kind {
+                crate::token::MacroInvocationKind::Object => None,
+                crate::token::MacroInvocationKind::Function { args } => {
+                    // トークン列を文字列に変換
+                    Some(args.iter().map(|arg_tokens| {
+                        arg_tokens.iter()
+                            .map(|t| t.kind.format(interner))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    }).collect())
+                }
+            };
+            info.push(MacroInvocation {
+                name: begin_info.macro_name,
+                call_loc: begin_info.call_loc.clone(),
+                args,
+            });
+        }
+        Some(info)
+    }
+
+    /// 展開スタックの深さ
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+}
 
 /// パーサー
 ///
@@ -20,6 +87,10 @@ pub struct Parser<'a, S: TokenSource> {
     current: Token,
     /// typedef名のセット
     typedefs: HashSet<InternedStr>,
+    /// マクロ展開コンテキスト
+    macro_ctx: MacroContext,
+    /// マクロマーカーを処理するか（emit_markers=true の場合に true にする）
+    handle_macro_markers: bool,
 }
 
 /// Preprocessor 専用の後方互換コンストラクタ
@@ -58,28 +129,63 @@ impl<'a> Parser<'a, Preprocessor> {
 impl<'a, S: TokenSource> Parser<'a, S> {
     /// トークンソースからパーサーを作成
     pub fn from_source(source: &'a mut S) -> Result<Self> {
-        let current = source.next_token()?;
-
         // GCC builtin types を事前登録
         let mut typedefs = HashSet::new();
         typedefs.insert(source.interner_mut().intern("__builtin_va_list"));
 
-        Ok(Self {
+        let mut parser = Self {
             source,
-            current,
+            current: Token::default(),
             typedefs,
-        })
+            macro_ctx: MacroContext::new(),
+            handle_macro_markers: false,
+        };
+        // マーカーをスキップして最初のトークンを取得
+        parser.current = parser.inner_next_token()?;
+
+        Ok(parser)
     }
 
     /// トークンソースからパーサーを作成（既存のtypedef情報を引き継ぐ）
     pub fn from_source_with_typedefs(source: &'a mut S, typedefs: HashSet<InternedStr>) -> Result<Self> {
-        let current = source.next_token()?;
-
-        Ok(Self {
+        let mut parser = Self {
             source,
-            current,
+            current: Token::default(),
             typedefs,
-        })
+            macro_ctx: MacroContext::new(),
+            handle_macro_markers: false,
+        };
+        // マーカーをスキップして最初のトークンを取得
+        parser.current = parser.inner_next_token()?;
+
+        Ok(parser)
+    }
+
+    /// マクロマーカー処理を有効にする
+    ///
+    /// Note: 既に current にマーカートークンがある場合はスキップする
+    pub fn set_handle_macro_markers(&mut self, enabled: bool) -> Result<()> {
+        self.handle_macro_markers = enabled;
+
+        // 既に current にマーカートークンがある場合はスキップ
+        if enabled {
+            while matches!(
+                self.current.kind,
+                TokenKind::MacroBegin(_) | TokenKind::MacroEnd(_)
+            ) {
+                match &self.current.kind {
+                    TokenKind::MacroBegin(info) => {
+                        self.macro_ctx.push((**info).clone());
+                    }
+                    TokenKind::MacroEnd(_) => {
+                        self.macro_ctx.pop();
+                    }
+                    _ => {}
+                }
+                self.current = self.source.next_token()?;
+            }
+        }
+        Ok(())
     }
 
     /// StringInterner への参照を取得
@@ -1785,9 +1891,56 @@ impl<'a, S: TokenSource> Parser<'a, S> {
 
     // ==================== ユーティリティ ====================
 
+    /// 内部トークン取得メソッド（マーカーを透過的に処理）
+    ///
+    /// `handle_macro_markers` が true の場合、MacroBegin/MacroEnd マーカーを
+    /// 処理してスキップし、通常のトークンのみを返す。
+    fn inner_next_token(&mut self) -> Result<Token> {
+        loop {
+            let token = self.source.next_token()?;
+
+            if !self.handle_macro_markers {
+                return Ok(token);
+            }
+
+            match &token.kind {
+                TokenKind::MacroBegin(info) => {
+                    // マクロ展開開始：コンテキストにプッシュ
+                    self.macro_ctx.push((**info).clone());
+                    continue; // マーカーはスキップ
+                }
+                TokenKind::MacroEnd(_info) => {
+                    // マクロ展開終了：コンテキストからポップ
+                    self.macro_ctx.pop();
+                    continue; // マーカーはスキップ
+                }
+                _ => return Ok(token),
+            }
+        }
+    }
+
     fn advance(&mut self) -> Result<Token> {
-        let old = std::mem::replace(&mut self.current, self.source.next_token()?);
+        let next = self.inner_next_token()?;
+        let old = std::mem::replace(&mut self.current, next);
         Ok(old)
+    }
+
+    /// 現在のマクロコンテキストから NodeInfo を作成
+    pub fn make_node_info(&self, loc: SourceLocation) -> NodeInfo {
+        match self.macro_ctx.build_macro_info(self.source.interner()) {
+            Some(macro_info) => NodeInfo::with_macro_info(loc, macro_info),
+            None => NodeInfo::new(loc),
+        }
+    }
+
+    /// 現在マクロ展開中かどうか
+    pub fn is_in_macro(&self) -> bool {
+        self.macro_ctx.is_in_macro()
+    }
+
+    /// マクロ展開の深さ
+    pub fn macro_depth(&self) -> usize {
+        self.macro_ctx.depth()
     }
 
     fn expect(&mut self, kind: &TokenKind) -> Result<Token> {

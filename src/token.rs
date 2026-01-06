@@ -696,6 +696,17 @@ pub struct Token {
     pub leading_comments: Vec<Comment>,
 }
 
+impl Default for Token {
+    fn default() -> Self {
+        Self {
+            id: TokenId::default(),
+            kind: TokenKind::Eof,
+            loc: SourceLocation::default(),
+            leading_comments: Vec::new(),
+        }
+    }
+}
+
 impl Token {
     /// 新しいトークンを作成
     pub fn new(kind: TokenKind, loc: SourceLocation) -> Self {
