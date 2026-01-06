@@ -296,6 +296,8 @@ pub struct Preprocessor {
     return_spaces: bool,
     /// コマンドラインマクロを定義中かどうか（is_builtin フラグ用）
     defining_builtin: bool,
+    /// トークンごとの展開禁止マクロを管理
+    no_expand_registry: NoExpandRegistry,
 }
 
 impl Preprocessor {
@@ -313,6 +315,7 @@ impl Preprocessor {
             cond_active: true,
             return_spaces: false,
             defining_builtin: false,
+            no_expand_registry: NoExpandRegistry::new(),
         };
 
         // 事前定義マクロを登録
@@ -2205,8 +2208,8 @@ impl Preprocessor {
 
     /// マクロ展開を試みる
     fn try_expand_macro(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
-        // トークン自体が展開禁止リストにこのマクロを持っている場合は展開しない
-        if token.no_expand.contains(&id) {
+        // トークンが展開禁止リストにこのマクロを持っている場合は展開しない
+        if self.no_expand_registry.is_blocked(token.id, id) {
             return Ok(None);
         }
 
@@ -2215,9 +2218,8 @@ impl Preprocessor {
             None => return Ok(None),
         };
 
-        // 展開元トークンの no_expand を継承し、現在のマクロを追加
-        let mut inherited_no_expand = token.no_expand.clone();
-        inherited_no_expand.insert(id);
+        // トリガートークンのIDと展開するマクロIDを記録
+        let trigger_token_id = token.id;
 
         // マクロ呼び出し位置を保存
         let call_loc = token.loc.clone();
@@ -2226,8 +2228,8 @@ impl Preprocessor {
             MacroKind::Object => {
                 let empty = HashMap::new();
                 let expanded = self.expand_tokens(&def.body, &empty, &empty)?;
-                // 全トークンに no_expand と呼び出し位置を適用
-                let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
+                // 全トークンに展開禁止情報と呼び出し位置を適用
+                let marked = self.mark_expanded_with_registry(expanded, trigger_token_id, id, &call_loc);
                 // マーカーで囲む（emit_markers が有効な場合のみ）
                 let wrapped = self.wrap_with_markers(
                     marked,
@@ -2314,8 +2316,8 @@ impl Preprocessor {
                 let prescanned_args = self.prescan_args(&arg_map)?;
 
                 let expanded = self.expand_tokens(&def.body, &arg_map, &prescanned_args)?;
-                // 全トークンに no_expand と呼び出し位置を適用
-                let marked = self.mark_expanded(expanded, &inherited_no_expand, &call_loc);
+                // 全トークンに展開禁止情報と呼び出し位置を適用
+                let marked = self.mark_expanded_with_registry(expanded, trigger_token_id, id, &call_loc);
                 // マーカーで囲む（emit_markers が有効な場合のみ）
                 let wrapped = self.wrap_with_markers(
                     marked,
@@ -2329,14 +2331,22 @@ impl Preprocessor {
         }
     }
 
-    /// トークン列に no_expand セットとマクロ呼び出し位置を適用
+    /// トークン列に展開禁止情報と呼び出し位置を適用（NoExpandRegistry使用版）
     ///
-    /// マクロ展開後のトークンには、マクロ呼び出し位置を設定する。
-    /// これにより、エラーメッセージがマクロ定義位置ではなく使用位置を指すようになる。
-    fn mark_expanded(&self, tokens: Vec<Token>, no_expand: &HashSet<InternedStr>, call_loc: &SourceLocation) -> Vec<Token> {
+    /// マクロ展開後のトークンには、マクロ呼び出し位置を設定し、
+    /// NoExpandRegistryに展開禁止情報を登録する。
+    fn mark_expanded_with_registry(
+        &mut self,
+        tokens: Vec<Token>,
+        trigger_token_id: TokenId,
+        macro_id: InternedStr,
+        call_loc: &SourceLocation,
+    ) -> Vec<Token> {
         tokens.into_iter().map(|mut t| {
-            // 既存の no_expand と新しい no_expand をマージ
-            t.no_expand.extend(no_expand.iter().cloned());
+            // 新しいトークンIDで展開禁止情報を継承
+            self.no_expand_registry.inherit(trigger_token_id, t.id);
+            // 現在のマクロも展開禁止に追加
+            self.no_expand_registry.add(t.id, macro_id);
             // マクロ呼び出し位置を設定
             t.loc = call_loc.clone();
             t
