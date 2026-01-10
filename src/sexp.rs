@@ -690,6 +690,8 @@ pub struct TypedSexpPrinter<'a, W: Write> {
     interner: &'a StringInterner,
     analyzer: SemanticAnalyzer<'a>,
     indent: usize,
+    /// ExprId を出力するかどうか
+    emit_expr_id: bool,
 }
 
 impl<'a, W: Write> TypedSexpPrinter<'a, W> {
@@ -705,7 +707,13 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
             interner,
             analyzer: SemanticAnalyzer::new(interner, apidoc, fields_dict),
             indent: 0,
+            emit_expr_id: false,
         }
+    }
+
+    /// ExprId の出力を有効/無効にする
+    pub fn set_emit_expr_id(&mut self, emit: bool) {
+        self.emit_expr_id = emit;
     }
 
     /// 外部宣言を出力（型注釈付き）
@@ -1167,28 +1175,40 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         match &expr.kind {
             ExprKind::Ident(id) => {
-                write!(self.writer, "(ident {})", self.interner.get(*id))?;
+                write!(self.writer, "(ident")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {})", self.interner.get(*id))?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
             ExprKind::IntLit(n) => {
-                write!(self.writer, "(int {})", n)?;
+                write!(self.writer, "(int")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {})", n)?;
                 write!(self.writer, " :type int")?;
             }
             ExprKind::UIntLit(n) => {
-                write!(self.writer, "(uint {})", n)?;
+                write!(self.writer, "(uint")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {})", n)?;
                 write!(self.writer, " :type unsigned int")?;
             }
             ExprKind::FloatLit(f) => {
-                write!(self.writer, "(float {})", f)?;
+                write!(self.writer, "(float")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {})", f)?;
                 write!(self.writer, " :type double")?;
             }
             ExprKind::CharLit(c) => {
-                write!(self.writer, "(char {})", c)?;
+                write!(self.writer, "(char")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {})", c)?;
                 write!(self.writer, " :type int")?;
             }
             ExprKind::StringLit(s) => {
-                write!(self.writer, "(string {:?})", String::from_utf8_lossy(s))?;
+                write!(self.writer, "(string")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {:?})", String::from_utf8_lossy(s))?;
                 write!(self.writer, " :type char*")?;
             }
             ExprKind::Binary { op, lhs, rhs } => {
@@ -1212,7 +1232,9 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                     BinOp::LogAnd => "&&",
                     BinOp::LogOr => "||",
                 };
-                write!(self.writer, "({} ", op_str)?;
+                write!(self.writer, "({}", op_str)?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " ")?;
                 self.print_expr(lhs)?;
                 write!(self.writer, " ")?;
                 self.print_expr(rhs)?;
@@ -1234,7 +1256,9 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                     AssignOp::XorAssign => "^=",
                     AssignOp::OrAssign => "|=",
                 };
-                write!(self.writer, "({} ", op_str)?;
+                write!(self.writer, "({}", op_str)?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " ")?;
                 self.print_expr(lhs)?;
                 write!(self.writer, " ")?;
                 self.print_expr(rhs)?;
@@ -1437,6 +1461,14 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     /// 型を文字列に変換
     fn type_to_string(&self, ty: &Type) -> String {
         ty.display(self.interner)
+    }
+
+    /// ExprId を出力（emit_expr_id が有効な場合）
+    fn write_expr_id(&mut self, id: ExprId) -> Result<()> {
+        if self.emit_expr_id {
+            write!(self.writer, " :id {}", id.0)?;
+        }
+        Ok(())
     }
 
     // ==================== ヘルパー ====================

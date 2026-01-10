@@ -18,6 +18,15 @@ use crate::token::{
     Comment, MacroBeginInfo, MacroEndInfo, MacroInvocationKind, Token, TokenId, TokenKind,
 };
 
+/// マクロ定義時のコールバックトレイト
+///
+/// Preprocessor がマクロを定義したときに呼び出される。
+/// THX マクロの収集など、マクロ定義時に追加の処理を行いたい場合に使用する。
+pub trait MacroDefCallback {
+    /// マクロが定義されたときに呼ばれる
+    fn on_macro_defined(&mut self, def: &MacroDef);
+}
+
 /// インクルードパスの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeKind {
@@ -298,6 +307,8 @@ pub struct Preprocessor {
     defining_builtin: bool,
     /// トークンごとの展開禁止マクロを管理
     no_expand_registry: NoExpandRegistry,
+    /// マクロ定義時のコールバック
+    macro_def_callback: Option<Box<dyn MacroDefCallback>>,
 }
 
 impl Preprocessor {
@@ -316,12 +327,23 @@ impl Preprocessor {
             return_spaces: false,
             defining_builtin: false,
             no_expand_registry: NoExpandRegistry::new(),
+            macro_def_callback: None,
         };
 
         // 事前定義マクロを登録
         pp.define_predefined_macros();
 
         pp
+    }
+
+    /// マクロ定義コールバックを設定
+    pub fn set_macro_def_callback(&mut self, callback: Box<dyn MacroDefCallback>) {
+        self.macro_def_callback = Some(callback);
+    }
+
+    /// マクロ定義コールバックを取得（所有権を移動）
+    pub fn take_macro_def_callback(&mut self) -> Option<Box<dyn MacroDefCallback>> {
+        self.macro_def_callback.take()
     }
 
     /// 事前定義マクロを登録
@@ -1444,6 +1466,11 @@ impl Preprocessor {
             is_builtin: self.defining_builtin,
             is_target,
         };
+
+        // コールバックを呼び出し（define の前に呼ぶことで def への参照を渡せる）
+        if let Some(ref mut callback) = self.macro_def_callback {
+            callback.on_macro_defined(&def);
+        }
 
         self.macros.define(def, &self.interner);
         Ok(())
