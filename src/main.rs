@@ -11,8 +11,8 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
     generate, get_default_target_dir, get_perl_config, ApidocDict, CompileError, ExternalDecl, FieldsDict,
-    FileId, MacroAnalyzer2, MacroCategory2, MacrogenBuilder, PPConfig, Parser, Preprocessor,
-    RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypedSexpPrinter,
+    FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext, MacrogenBuilder, PPConfig, Parser, Preprocessor,
+    RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation, ThxCollector, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -102,6 +102,10 @@ struct Cli {
     /// 生成コードにマクロ定義位置コメントを追加
     #[arg(long = "macro-comments")]
     macro_comments: bool,
+
+    /// マクロ型推論（ExprId + TypeEnv ベース）
+    #[arg(long = "infer-macro-types")]
+    infer_macro_types: bool,
 }
 
 fn main() {
@@ -132,11 +136,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         // 追加の -D オプションがあればマージ
         let mut defines = perl_cfg.defines;
         defines.extend(parse_defines(&cli.define));
+        // target_dir: CLI 指定があればそれを使用、なければデフォルト
+        let target_dir = cli.target_dir.clone().or_else(|| get_default_target_dir().ok());
         PPConfig {
             include_paths: perl_cfg.include_paths,
             predefined: defines,
             debug_pp: cli.debug_pp,
-            target_dir: cli.target_dir.clone(),
+            target_dir,
             emit_markers: cli.emit_macro_markers,
         }
     } else {
@@ -185,6 +191,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.analyze_macros {
         // --analyze-macros: マクロ関数を解析
         run_analyze_macros(&mut pp, cli.target_dir.as_ref())?;
+    } else if cli.infer_macro_types {
+        // --infer-macro-types: マクロ型推論
+        run_infer_macro_types(&mut pp, cli.apidoc.as_ref(), cli.bindings.as_ref())?;
     } else if cli.debug_macro_gen {
         // --debug-macro-gen: デバッグ用即時出力モード
         run_debug_macro_gen(&mut pp)?;
@@ -369,6 +378,169 @@ fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Re
 
     // Def-Use chain を出力
     println!("{}", analyzer.dump_def_use());
+
+    Ok(())
+}
+
+/// マクロ型推論（ExprId + TypeEnv ベース）
+fn run_infer_macro_types(
+    pp: &mut Preprocessor,
+    apidoc_path: Option<&PathBuf>,
+    bindings_path: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // フィールド辞書を作成（パースしながら収集）
+    let mut fields_dict = FieldsDict::new();
+
+    // パースしてフィールド辞書を構築
+    let mut parser = match Parser::new(pp) {
+        Ok(p) => p,
+        Err(e) => return Err(format_error(&e, pp).into()),
+    };
+
+    parser.parse_each(|result, _loc, _path, interner| {
+        if let Ok(ref decl) = result {
+            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+
+    // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
+    {
+        let interner = pp.interner_mut();
+        let sv = interner.intern("sv");
+        let sv_any = interner.intern("sv_any");
+        let sv_refcnt = interner.intern("sv_refcnt");
+        let sv_flags = interner.intern("sv_flags");
+
+        fields_dict.set_unique_field_type(sv_any, sv);
+        fields_dict.set_unique_field_type(sv_refcnt, sv);
+        fields_dict.set_unique_field_type(sv_flags, sv);
+    }
+
+    // Apidoc をロード
+    let apidoc = if let Some(path) = apidoc_path {
+        ApidocDict::load_auto(path)?
+    } else {
+        ApidocDict::new()
+    };
+
+    // RustDeclDict をロード
+    let rust_decl_dict = if let Some(path) = bindings_path {
+        Some(RustDeclDict::parse_file(path)?)
+    } else {
+        None
+    };
+
+    // ThxCollector を作成（プリプロセス時に収集済みの場合は再利用したいが、今は新規作成）
+    let mut thx_collector = ThxCollector::new(pp.interner_mut());
+
+    // マクロテーブルから THX 依存を収集
+    for (_name, def) in pp.macros().iter() {
+        use libperl_macrogen::MacroDefCallback;
+        thx_collector.on_macro_defined(def);
+    }
+
+    // MacroInferContext を作成して解析
+    let mut infer_ctx = MacroInferContext::new();
+
+
+    let interner = pp.interner();
+    let files = pp.files();
+
+    infer_ctx.analyze_all_macros(
+        pp.macros(),
+        &thx_collector,
+        interner,
+        files,
+        Some(&apidoc),
+        Some(&fields_dict),
+        rust_decl_dict.as_ref(),
+    );
+
+    // パース結果の統計を収集
+    let mut expr_count = 0;
+    let mut stmt_count = 0;
+    let mut unparseable_count = 0;
+    for info in infer_ctx.macros.values() {
+        if !info.is_target {
+            continue;
+        }
+        if info.is_expression() {
+            expr_count += 1;
+        } else if info.is_statement() {
+            stmt_count += 1;
+        } else {
+            unparseable_count += 1;
+        }
+    }
+
+    // 統計情報を出力
+    let stats = infer_ctx.stats();
+    eprintln!("=== Macro Type Inference Stats ===");
+    eprintln!("Total macros analyzed: {}", stats.total);
+    eprintln!("  - Expression macros: {}", expr_count);
+    eprintln!("  - Statement macros: {}", stmt_count);
+    eprintln!("  - Unparseable: {}", unparseable_count);
+    eprintln!("Confirmed (type complete): {}", stats.confirmed);
+    eprintln!("Unconfirmed (pending): {}", stats.unconfirmed);
+    eprintln!("Unknown (unparseable): {}", stats.unknown);
+    eprintln!();
+
+    // THX 依存マクロ数
+    eprintln!("THX-dependent macros: {}", thx_collector.len());
+    eprintln!();
+
+    // 各マクロの詳細を出力
+    println!("=== Macro Analysis Results ===");
+    let mut parseable_count = 0;
+    let mut has_constraints_count = 0;
+
+    for (name, info) in &infer_ctx.macros {
+        let name_str = interner.get(*name);
+
+        if !info.is_target {
+            continue;
+        }
+
+        let parse_status = if info.is_expression() {
+            parseable_count += 1;
+            "expression"
+        } else if info.is_statement() {
+            parseable_count += 1;
+            "statement"
+        } else {
+            "unparseable"
+        };
+
+        let thx_marker = if info.is_thx_dependent { " [THX]" } else { "" };
+        let constraint_count = info.type_env.total_constraint_count();
+
+        if constraint_count > 0 {
+            has_constraints_count += 1;
+        }
+
+        println!(
+            "{}: {} ({} constraints, {} uses){}",
+            name_str,
+            parse_status,
+            constraint_count,
+            info.uses.len(),
+            thx_marker
+        );
+
+        // 型制約の詳細
+        if constraint_count > 0 {
+            for (expr_id, constraints) in &info.type_env.expr_constraints {
+                for c in constraints {
+                    println!("  expr#{}: {} ({})", expr_id.0, c.ty, c.context);
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("Parseable macros: {}", parseable_count);
+    eprintln!("Macros with type constraints: {}", has_constraints_count);
 
     Ok(())
 }
