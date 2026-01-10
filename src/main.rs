@@ -546,7 +546,7 @@ fn run_infer_macro_types(
             thx_marker
         );
 
-        // 型付き S 式を追加出力
+        // 型付き S 式を追加出力（pretty print）
         if let ParseResult::Expression(ref expr) = info.parse_result {
             let stdout = io::stdout();
             let mut handle = stdout.lock();
@@ -556,6 +556,8 @@ fn run_infer_macro_types(
                 Some(&apidoc),
                 Some(&fields_dict),
             );
+            printer.set_pretty(true);
+            printer.set_indent(1);  // 行頭にスペース1文字分のインデント
             let _ = printer.print_expr(expr);
             let _ = writeln!(handle);
         }
