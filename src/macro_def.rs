@@ -162,6 +162,11 @@ impl MacroTable {
         self.macros.iter()
     }
 
+    /// ターゲットマクロのみをイテレート
+    pub fn iter_target_macros(&self) -> impl Iterator<Item = &MacroDef> {
+        self.macros.values().filter(|def| def.is_target)
+    }
+
     /// マクロ数を返す
     pub fn len(&self) -> usize {
         self.macros.len()

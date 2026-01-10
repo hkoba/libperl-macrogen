@@ -2,7 +2,7 @@
 //!
 //! スコープ管理と型推論を行う。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
 use crate::ast::*;
@@ -10,6 +10,7 @@ use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::rust_decl::RustDeclDict;
 use crate::source::SourceLocation;
+use crate::type_env::{ConstraintSource, TypeEnv, TypeConstraint as TypeEnvConstraint};
 use crate::unified_type::{IntSize, UnifiedType};
 
 /// 型変数 ID (制約ベース型推論用)
@@ -352,6 +353,8 @@ pub struct SemanticAnalyzer<'a> {
     constraints: Vec<TypeConstraint>,
     /// 制約収集モードか
     constraint_mode: bool,
+    /// マクロパラメータ名の集合（型制約収集用）
+    macro_params: HashSet<InternedStr>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -386,6 +389,7 @@ impl<'a> SemanticAnalyzer<'a> {
             next_type_var: 0,
             constraints: Vec::new(),
             constraint_mode: false,
+            macro_params: HashSet::new(),
         }
     }
 
@@ -1126,6 +1130,203 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.pop_scope();
             }
             _ => {}
+        }
+    }
+
+    // ========================================
+    // TypeEnv への型制約収集
+    // ========================================
+
+    /// マクロパラメータを設定
+    pub fn set_macro_params(&mut self, params: &[InternedStr]) {
+        self.macro_params.clear();
+        for &param in params {
+            self.macro_params.insert(param);
+        }
+    }
+
+    /// マクロパラメータをクリア
+    pub fn clear_macro_params(&mut self) {
+        self.macro_params.clear();
+    }
+
+    /// 識別子がマクロパラメータかどうか
+    fn is_macro_param(&self, name: InternedStr) -> bool {
+        self.macro_params.contains(&name)
+    }
+
+    /// 式全体から型制約を収集（再帰的に走査）
+    pub fn collect_expr_constraints(&mut self, expr: &Expr, type_env: &mut TypeEnv) {
+        match &expr.kind {
+            ExprKind::Call { func, args } => {
+                // 関数呼び出しから型制約を収集
+                self.collect_call_constraints(expr.id, func, args, type_env);
+                // 引数も再帰的に走査
+                for arg in args {
+                    self.collect_expr_constraints(arg, type_env);
+                }
+            }
+
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.collect_expr_constraints(lhs, type_env);
+                self.collect_expr_constraints(rhs, type_env);
+            }
+
+            ExprKind::Ident(name) => {
+                // パラメータ参照の場合、ExprId とパラメータを紐付け
+                if self.is_macro_param(*name) {
+                    type_env.link_expr_to_param(expr.id, *name, "parameter reference");
+                }
+            }
+
+            ExprKind::Cast { expr: inner, .. } => {
+                self.collect_expr_constraints(inner, type_env);
+            }
+
+            ExprKind::Index { expr: base, index } => {
+                self.collect_expr_constraints(base, type_env);
+                self.collect_expr_constraints(index, type_env);
+            }
+
+            ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+                self.collect_expr_constraints(base, type_env);
+            }
+
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                self.collect_expr_constraints(cond, type_env);
+                self.collect_expr_constraints(then_expr, type_env);
+                self.collect_expr_constraints(else_expr, type_env);
+            }
+
+            ExprKind::Assign { lhs, rhs, .. } => {
+                self.collect_expr_constraints(lhs, type_env);
+                self.collect_expr_constraints(rhs, type_env);
+            }
+
+            ExprKind::Comma { lhs, rhs } => {
+                self.collect_expr_constraints(lhs, type_env);
+                self.collect_expr_constraints(rhs, type_env);
+            }
+
+            ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner)
+            | ExprKind::Sizeof(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+            }
+
+            ExprKind::StmtExpr(compound) => {
+                self.collect_compound_constraints(compound, type_env);
+            }
+
+            // リテラルや型操作は制約を生成しない
+            ExprKind::IntLit(_)
+            | ExprKind::UIntLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::CharLit(_)
+            | ExprKind::StringLit(_)
+            | ExprKind::SizeofType(_)
+            | ExprKind::Alignof(_)
+            | ExprKind::CompoundLit { .. } => {}
+        }
+    }
+
+    /// 関数呼び出しから型制約を収集
+    fn collect_call_constraints(
+        &mut self,
+        call_expr_id: ExprId,
+        func: &Expr,
+        args: &[Expr],
+        type_env: &mut TypeEnv,
+    ) {
+        // 関数名を取得
+        let func_name = match &func.kind {
+            ExprKind::Ident(name) => *name,
+            _ => return, // 間接呼び出しは未対応
+        };
+
+        let func_name_str = self.interner.get(func_name);
+
+        // RustDeclDict から引数の型を取得
+        if let Some(rust_decl_dict) = self.rust_decl_dict {
+            if let Some(rust_fn) = rust_decl_dict.fns.get(func_name_str) {
+                for (i, arg) in args.iter().enumerate() {
+                    if let Some(param) = rust_fn.params.get(i) {
+                        let constraint = TypeEnvConstraint::new(
+                            arg.id,
+                            &param.ty,
+                            ConstraintSource::RustBindings,
+                            format!("arg {} of {}()", i, func_name_str),
+                        );
+                        type_env.add_constraint(constraint);
+                    }
+                }
+
+                // 戻り値型も制約として追加
+                if let Some(ref ret_ty) = rust_fn.ret_ty {
+                    let return_constraint = TypeEnvConstraint::new(
+                        call_expr_id,
+                        ret_ty,
+                        ConstraintSource::RustBindings,
+                        format!("return type of {}()", func_name_str),
+                    );
+                    type_env.add_constraint(return_constraint);
+                }
+            }
+        }
+
+        // Apidoc から型を取得
+        if let Some(apidoc) = self.apidoc {
+            if let Some(entry) = apidoc.get(func_name_str) {
+                // 引数の型
+                for (i, arg) in args.iter().enumerate() {
+                    if let Some(apidoc_arg) = entry.args.get(i) {
+                        let constraint = TypeEnvConstraint::new(
+                            arg.id,
+                            &apidoc_arg.ty,
+                            ConstraintSource::Apidoc,
+                            format!("arg {} ({}) of {}()", i, apidoc_arg.name, func_name_str),
+                        );
+                        type_env.add_constraint(constraint);
+                    }
+                }
+
+                // 戻り値型
+                if let Some(ref return_type) = entry.return_type {
+                    let return_constraint = TypeEnvConstraint::new(
+                        call_expr_id,
+                        return_type,
+                        ConstraintSource::Apidoc,
+                        format!("return type of {}()", func_name_str),
+                    );
+                    type_env.add_constraint(return_constraint);
+                }
+            }
+        }
+    }
+
+    /// 複合文から型制約を収集
+    fn collect_compound_constraints(&mut self, compound: &CompoundStmt, type_env: &mut TypeEnv) {
+        for item in &compound.items {
+            match item {
+                BlockItem::Stmt(Stmt::Expr(Some(expr), _)) => {
+                    self.collect_expr_constraints(expr, type_env);
+                }
+                BlockItem::Stmt(Stmt::Return(Some(expr), _)) => {
+                    self.collect_expr_constraints(expr, type_env);
+                }
+                BlockItem::Stmt(Stmt::Compound(inner)) => {
+                    self.collect_compound_constraints(inner, type_env);
+                }
+                _ => {}
+            }
         }
     }
 

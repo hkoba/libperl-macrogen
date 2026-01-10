@@ -5,8 +5,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{BlockItem, Expr};
-use crate::intern::InternedStr;
+use crate::apidoc::ApidocDict;
+use crate::ast::{BlockItem, Expr, ExprKind};
+use crate::fields_dict::FieldsDict;
+use crate::intern::{InternedStr, StringInterner};
+use crate::macro_def::{MacroDef, MacroKind, MacroTable};
+use crate::parser::parse_expression_from_tokens_ref;
+use crate::rust_decl::RustDeclDict;
+use crate::semantic::SemanticAnalyzer;
+use crate::source::FileRegistry;
+use crate::thx_collector::ThxCollector;
+use crate::token::TokenKind;
+use crate::token_expander::TokenExpander;
 use crate::type_env::TypeEnv;
 
 /// マクロのパース結果
@@ -249,6 +259,191 @@ impl MacroInferContext {
             confirmed: self.confirmed.len(),
             unconfirmed: self.unconfirmed.len(),
             unknown: self.unknown.len(),
+        }
+    }
+
+    /// マクロを解析して MacroInferInfo を作成
+    ///
+    /// 1. マクロ本体をパース（式 or 文）
+    /// 2. def-use 関係を収集（使用するマクロ/関数）
+    /// 3. 初期型制約を収集
+    pub fn analyze_macro<'a>(
+        &mut self,
+        def: &MacroDef,
+        macro_table: &MacroTable,
+        thx_collector: &ThxCollector,
+        interner: &'a StringInterner,
+        files: &FileRegistry,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+        rust_decl_dict: Option<&'a RustDeclDict>,
+    ) {
+        let mut info = MacroInferInfo::new(def.name);
+        info.is_target = def.is_target;
+        info.is_thx_dependent = thx_collector.is_thx_dependent(def.name);
+
+        // 関数形式マクロの場合、パラメータを取得
+        let params: Vec<InternedStr> = match &def.kind {
+            MacroKind::Function { params, .. } => params.clone(),
+            MacroKind::Object => vec![],
+        };
+
+        // マクロ本体を展開（TokenExpander を使用）
+        let expander = TokenExpander::new(macro_table, interner, files);
+        let expanded_tokens = expander.expand(&def.body);
+
+        // def-use 関係を収集（展開後のトークンから識別子を抽出）
+        self.collect_uses(&expanded_tokens, macro_table, &mut info);
+
+        // パースを試行
+        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files);
+
+        // パース成功した場合、型制約を収集
+        if let ParseResult::Expression(ref expr) = info.parse_result {
+            let mut analyzer = SemanticAnalyzer::with_rust_decl_dict(
+                interner,
+                apidoc,
+                fields_dict,
+                rust_decl_dict,
+            );
+            analyzer.set_macro_params(&params);
+            analyzer.collect_expr_constraints(expr, &mut info.type_env);
+        }
+
+        self.register(info);
+    }
+
+    /// トークン列から使用するマクロ/関数を収集
+    fn collect_uses(
+        &self,
+        tokens: &[crate::token::Token],
+        macro_table: &MacroTable,
+        info: &mut MacroInferInfo,
+    ) {
+        for token in tokens {
+            if let TokenKind::Ident(id) = &token.kind {
+                // マクロテーブルに存在する識別子は使用マクロ
+                if macro_table.get(*id).is_some() && *id != info.name {
+                    info.add_use(*id);
+                }
+            }
+        }
+    }
+
+    /// トークン列を式としてパース試行
+    fn try_parse_tokens(
+        &self,
+        tokens: &[crate::token::Token],
+        interner: &StringInterner,
+        files: &FileRegistry,
+    ) -> ParseResult {
+        if tokens.is_empty() {
+            return ParseResult::Unparseable;
+        }
+
+        // 空の typedef セット（マクロ解析時は typedef 情報なし）
+        let typedefs = HashSet::new();
+
+        // 式としてパースを試行
+        match parse_expression_from_tokens_ref(tokens.to_vec(), interner, files, &typedefs) {
+            Ok(expr) => ParseResult::Expression(Box::new(expr)),
+            Err(_) => ParseResult::Unparseable,
+        }
+    }
+
+    /// 全ターゲットマクロを解析
+    ///
+    /// MacroTable 内の全ターゲットマクロに対して analyze_macro を実行し、
+    /// def-use 関係を構築して初期分類を行う。
+    pub fn analyze_all_macros<'a>(
+        &mut self,
+        macro_table: &MacroTable,
+        thx_collector: &ThxCollector,
+        interner: &'a StringInterner,
+        files: &FileRegistry,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+        rust_decl_dict: Option<&'a RustDeclDict>,
+    ) {
+        // ターゲットマクロのみを解析
+        for def in macro_table.iter_target_macros() {
+            self.analyze_macro(
+                def,
+                macro_table,
+                thx_collector,
+                interner,
+                files,
+                apidoc,
+                fields_dict,
+                rust_decl_dict,
+            );
+        }
+
+        // def-use 関係を構築
+        self.build_use_relations();
+
+        // 初期分類
+        self.classify_initial();
+    }
+
+    /// 式から使用される関数/マクロを再帰的に収集
+    pub fn collect_uses_from_expr(
+        expr: &Expr,
+        uses: &mut HashSet<InternedStr>,
+    ) {
+        match &expr.kind {
+            ExprKind::Call { func, args } => {
+                // 関数名を収集
+                if let ExprKind::Ident(name) = &func.kind {
+                    uses.insert(*name);
+                }
+                Self::collect_uses_from_expr(func, uses);
+                for arg in args {
+                    Self::collect_uses_from_expr(arg, uses);
+                }
+            }
+            ExprKind::Ident(name) => {
+                uses.insert(*name);
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                Self::collect_uses_from_expr(lhs, uses);
+                Self::collect_uses_from_expr(rhs, uses);
+            }
+            ExprKind::Cast { expr: inner, .. }
+            | ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner)
+            | ExprKind::Sizeof(inner) => {
+                Self::collect_uses_from_expr(inner, uses);
+            }
+            ExprKind::Index { expr: base, index } => {
+                Self::collect_uses_from_expr(base, uses);
+                Self::collect_uses_from_expr(index, uses);
+            }
+            ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+                Self::collect_uses_from_expr(base, uses);
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                Self::collect_uses_from_expr(cond, uses);
+                Self::collect_uses_from_expr(then_expr, uses);
+                Self::collect_uses_from_expr(else_expr, uses);
+            }
+            ExprKind::Assign { lhs, rhs, .. } => {
+                Self::collect_uses_from_expr(lhs, uses);
+                Self::collect_uses_from_expr(rhs, uses);
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                Self::collect_uses_from_expr(lhs, uses);
+                Self::collect_uses_from_expr(rhs, uses);
+            }
+            _ => {}
         }
     }
 }
