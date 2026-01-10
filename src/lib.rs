@@ -33,7 +33,7 @@ pub mod type_registry;
 pub mod unified_type;
 
 // 主要な型を再エクスポート
-pub use apidoc::{ApidocArg, ApidocDict, ApidocEntry, ApidocFlags, ApidocStats, Nullability};
+pub use apidoc::{ApidocArg, ApidocCollector, ApidocDict, ApidocEntry, ApidocFlags, ApidocStats, Nullability};
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use fields_dict::FieldsDict;
@@ -51,7 +51,7 @@ pub use macro_def::{MacroDef, MacroKind, MacroTable};
 pub use macro_infer::{InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats, ParseResult};
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, Parser};
 pub use perl_config::{get_default_target_dir, get_perl_config, PerlConfig, PerlConfigError};
-pub use preprocessor::{MacroDefCallback, PPConfig, Preprocessor};
+pub use preprocessor::{CallbackPair, MacroDefCallback, PPConfig, Preprocessor};
 pub use thx_collector::ThxCollector;
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};

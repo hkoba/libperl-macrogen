@@ -10,9 +10,10 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    generate, get_default_target_dir, get_perl_config, ApidocDict, CompileError, ExternalDecl, FieldsDict,
-    FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext, MacrogenBuilder, PPConfig, Parser, Preprocessor,
-    RustCodeGen, RustDeclDict, SexpPrinter, SourceLocation, ThxCollector, TokenKind, TypedSexpPrinter,
+    generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict, CallbackPair,
+    CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
+    MacrogenBuilder, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
+    SourceLocation, ThxCollector, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -391,18 +392,36 @@ fn run_infer_macro_types(
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
-    // パースしてフィールド辞書を構築
+    // コールバックペアを作成して Preprocessor に設定
+    let callback_pair = CallbackPair::new(
+        ApidocCollector::new(),
+        ThxCollector::new(pp.interner_mut()),
+    );
+    pp.set_macro_def_callback(Box::new(callback_pair));
+
+    // パーサー作成
     let mut parser = match Parser::new(pp) {
         Ok(p) => p,
         Err(e) => return Err(format_error(&e, pp).into()),
     };
 
+    // parse_each でフィールド辞書を構築（同時にマクロ定義→コールバック呼び出し）
     parser.parse_each(|result, _loc, _path, interner| {
         if let Ok(ref decl) = result {
             fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
         }
         std::ops::ControlFlow::Continue(())
     });
+
+    // コールバックを取り出してダウンキャスト
+    let callback = pp.take_macro_def_callback().expect("callback should exist");
+    let pair = callback
+        .into_any()
+        .downcast::<CallbackPair<ApidocCollector, ThxCollector>>()
+        .expect("callback type mismatch");
+
+    let apidoc_collector = pair.first;
+    let thx_collector = pair.second;
 
     // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
     {
@@ -417,12 +436,14 @@ fn run_infer_macro_types(
         fields_dict.set_unique_field_type(sv_flags, sv);
     }
 
-    // Apidoc をロード
-    let apidoc = if let Some(path) = apidoc_path {
+    // Apidoc をロード（ファイルから + コメントから）
+    let mut apidoc = if let Some(path) = apidoc_path {
         ApidocDict::load_auto(path)?
     } else {
         ApidocDict::new()
     };
+    let apidoc_from_comments = apidoc_collector.len();
+    apidoc_collector.merge_into(&mut apidoc);
 
     // RustDeclDict をロード
     let rust_decl_dict = if let Some(path) = bindings_path {
@@ -430,15 +451,6 @@ fn run_infer_macro_types(
     } else {
         None
     };
-
-    // ThxCollector を作成（プリプロセス時に収集済みの場合は再利用したいが、今は新規作成）
-    let mut thx_collector = ThxCollector::new(pp.interner_mut());
-
-    // マクロテーブルから THX 依存を収集
-    for (_name, def) in pp.macros().iter() {
-        use libperl_macrogen::MacroDefCallback;
-        thx_collector.on_macro_defined(def);
-    }
 
     // MacroInferContext を作成して解析
     let mut infer_ctx = MacroInferContext::new();
@@ -486,21 +498,27 @@ fn run_infer_macro_types(
     eprintln!("Unknown (unparseable): {}", stats.unknown);
     eprintln!();
 
+    // コメントから収集した apidoc 数
+    eprintln!("Apidoc from comments: {}", apidoc_from_comments);
     // THX 依存マクロ数
     eprintln!("THX-dependent macros: {}", thx_collector.len());
     eprintln!();
 
-    // 各マクロの詳細を出力
+    // 各マクロの詳細を出力（辞書順）
     println!("=== Macro Analysis Results ===");
     let mut parseable_count = 0;
     let mut has_constraints_count = 0;
 
-    for (name, info) in &infer_ctx.macros {
-        let name_str = interner.get(*name);
+    // マクロ名でソートするためにベクターに収集
+    let mut sorted_macros: Vec<_> = infer_ctx
+        .macros
+        .iter()
+        .filter(|(_, info)| info.is_target)
+        .collect();
+    sorted_macros.sort_by_key(|(name, _)| interner.get(**name));
 
-        if !info.is_target {
-            continue;
-        }
+    for (name, info) in sorted_macros {
+        let name_str = interner.get(*name);
 
         let parse_status = if info.is_expression() {
             parseable_count += 1;

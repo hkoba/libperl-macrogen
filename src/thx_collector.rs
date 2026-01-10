@@ -3,6 +3,7 @@
 //! Preprocessor のコールバックとして動作し、マクロ定義時に
 //! THX 依存（aTHX, tTHX, my_perl を含む）マクロを収集する。
 
+use std::any::Any;
 use std::collections::HashSet;
 
 use crate::intern::{InternedStr, StringInterner};
@@ -75,6 +76,10 @@ impl MacroDefCallback for ThxCollector {
                 }
             }
         }
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
     }
 }
 

@@ -3,12 +3,16 @@
 //! Parses Perl's embed.fnc file and =for apidoc comments in header files.
 //! These provide type information for Perl's internal API functions and macros.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::macro_def::MacroDef;
+use crate::preprocessor::MacroDefCallback;
 
 /// 引数のNULL許容性
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -409,6 +413,11 @@ impl ApidocDict {
         Self::default()
     }
 
+    /// エントリを追加
+    pub fn insert(&mut self, name: String, entry: ApidocEntry) {
+        self.entries.insert(name, entry);
+    }
+
     /// embed.fncファイルをパース
     pub fn parse_embed_fnc<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -589,6 +598,59 @@ pub struct ApidocStats {
     pub macro_count: usize,
     pub inline_count: usize,
     pub api_count: usize,
+}
+
+/// MacroDef.leading_comments から apidoc を抽出するコレクター
+pub struct ApidocCollector {
+    entries: HashMap<String, ApidocEntry>,
+}
+
+impl ApidocCollector {
+    /// 新しいコレクターを作成
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// 収集した apidoc を ApidocDict にマージ
+    pub fn merge_into(self, dict: &mut ApidocDict) {
+        for (name, entry) in self.entries {
+            dict.insert(name, entry);
+        }
+    }
+
+    /// 収集数を返す
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// 空かどうか
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for ApidocCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MacroDefCallback for ApidocCollector {
+    fn on_macro_defined(&mut self, def: &MacroDef) {
+        for comment in &def.leading_comments {
+            for line in comment.text.lines() {
+                if let Some(entry) = ApidocEntry::parse_apidoc_line(line) {
+                    self.entries.insert(entry.name.clone(), entry);
+                }
+            }
+        }
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 //! tinycc の tccpp.c に相当する機能を提供する。
 //! next_token() がメインのインターフェースで、マクロ展開済みのトークンを返す。
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,32 @@ use crate::token::{
 pub trait MacroDefCallback {
     /// マクロが定義されたときに呼ばれる
     fn on_macro_defined(&mut self, def: &MacroDef);
+
+    /// ダウンキャスト用に Any に変換
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+/// 2つのコールバックをペアで保持
+pub struct CallbackPair<A, B> {
+    pub first: A,
+    pub second: B,
+}
+
+impl<A, B> CallbackPair<A, B> {
+    pub fn new(first: A, second: B) -> Self {
+        Self { first, second }
+    }
+}
+
+impl<A: MacroDefCallback + 'static, B: MacroDefCallback + 'static> MacroDefCallback for CallbackPair<A, B> {
+    fn on_macro_defined(&mut self, def: &MacroDef) {
+        self.first.on_macro_defined(def);
+        self.second.on_macro_defined(def);
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 /// インクルードパスの種類
