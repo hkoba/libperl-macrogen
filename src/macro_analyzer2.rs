@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
-use crate::ast::Expr;
+use crate::ast::{Expr, ExprKind};
 use crate::error::Result;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
@@ -597,10 +597,10 @@ impl<'a> MacroAnalyzer2<'a> {
 
     /// 式がパラメータ識別子かどうか
     fn is_param_ident(&self, expr: &Expr, param: InternedStr) -> bool {
-        match expr {
-            Expr::Ident(id, _) => *id == param,
+        match &expr.kind {
+            ExprKind::Ident(id) => *id == param,
             // キャストを通して識別子をチェック
-            Expr::Cast { expr: inner, .. } => self.is_param_ident(inner, param),
+            ExprKind::Cast { expr: inner, .. } => self.is_param_ident(inner, param),
             _ => false,
         }
     }
@@ -612,9 +612,9 @@ impl<'a> MacroAnalyzer2<'a> {
         expr: &Expr,
         param: InternedStr,
     ) -> Option<GenericParamInfo> {
-        match expr {
+        match &expr.kind {
             // パターン: param->field (SVファミリーの共有フィールド)
-            Expr::PtrMember { expr: base, member, .. } => {
+            ExprKind::PtrMember { expr: base, member } => {
                 if self.is_param_ident(base, param) {
                     // SVファミリーの共有フィールドかチェック
                     if self.fields_dict.is_sv_family_field(*member, self.interner) {
@@ -630,13 +630,13 @@ impl<'a> MacroAnalyzer2<'a> {
             }
 
             // 二項演算子
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.detect_generic_param(lhs, param)
                     .or_else(|| self.detect_generic_param(rhs, param))
             }
 
             // 関数呼び出し
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 for arg in args {
                     if let Some(info) = self.detect_generic_param(arg, param) {
                         return Some(info);
@@ -646,40 +646,40 @@ impl<'a> MacroAnalyzer2<'a> {
             }
 
             // 単項演算子
-            Expr::PreInc(inner, _)
-            | Expr::PreDec(inner, _)
-            | Expr::AddrOf(inner, _)
-            | Expr::Deref(inner, _)
-            | Expr::UnaryPlus(inner, _)
-            | Expr::UnaryMinus(inner, _)
-            | Expr::BitNot(inner, _)
-            | Expr::LogNot(inner, _)
-            | Expr::PostInc(inner, _)
-            | Expr::PostDec(inner, _)
-            | Expr::Sizeof(inner, _) => {
+            ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner)
+            | ExprKind::Sizeof(inner) => {
                 self.detect_generic_param(inner, param)
             }
 
             // キャスト
-            Expr::Cast { expr: inner, .. } => {
+            ExprKind::Cast { expr: inner, .. } => {
                 self.detect_generic_param(inner, param)
             }
 
             // 条件演算子
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 self.detect_generic_param(cond, param)
                     .or_else(|| self.detect_generic_param(then_expr, param))
                     .or_else(|| self.detect_generic_param(else_expr, param))
             }
 
             // 配列添字
-            Expr::Index { expr: base, index, .. } => {
+            ExprKind::Index { expr: base, index } => {
                 self.detect_generic_param(base, param)
                     .or_else(|| self.detect_generic_param(index, param))
             }
 
             // メンバアクセス
-            Expr::Member { expr: base, .. } => {
+            ExprKind::Member { expr: base, .. } => {
                 self.detect_generic_param(base, param)
             }
 
@@ -714,8 +714,8 @@ impl<'a> MacroAnalyzer2<'a> {
     /// SVファミリーの sv_any フィールドへのアクセスで戻り値が決まる場合
     fn detect_generic_return(&self, expr: &Expr) -> Option<GenericReturnInfo> {
         // トップレベルで sv_any へのアクセスがあれば戻り値もジェネリック
-        match expr {
-            Expr::PtrMember { member, .. } => {
+        match &expr.kind {
+            ExprKind::PtrMember { member, .. } => {
                 let member_str = self.interner.get(*member);
                 // sv_any は構造体ごとに型が異なるのでジェネリック戻り値が必要
                 if member_str == "sv_any" {
@@ -727,7 +727,7 @@ impl<'a> MacroAnalyzer2<'a> {
                 None
             }
             // キャストを通した場合も検出
-            Expr::Cast { expr: inner, .. } => self.detect_generic_return(inner),
+            ExprKind::Cast { expr: inner, .. } => self.detect_generic_return(inner),
             _ => None,
         }
     }

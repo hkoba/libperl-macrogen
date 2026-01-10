@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::{ApidocDict, ApidocEntry};
-use crate::ast::{CompoundStmt, Expr};
+use crate::ast::{CompoundStmt, Expr, ExprKind};
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::rust_decl::{RustDeclDict, RustFn};
@@ -304,10 +304,10 @@ impl<'a> InferenceContext<'a> {
         params: &HashSet<InternedStr>,
         known_types: &mut HashMap<InternedStr, String>,
     ) {
-        match expr {
-            Expr::Call { func, args, .. } => {
+        match &expr.kind {
+            ExprKind::Call { func, args } => {
                 // 関数名を取得
-                if let Expr::Ident(func_name, _) = func.as_ref() {
+                if let ExprKind::Ident(func_name) = &func.kind {
                     let func_name_str = self.interner.get(*func_name);
 
                     // 確定済み関数からシグネチャを取得
@@ -331,23 +331,23 @@ impl<'a> InferenceContext<'a> {
             }
 
             // 他の式タイプを再帰的に走査
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.infer_from_expr(lhs, params, known_types);
                 self.infer_from_expr(rhs, params, known_types);
             }
-            Expr::UnaryPlus(inner, _)
-            | Expr::UnaryMinus(inner, _)
-            | Expr::BitNot(inner, _)
-            | Expr::LogNot(inner, _)
-            | Expr::Deref(inner, _)
-            | Expr::AddrOf(inner, _)
-            | Expr::PreInc(inner, _)
-            | Expr::PreDec(inner, _)
-            | Expr::PostInc(inner, _)
-            | Expr::PostDec(inner, _) => {
+            ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner) => {
                 self.infer_from_expr(inner, params, known_types);
             }
-            Expr::Member { expr: inner, member, .. } => {
+            ExprKind::Member { expr: inner, member } => {
                 // sv_u.svu_* パターンの検出
                 // (ptr)->sv_u.svu_pv のような形式から ptr の型を推論
                 if let Some((pointer_type, _field_type)) = self.infer_from_sv_u_field(*member, inner) {
@@ -359,45 +359,45 @@ impl<'a> InferenceContext<'a> {
                 }
                 self.infer_from_expr(inner, params, known_types);
             }
-            Expr::PtrMember { expr, .. } => {
+            ExprKind::PtrMember { expr, .. } => {
                 self.infer_from_expr(expr, params, known_types);
             }
-            Expr::Index { expr, index, .. } => {
+            ExprKind::Index { expr, index } => {
                 self.infer_from_expr(expr, params, known_types);
                 self.infer_from_expr(index, params, known_types);
             }
-            Expr::Cast { expr, .. } => {
+            ExprKind::Cast { expr, .. } => {
                 self.infer_from_expr(expr, params, known_types);
             }
-            Expr::Sizeof(inner, _) => {
+            ExprKind::Sizeof(inner) => {
                 self.infer_from_expr(inner, params, known_types);
             }
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 self.infer_from_expr(cond, params, known_types);
                 self.infer_from_expr(then_expr, params, known_types);
                 self.infer_from_expr(else_expr, params, known_types);
             }
-            Expr::Comma { lhs, rhs, .. } => {
+            ExprKind::Comma { lhs, rhs } => {
                 self.infer_from_expr(lhs, params, known_types);
                 self.infer_from_expr(rhs, params, known_types);
             }
-            Expr::Assign { lhs, rhs, .. } => {
+            ExprKind::Assign { lhs, rhs, .. } => {
                 self.infer_from_expr(lhs, params, known_types);
                 self.infer_from_expr(rhs, params, known_types);
             }
-            Expr::StmtExpr(compound, _) => {
+            ExprKind::StmtExpr(compound) => {
                 self.infer_from_compound_stmt(compound, params, known_types);
             }
             // リテラルや識別子は走査不要
-            Expr::Ident(_, _)
-            | Expr::IntLit(_, _)
-            | Expr::UIntLit(_, _)
-            | Expr::FloatLit(_, _)
-            | Expr::CharLit(_, _)
-            | Expr::StringLit(_, _)
-            | Expr::SizeofType(_, _)
-            | Expr::Alignof(_, _)
-            | Expr::CompoundLit { .. } => {}
+            ExprKind::Ident(_)
+            | ExprKind::IntLit(_)
+            | ExprKind::UIntLit(_)
+            | ExprKind::FloatLit(_)
+            | ExprKind::CharLit(_)
+            | ExprKind::StringLit(_)
+            | ExprKind::SizeofType(_)
+            | ExprKind::Alignof(_)
+            | ExprKind::CompoundLit { .. } => {}
         }
     }
 
@@ -422,15 +422,15 @@ impl<'a> InferenceContext<'a> {
         }
 
         // 内部式が .sv_u へのアクセスかチェック
-        let sv_u_base = match inner {
-            Expr::Member { expr, member, .. } => {
+        let sv_u_base = match &inner.kind {
+            ExprKind::Member { expr, member } => {
                 if self.interner.get(*member) == "sv_u" {
                     Some(expr.as_ref())
                 } else {
                     None
                 }
             }
-            Expr::PtrMember { expr, member, .. } => {
+            ExprKind::PtrMember { expr, member } => {
                 if self.interner.get(*member) == "sv_u" {
                     Some(expr.as_ref())
                 } else {
@@ -459,8 +459,8 @@ impl<'a> InferenceContext<'a> {
 
     /// 式からベースとなるパラメータを探す
     fn find_base_param(&self, expr: &Expr, params: &HashSet<InternedStr>) -> Option<InternedStr> {
-        match expr {
-            Expr::Ident(id, _) => {
+        match &expr.kind {
+            ExprKind::Ident(id) => {
                 if params.contains(id) {
                     Some(*id)
                 } else {
@@ -468,14 +468,14 @@ impl<'a> InferenceContext<'a> {
                 }
             }
             // sv_u へのアクセスの場合、さらに内側を探す
-            Expr::Member { expr: inner, member, .. } => {
+            ExprKind::Member { expr: inner, member } => {
                 if self.interner.get(*member) == "sv_u" {
                     self.find_base_param(inner, params)
                 } else {
                     None
                 }
             }
-            Expr::PtrMember { expr: inner, member, .. } => {
+            ExprKind::PtrMember { expr: inner, member } => {
                 if self.interner.get(*member) == "sv_u" {
                     self.find_base_param(inner, params)
                 } else {
@@ -483,17 +483,17 @@ impl<'a> InferenceContext<'a> {
                 }
             }
             // 括弧で囲まれた式
-            Expr::Deref(inner, _) => self.find_base_param(inner, params),
+            ExprKind::Deref(inner) => self.find_base_param(inner, params),
             _ => None,
         }
     }
 
     /// 式から戻り値型を推論
     fn infer_return_type_from_expr(&self, expr: &Expr) -> Option<String> {
-        match expr {
+        match &expr.kind {
             // フィールドアクセスの場合、フィールド型を返す (. または ->)
-            Expr::Member { expr: inner, member, .. }
-            | Expr::PtrMember { expr: inner, member, .. } => {
+            ExprKind::Member { expr: inner, member }
+            | ExprKind::PtrMember { expr: inner, member } => {
                 // sv_u.svu_* パターン
                 if let Some((_pointer_type, field_type)) = self.infer_from_sv_u_field(*member, inner) {
                     return Some(field_type);
@@ -505,18 +505,18 @@ impl<'a> InferenceContext<'a> {
                 None
             }
             // 括弧やデリファレンスを透過
-            Expr::Deref(inner, _) => self.infer_return_type_from_expr(inner),
+            ExprKind::Deref(inner) => self.infer_return_type_from_expr(inner),
             // 条件式の場合、then/else両方から推論を試みる
-            Expr::Conditional { then_expr, else_expr, .. } => {
+            ExprKind::Conditional { then_expr, else_expr, .. } => {
                 self.infer_return_type_from_expr(then_expr)
                     .or_else(|| self.infer_return_type_from_expr(else_expr))
             }
             // 二項演算の場合、どちらかのオペランドから推論を試みる
             // 例: 0 + (gv)->sv_u.svu_gp では右側から型を推論
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 // 一方がリテラル0の場合、もう一方から推論
-                let lhs_is_zero = matches!(lhs.as_ref(), Expr::IntLit(0, _));
-                let rhs_is_zero = matches!(rhs.as_ref(), Expr::IntLit(0, _));
+                let lhs_is_zero = matches!(&lhs.kind, ExprKind::IntLit(0));
+                let rhs_is_zero = matches!(&rhs.kind, ExprKind::IntLit(0));
 
                 if lhs_is_zero {
                     self.infer_return_type_from_expr(rhs)
@@ -529,8 +529,8 @@ impl<'a> InferenceContext<'a> {
                 }
             }
             // 関数呼び出しの場合、確定済み関数の戻り値型を使用
-            Expr::Call { func, .. } => {
-                if let Expr::Ident(func_name, _) = func.as_ref() {
+            ExprKind::Call { func, .. } => {
+                if let ExprKind::Ident(func_name) = &func.kind {
                     let func_name_str = self.interner.get(*func_name);
                     if let Some(sig) = self.confirmed.get(func_name_str) {
                         return sig.ret_ty.clone();
@@ -692,16 +692,16 @@ impl<'a> InferenceContext<'a> {
         params: &HashSet<InternedStr>,
         known_types: &mut HashMap<InternedStr, String>,
     ) {
-        match arg {
+        match &arg.kind {
             // 単純な識別子: 直接その型を使用
-            Expr::Ident(id, _) => {
+            ExprKind::Ident(id) => {
                 if params.contains(id) && !known_types.contains_key(id) {
                     known_types.insert(*id, normalize_type(expected_type));
                 }
             }
             // &param: ポインタ型から参照先の型を導出
-            Expr::AddrOf(inner, _) => {
-                if let Expr::Ident(id, _) = inner.as_ref() {
+            ExprKind::AddrOf(inner) => {
+                if let ExprKind::Ident(id) = &inner.kind {
                     if params.contains(id) && !known_types.contains_key(id) {
                         // *const T や *mut T から T を取り出す
                         if let Some(pointee_type) = strip_pointer_type(expected_type) {
@@ -711,8 +711,8 @@ impl<'a> InferenceContext<'a> {
                 }
             }
             // (param as Type) のようなキャスト
-            Expr::Cast { expr, .. } => {
-                if let Expr::Ident(id, _) = expr.as_ref() {
+            ExprKind::Cast { expr, .. } => {
+                if let ExprKind::Ident(id) = &expr.kind {
                     if params.contains(id) && !known_types.contains_key(id) {
                         known_types.insert(*id, normalize_type(expected_type));
                     }
@@ -771,10 +771,10 @@ pub fn extract_called_functions(expr: &Expr, interner: &StringInterner) -> Vec<S
 }
 
 fn extract_called_functions_inner(expr: &Expr, interner: &StringInterner, result: &mut Vec<String>) {
-    match expr {
-        Expr::Call { func, args, .. } => {
+    match &expr.kind {
+        ExprKind::Call { func, args } => {
             // 関数名を取得
-            if let Expr::Ident(func_name, _) = func.as_ref() {
+            if let ExprKind::Ident(func_name) = &func.kind {
                 result.push(interner.get(*func_name).to_string());
             }
 
@@ -788,61 +788,61 @@ fn extract_called_functions_inner(expr: &Expr, interner: &StringInterner, result
         }
 
         // 他の式タイプを再帰的に走査
-        Expr::Binary { lhs, rhs, .. } => {
+        ExprKind::Binary { lhs, rhs, .. } => {
             extract_called_functions_inner(lhs, interner, result);
             extract_called_functions_inner(rhs, interner, result);
         }
-        Expr::UnaryPlus(inner, _)
-        | Expr::UnaryMinus(inner, _)
-        | Expr::BitNot(inner, _)
-        | Expr::LogNot(inner, _)
-        | Expr::Deref(inner, _)
-        | Expr::AddrOf(inner, _)
-        | Expr::PreInc(inner, _)
-        | Expr::PreDec(inner, _)
-        | Expr::PostInc(inner, _)
-        | Expr::PostDec(inner, _) => {
+        ExprKind::UnaryPlus(inner)
+        | ExprKind::UnaryMinus(inner)
+        | ExprKind::BitNot(inner)
+        | ExprKind::LogNot(inner)
+        | ExprKind::Deref(inner)
+        | ExprKind::AddrOf(inner)
+        | ExprKind::PreInc(inner)
+        | ExprKind::PreDec(inner)
+        | ExprKind::PostInc(inner)
+        | ExprKind::PostDec(inner) => {
             extract_called_functions_inner(inner, interner, result);
         }
-        Expr::Member { expr, .. } | Expr::PtrMember { expr, .. } => {
+        ExprKind::Member { expr, .. } | ExprKind::PtrMember { expr, .. } => {
             extract_called_functions_inner(expr, interner, result);
         }
-        Expr::Index { expr, index, .. } => {
+        ExprKind::Index { expr, index } => {
             extract_called_functions_inner(expr, interner, result);
             extract_called_functions_inner(index, interner, result);
         }
-        Expr::Cast { expr, .. } => {
+        ExprKind::Cast { expr, .. } => {
             extract_called_functions_inner(expr, interner, result);
         }
-        Expr::Sizeof(inner, _) => {
+        ExprKind::Sizeof(inner) => {
             extract_called_functions_inner(inner, interner, result);
         }
-        Expr::Conditional { cond, then_expr, else_expr, .. } => {
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
             extract_called_functions_inner(cond, interner, result);
             extract_called_functions_inner(then_expr, interner, result);
             extract_called_functions_inner(else_expr, interner, result);
         }
-        Expr::Comma { lhs, rhs, .. } => {
+        ExprKind::Comma { lhs, rhs } => {
             extract_called_functions_inner(lhs, interner, result);
             extract_called_functions_inner(rhs, interner, result);
         }
-        Expr::Assign { lhs, rhs, .. } => {
+        ExprKind::Assign { lhs, rhs, .. } => {
             extract_called_functions_inner(lhs, interner, result);
             extract_called_functions_inner(rhs, interner, result);
         }
-        Expr::StmtExpr(compound, _) => {
+        ExprKind::StmtExpr(compound) => {
             extract_called_functions_from_compound(compound, interner, result);
         }
         // リテラルや識別子は走査不要
-        Expr::Ident(_, _)
-        | Expr::IntLit(_, _)
-        | Expr::UIntLit(_, _)
-        | Expr::FloatLit(_, _)
-        | Expr::CharLit(_, _)
-        | Expr::StringLit(_, _)
-        | Expr::SizeofType(_, _)
-        | Expr::Alignof(_, _)
-        | Expr::CompoundLit { .. } => {}
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_)
+        | ExprKind::Alignof(_)
+        | ExprKind::CompoundLit { .. } => {}
     }
 }
 

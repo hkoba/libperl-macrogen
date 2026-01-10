@@ -2,9 +2,45 @@
 //!
 //! C11規格に基づくAST定義。
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::intern::InternedStr;
 use crate::source::SourceLocation;
 use crate::token::Comment;
+
+// ============================================================================
+// ExprId - 式の一意識別子
+// ============================================================================
+
+/// 式ID（一意の通し番号）
+///
+/// 各式ノードに一意のIDを付与することで、型推論結果の紐付けに使用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ExprId(pub u64);
+
+/// ExprId 生成用のグローバルカウンター
+static EXPR_ID_COUNTER: AtomicU64 = AtomicU64::new(1); // 0 は無効値として予約
+
+impl ExprId {
+    /// 新しい一意のIDを生成
+    pub fn next() -> Self {
+        Self(EXPR_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 無効なID
+    pub const INVALID: Self = Self(0);
+
+    /// IDが有効かどうか
+    pub fn is_valid(&self) -> bool {
+        self.0 != 0
+    }
+}
+
+impl std::fmt::Display for ExprId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExprId({})", self.0)
+    }
+}
 
 // ============================================================================
 // マクロ展開情報
@@ -465,62 +501,56 @@ pub enum BlockItem {
     Stmt(Stmt),
 }
 
-/// 式
+/// 式の種類
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub enum ExprKind {
     // 一次式
-    Ident(InternedStr, SourceLocation),
-    IntLit(i64, SourceLocation),
-    UIntLit(u64, SourceLocation),
-    FloatLit(f64, SourceLocation),
-    CharLit(u8, SourceLocation),
-    StringLit(Vec<u8>, SourceLocation),
+    Ident(InternedStr),
+    IntLit(i64),
+    UIntLit(u64),
+    FloatLit(f64),
+    CharLit(u8),
+    StringLit(Vec<u8>),
 
     // 後置式
     Index {
         expr: Box<Expr>,
         index: Box<Expr>,
-        loc: SourceLocation,
     },
     Call {
         func: Box<Expr>,
         args: Vec<Expr>,
-        loc: SourceLocation,
     },
     Member {
         expr: Box<Expr>,
         member: InternedStr,
-        loc: SourceLocation,
     },
     PtrMember {
         expr: Box<Expr>,
         member: InternedStr,
-        loc: SourceLocation,
     },
-    PostInc(Box<Expr>, SourceLocation),
-    PostDec(Box<Expr>, SourceLocation),
+    PostInc(Box<Expr>),
+    PostDec(Box<Expr>),
     CompoundLit {
         type_name: Box<TypeName>,
         init: Vec<InitializerItem>,
-        loc: SourceLocation,
     },
 
     // 単項式
-    PreInc(Box<Expr>, SourceLocation),
-    PreDec(Box<Expr>, SourceLocation),
-    AddrOf(Box<Expr>, SourceLocation),
-    Deref(Box<Expr>, SourceLocation),
-    UnaryPlus(Box<Expr>, SourceLocation),
-    UnaryMinus(Box<Expr>, SourceLocation),
-    BitNot(Box<Expr>, SourceLocation),
-    LogNot(Box<Expr>, SourceLocation),
-    Sizeof(Box<Expr>, SourceLocation),
-    SizeofType(Box<TypeName>, SourceLocation),
-    Alignof(Box<TypeName>, SourceLocation),
+    PreInc(Box<Expr>),
+    PreDec(Box<Expr>),
+    AddrOf(Box<Expr>),
+    Deref(Box<Expr>),
+    UnaryPlus(Box<Expr>),
+    UnaryMinus(Box<Expr>),
+    BitNot(Box<Expr>),
+    LogNot(Box<Expr>),
+    Sizeof(Box<Expr>),
+    SizeofType(Box<TypeName>),
+    Alignof(Box<TypeName>),
     Cast {
         type_name: Box<TypeName>,
         expr: Box<Expr>,
-        loc: SourceLocation,
     },
 
     // 二項式
@@ -528,7 +558,6 @@ pub enum Expr {
         op: BinOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
-        loc: SourceLocation,
     },
 
     // 条件式
@@ -536,7 +565,6 @@ pub enum Expr {
         cond: Box<Expr>,
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
-        loc: SourceLocation,
     },
 
     // 代入式
@@ -544,55 +572,42 @@ pub enum Expr {
         op: AssignOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
-        loc: SourceLocation,
     },
 
     // コンマ式
     Comma {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
-        loc: SourceLocation,
     },
 
     // GCC拡張: ステートメント式 ({ ... })
-    StmtExpr(CompoundStmt, SourceLocation),
+    StmtExpr(CompoundStmt),
+}
+
+/// 式ノード
+#[derive(Debug, Clone)]
+pub struct Expr {
+    /// 式の一意識別子
+    pub id: ExprId,
+    /// 式の種類
+    pub kind: ExprKind,
+    /// ソース位置
+    pub loc: SourceLocation,
 }
 
 impl Expr {
-    /// 式の位置情報を取得
-    pub fn loc(&self) -> &SourceLocation {
-        match self {
-            Expr::Ident(_, loc) => loc,
-            Expr::IntLit(_, loc) => loc,
-            Expr::UIntLit(_, loc) => loc,
-            Expr::FloatLit(_, loc) => loc,
-            Expr::CharLit(_, loc) => loc,
-            Expr::StringLit(_, loc) => loc,
-            Expr::Index { loc, .. } => loc,
-            Expr::Call { loc, .. } => loc,
-            Expr::Member { loc, .. } => loc,
-            Expr::PtrMember { loc, .. } => loc,
-            Expr::PostInc(_, loc) => loc,
-            Expr::PostDec(_, loc) => loc,
-            Expr::CompoundLit { loc, .. } => loc,
-            Expr::PreInc(_, loc) => loc,
-            Expr::PreDec(_, loc) => loc,
-            Expr::AddrOf(_, loc) => loc,
-            Expr::Deref(_, loc) => loc,
-            Expr::UnaryPlus(_, loc) => loc,
-            Expr::UnaryMinus(_, loc) => loc,
-            Expr::BitNot(_, loc) => loc,
-            Expr::LogNot(_, loc) => loc,
-            Expr::Sizeof(_, loc) => loc,
-            Expr::SizeofType(_, loc) => loc,
-            Expr::Alignof(_, loc) => loc,
-            Expr::Cast { loc, .. } => loc,
-            Expr::Binary { loc, .. } => loc,
-            Expr::Conditional { loc, .. } => loc,
-            Expr::Assign { loc, .. } => loc,
-            Expr::Comma { loc, .. } => loc,
-            Expr::StmtExpr(_, loc) => loc,
+    /// 新しい式ノードを作成
+    pub fn new(kind: ExprKind, loc: SourceLocation) -> Self {
+        Self {
+            id: ExprId::next(),
+            kind,
+            loc,
         }
+    }
+
+    /// 式の位置情報を取得（後方互換性）
+    pub fn loc(&self) -> &SourceLocation {
+        &self.loc
     }
 }
 

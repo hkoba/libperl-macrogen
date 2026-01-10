@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::ast::{
     AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl,
-    Expr, ForInit, FunctionDef, ParamDecl, Stmt, TypeName, TypeSpec,
+    Expr, ExprKind, ForInit, FunctionDef, ParamDecl, Stmt, TypeName, TypeSpec,
 };
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
@@ -234,21 +234,21 @@ impl<'a> RustCodeGen<'a> {
 
     /// 式をRustコードに変換（Synthesized Attribute 版）
     pub fn expr_to_rust(&self, expr: &Expr) -> CodeFragment {
-        match expr {
-            Expr::IntLit(n, _) => CodeFragment::ok(n.to_string()),
+        match &expr.kind {
+            ExprKind::IntLit(n) => CodeFragment::ok(n.to_string()),
 
-            Expr::UIntLit(n, _) => CodeFragment::ok(format!("{}u64", n)),
+            ExprKind::UIntLit(n) => CodeFragment::ok(format!("{}u64", n)),
 
-            Expr::FloatLit(f, _) => CodeFragment::ok(f.to_string()),
+            ExprKind::FloatLit(f) => CodeFragment::ok(f.to_string()),
 
-            Expr::CharLit(c, _) => CodeFragment::ok(format!("'{}' as c_char", self.escape_char(*c as char))),
+            ExprKind::CharLit(c) => CodeFragment::ok(format!("'{}' as c_char", self.escape_char(*c as char))),
 
-            Expr::StringLit(s, _) => {
+            ExprKind::StringLit(s) => {
                 let escaped = self.escape_bytes(s);
                 CodeFragment::ok(format!("c\"{}\"", escaped))
             }
 
-            Expr::Ident(id, _) => {
+            ExprKind::Ident(id) => {
                 let name = self.interner.get(*id).to_string();
                 if self.is_constant_macro(*id) {
                     CodeFragment::with_constant(name, *id)
@@ -257,7 +257,7 @@ impl<'a> RustCodeGen<'a> {
                 }
             }
 
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let left = self.expr_to_rust(lhs);
                 let right = self.expr_to_rust(rhs);
                 let op_str = self.bin_op_to_rust(op);
@@ -268,33 +268,33 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 単項演算子
-            Expr::UnaryPlus(inner, _) => {
+            ExprKind::UnaryPlus(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(+{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::UnaryMinus(inner, _) => {
+            ExprKind::UnaryMinus(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(-{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::BitNot(inner, _) => {
+            ExprKind::BitNot(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(!{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::LogNot(inner, _) => {
+            ExprKind::LogNot(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(!{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::Deref(inner, _) => {
+            ExprKind::Deref(inner) => {
                 // *ptr-- パターン: ポインタを post-decrement してから dereference
-                if let Expr::PostDec(ptr_expr, _) = inner.as_ref() {
+                if let ExprKind::PostDec(ptr_expr) = &inner.kind {
                     let ptr_frag = self.expr_to_rust(ptr_expr);
                     let mut result = CodeFragment::ok(format!(
                         "{{ let __ptr = {ptr}; {ptr} = {ptr}.sub(1); *__ptr }}",
@@ -304,7 +304,7 @@ impl<'a> RustCodeGen<'a> {
                     return result;
                 }
                 // *ptr++ パターン: ポインタを post-increment してから dereference
-                if let Expr::PostInc(ptr_expr, _) = inner.as_ref() {
+                if let ExprKind::PostInc(ptr_expr) = &inner.kind {
                     let ptr_frag = self.expr_to_rust(ptr_expr);
                     let mut result = CodeFragment::ok(format!(
                         "{{ let __ptr = {ptr}; {ptr} = {ptr}.add(1); *__ptr }}",
@@ -318,13 +318,13 @@ impl<'a> RustCodeGen<'a> {
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::AddrOf(inner, _) => {
+            ExprKind::AddrOf(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("(&{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::PreInc(inner, _) => {
+            ExprKind::PreInc(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::with_issue(
                     format!("/* ++{} */", inner_frag.code),
@@ -333,7 +333,7 @@ impl<'a> RustCodeGen<'a> {
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::PreDec(inner, _) => {
+            ExprKind::PreDec(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::with_issue(
                     format!("/* --{} */", inner_frag.code),
@@ -342,10 +342,10 @@ impl<'a> RustCodeGen<'a> {
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::PostInc(inner, _) => {
+            ExprKind::PostInc(inner) => {
                 // (*ptr)++ パターン: ポインタを dereference した値を post-increment
                 // *ptr がポインタ型の場合は .add(1) を使用
-                if let Expr::Deref(ptr_expr, _) = inner.as_ref() {
+                if let ExprKind::Deref(ptr_expr) = &inner.kind {
                     let ptr_frag = self.expr_to_rust(ptr_expr);
                     let mut result = CodeFragment::ok(format!(
                         "{{ let __ptr = *{ptr}; *{ptr} = (*{ptr}).add(1); __ptr }}",
@@ -362,10 +362,10 @@ impl<'a> RustCodeGen<'a> {
                 result.merge_issues(&inner_frag);
                 result
             }
-            Expr::PostDec(inner, _) => {
+            ExprKind::PostDec(inner) => {
                 // (*ptr)-- パターン: ポインタを dereference した値を post-decrement
                 // *ptr がポインタ型の場合は .sub(1) を使用
-                if let Expr::Deref(ptr_expr, _) = inner.as_ref() {
+                if let ExprKind::Deref(ptr_expr) = &inner.kind {
                     let ptr_frag = self.expr_to_rust(ptr_expr);
                     let mut result = CodeFragment::ok(format!(
                         "{{ let __ptr = *{ptr}; *{ptr} = (*{ptr}).sub(1); __ptr }}",
@@ -384,15 +384,15 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // メンバアクセス
-            Expr::Member { expr, member, .. } => {
-                let expr_frag = self.expr_to_rust(expr);
+            ExprKind::Member { expr: inner_expr, member } => {
+                let expr_frag = self.expr_to_rust(inner_expr);
                 let member_str = self.interner.get(*member);
                 let mut result = CodeFragment::ok(format!("{}.{}", expr_frag.code, member_str));
                 result.merge_issues(&expr_frag);
                 result
             }
-            Expr::PtrMember { expr, member, .. } => {
-                let expr_frag = self.expr_to_rust(expr);
+            ExprKind::PtrMember { expr: inner_expr, member } => {
+                let expr_frag = self.expr_to_rust(inner_expr);
                 let member_str = self.interner.get(*member);
                 // ptr->field => (*ptr).field
                 let mut result = CodeFragment::ok(format!("(*{}).{}", expr_frag.code, member_str));
@@ -400,8 +400,8 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Index { expr, index, .. } => {
-                let expr_frag = self.expr_to_rust(expr);
+            ExprKind::Index { expr: inner_expr, index } => {
+                let expr_frag = self.expr_to_rust(inner_expr);
                 let index_frag = self.expr_to_rust(index);
                 let mut result = CodeFragment::ok(format!("{}[{} as usize]", expr_frag.code, index_frag.code));
                 result.merge_issues(&expr_frag);
@@ -409,10 +409,10 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 // __builtin_expect(x, c) を x に置き換え
                 // GCCの分岐予測ヒントはRustでは実装できないため、第1引数をそのまま返す
-                if let Expr::Ident(id, _) = func.as_ref() {
+                if let ExprKind::Ident(id) = &func.kind {
                     let name = self.interner.get(*id);
                     if name == "__builtin_expect" && args.len() == 2 {
                         return self.expr_to_rust(&args[0]);
@@ -425,7 +425,7 @@ impl<'a> RustCodeGen<'a> {
                     .collect();
 
                 // 呼び出し先がTHX依存かチェック
-                let callee_needs_my_perl = if let Expr::Ident(id, _) = func.as_ref() {
+                let callee_needs_my_perl = if let ExprKind::Ident(id) = &func.kind {
                     self.is_thx_dependent(*id)
                 } else {
                     false
@@ -456,8 +456,8 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Cast { type_name, expr, .. } => {
-                let expr_frag = self.expr_to_rust(expr);
+            ExprKind::Cast { type_name, expr: inner_expr } => {
+                let expr_frag = self.expr_to_rust(inner_expr);
                 let ty_frag = self.type_name_to_rust(type_name);
                 let mut result = CodeFragment::ok(format!("({} as {})", expr_frag.code, ty_frag.code));
                 result.merge_issues(&expr_frag);
@@ -465,28 +465,28 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Sizeof(inner, _) => {
+            ExprKind::Sizeof(inner) => {
                 let inner_frag = self.expr_to_rust(inner);
                 let mut result = CodeFragment::ok(format!("std::mem::size_of_val(&{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
 
-            Expr::SizeofType(type_name, _) => {
+            ExprKind::SizeofType(type_name) => {
                 let ty_frag = self.type_name_to_rust(type_name);
                 let mut result = CodeFragment::ok(format!("std::mem::size_of::<{}>()", ty_frag.code));
                 result.merge_issues(&ty_frag);
                 result
             }
 
-            Expr::Alignof(type_name, _) => {
+            ExprKind::Alignof(type_name) => {
                 let ty_frag = self.type_name_to_rust(type_name);
                 let mut result = CodeFragment::ok(format!("std::mem::align_of::<{}>()", ty_frag.code));
                 result.merge_issues(&ty_frag);
                 result
             }
 
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let cond_frag = self.expr_to_rust(cond);
                 let then_frag = self.expr_to_rust(then_expr);
                 let else_frag = self.expr_to_rust(else_expr);
@@ -500,7 +500,7 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Comma { lhs, rhs, .. } => {
+            ExprKind::Comma { lhs, rhs } => {
                 // Rustではカンマ演算子がないので、ブロック式にする
                 let left_frag = self.expr_to_rust(lhs);
                 let right_frag = self.expr_to_rust(rhs);
@@ -510,7 +510,7 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::Assign { op, lhs, rhs, .. } => {
+            ExprKind::Assign { op, lhs, rhs } => {
                 let left_frag = self.expr_to_rust(lhs);
                 let right_frag = self.expr_to_rust(rhs);
                 let op_str = self.assign_op_to_rust(op);
@@ -520,14 +520,14 @@ impl<'a> RustCodeGen<'a> {
                 result
             }
 
-            Expr::CompoundLit { .. } => {
+            ExprKind::CompoundLit { .. } => {
                 CodeFragment::with_issue(
                     "/* compound literal */",
                     CodeIssue::new(CodeIssueKind::UnsupportedConstruct, "compound literal"),
                 )
             }
 
-            Expr::StmtExpr(compound, _) => {
+            ExprKind::StmtExpr(compound) => {
                 // ({ T x = expr; x; }) パターンを認識して簡略化を試みる
                 if let Some(simplified) = self.try_simplify_stmt_expr(compound) {
                     self.expr_to_rust(&simplified)
@@ -577,8 +577,8 @@ impl<'a> RustCodeGen<'a> {
         };
 
         // 式文が宣言した変数への参照であること
-        match final_stmt.as_ref() {
-            Expr::Ident(id, _) if *id == decl_name => Some(init_expr),
+        match &final_stmt.kind {
+            ExprKind::Ident(id) if *id == decl_name => Some(init_expr),
             _ => None,
         }
     }
@@ -902,13 +902,13 @@ impl<'a> RustCodeGen<'a> {
     /// param->field を (*(param as *const base_type)).field に変換し、
     /// sv_any などのジェネリック戻り値フィールドには `as *mut R` を付加
     fn expr_to_rust_with_generic_cast(&self, expr: &Expr, info: &MacroInfo2) -> CodeFragment {
-        match expr {
+        match &expr.kind {
             // ptr->field パターン: ジェネリックキャストが必要な場合
-            Expr::PtrMember { expr: base, member, .. } => {
+            ExprKind::PtrMember { expr: base, member } => {
                 let member_str = self.interner.get(*member);
 
                 // ベースがジェネリックパラメータかどうかチェック
-                if let Expr::Ident(id, _) = base.as_ref() {
+                if let ExprKind::Ident(id) = &base.kind {
                     if let Some(generic_info) = info.generic_params.get(id) {
                         // ジェネリックパラメータなので基底型にキャスト
                         let param_name = self.interner.get(*id);
@@ -937,8 +937,8 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // キャストを通した PtrMember
-            Expr::Cast { expr: inner, type_name, .. } => {
-                if let Expr::PtrMember { .. } = inner.as_ref() {
+            ExprKind::Cast { expr: inner, type_name } => {
+                if let ExprKind::PtrMember { .. } = &inner.kind {
                     // 内部のPtrMemberを先に処理
                     let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
                     let ty_frag = self.type_name_to_rust(type_name);
@@ -952,7 +952,7 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 二項演算子
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let left = self.expr_to_rust_with_generic_cast(lhs, info);
                 let right = self.expr_to_rust_with_generic_cast(rhs, info);
                 let op_str = self.bin_op_to_rust(op);
@@ -963,14 +963,14 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 単項演算子
-            Expr::Deref(inner, _) => {
+            ExprKind::Deref(inner) => {
                 let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
                 let mut result = CodeFragment::ok(format!("(*{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
                 result
             }
 
-            Expr::AddrOf(inner, _) => {
+            ExprKind::AddrOf(inner) => {
                 let inner_frag = self.expr_to_rust_with_generic_cast(inner, info);
                 let mut result = CodeFragment::ok(format!("(&{})", inner_frag.code));
                 result.merge_issues(&inner_frag);
@@ -978,7 +978,7 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 関数呼び出し
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 let func_frag = self.expr_to_rust_with_generic_cast(func, info);
                 let args_frags: Vec<CodeFragment> = args.iter()
                     .map(|a| self.expr_to_rust_with_generic_cast(a, info))
@@ -994,7 +994,7 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 条件演算子
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let cond_frag = self.expr_to_rust_with_generic_cast(cond, info);
                 let then_frag = self.expr_to_rust_with_generic_cast(then_expr, info);
                 let else_frag = self.expr_to_rust_with_generic_cast(else_expr, info);
@@ -1009,7 +1009,7 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // メンバアクセス (dot operator)
-            Expr::Member { expr: base, member, .. } => {
+            ExprKind::Member { expr: base, member } => {
                 let expr_frag = self.expr_to_rust_with_generic_cast(base, info);
                 let member_str = self.interner.get(*member);
                 let mut result = CodeFragment::ok(format!("{}.{}", expr_frag.code, member_str));
@@ -1018,7 +1018,7 @@ impl<'a> RustCodeGen<'a> {
             }
 
             // 配列添字
-            Expr::Index { expr: base, index, .. } => {
+            ExprKind::Index { expr: base, index } => {
                 let expr_frag = self.expr_to_rust_with_generic_cast(base, info);
                 let index_frag = self.expr_to_rust_with_generic_cast(index, info);
                 let mut result = CodeFragment::ok(format!("{}[{} as usize]", expr_frag.code, index_frag.code));
@@ -1565,7 +1565,7 @@ mod tests {
         let fields = make_fields_dict();
         let codegen = RustCodeGen::new(&interner, &fields);
 
-        let expr = Expr::IntLit(42, SourceLocation::default());
+        let expr = Expr::new(ExprKind::IntLit(42), SourceLocation::default());
         assert_eq!(codegen.expr_to_rust(&expr).code, "42");
     }
 
@@ -1600,7 +1600,7 @@ mod tests {
             generic_return: None,
         };
 
-        let expr = Expr::Ident(x, SourceLocation::default());
+        let expr = Expr::new(ExprKind::Ident(x), SourceLocation::default());
 
         let mut codegen = RustCodeGen::new(&interner, &fields);
         codegen.set_files(&files);
@@ -1641,7 +1641,7 @@ mod tests {
             generic_return: None,
         };
 
-        let expr = Expr::Ident(x, SourceLocation::default());
+        let expr = Expr::new(ExprKind::Ident(x), SourceLocation::default());
 
         let mut codegen = RustCodeGen::new(&interner, &fields);
         codegen.set_files(&files);
@@ -1680,7 +1680,7 @@ mod tests {
             generic_return: None,
         };
 
-        let expr = Expr::Ident(x, SourceLocation::default());
+        let expr = Expr::new(ExprKind::Ident(x), SourceLocation::default());
 
         let mut codegen = RustCodeGen::new(&interner, &fields);
         // No files set
@@ -1702,12 +1702,14 @@ mod tests {
 
         let codegen = RustCodeGen::new(&interner, &fields);
 
-        let expr = Expr::Binary {
-            op: BinOp::Add,
-            lhs: Box::new(Expr::Ident(x, loc.clone())),
-            rhs: Box::new(Expr::Ident(y, loc.clone())),
+        let expr = Expr::new(
+            ExprKind::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(Expr::new(ExprKind::Ident(x), loc.clone())),
+                rhs: Box::new(Expr::new(ExprKind::Ident(y), loc.clone())),
+            },
             loc,
-        };
+        );
         assert_eq!(codegen.expr_to_rust(&expr).code, "(x + y)");
     }
 
@@ -1723,11 +1725,13 @@ mod tests {
         let codegen = RustCodeGen::new(&interner, &fields);
 
         // sv->sv_any
-        let expr = Expr::PtrMember {
-            expr: Box::new(Expr::Ident(sv, loc.clone())),
-            member: sv_any,
+        let expr = Expr::new(
+            ExprKind::PtrMember {
+                expr: Box::new(Expr::new(ExprKind::Ident(sv), loc.clone())),
+                member: sv_any,
+            },
             loc,
-        };
+        );
         assert_eq!(codegen.expr_to_rust(&expr).code, "(*sv).sv_any");
     }
 }

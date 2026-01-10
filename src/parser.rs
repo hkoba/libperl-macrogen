@@ -1092,7 +1092,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
 
         // ラベルのチェック（識別子 : の場合）
         if self.check(&TokenKind::Colon) {
-            if let Expr::Ident(name, _) = expr {
+            if let ExprKind::Ident(name) = expr.kind {
                 self.advance()?;
                 let stmt = self.parse_stmt()?;
                 return Ok(Stmt::Label {
@@ -1269,11 +1269,13 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_expr()?;
-            return Ok(Expr::Comma {
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            return Ok(Expr::new(
+                ExprKind::Comma {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            });
+            ));
         }
 
         Ok(lhs)
@@ -1302,12 +1304,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_assignment_expr()?;
-            return Ok(Expr::Assign {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            return Ok(Expr::new(
+                ExprKind::Assign {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            });
+            ));
         }
 
         Ok(lhs)
@@ -1323,12 +1327,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let then_expr = self.parse_expr()?;
             self.expect(&TokenKind::Colon)?;
             let else_expr = self.parse_conditional_expr()?;
-            return Ok(Expr::Conditional {
-                cond: Box::new(cond),
-                then_expr: Box::new(then_expr),
-                else_expr: Box::new(else_expr),
+            return Ok(Expr::new(
+                ExprKind::Conditional {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                },
                 loc,
-            });
+            ));
         }
 
         Ok(cond)
@@ -1342,12 +1348,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_logical_and_expr()?;
-            lhs = Expr::Binary {
-                op: BinOp::LogOr,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op: BinOp::LogOr,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1361,12 +1369,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_bitwise_or_expr()?;
-            lhs = Expr::Binary {
-                op: BinOp::LogAnd,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op: BinOp::LogAnd,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1380,12 +1390,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_bitwise_xor_expr()?;
-            lhs = Expr::Binary {
-                op: BinOp::BitOr,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op: BinOp::BitOr,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1399,12 +1411,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_bitwise_and_expr()?;
-            lhs = Expr::Binary {
-                op: BinOp::BitXor,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op: BinOp::BitXor,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1418,12 +1432,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_equality_expr()?;
-            lhs = Expr::Binary {
-                op: BinOp::BitAnd,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op: BinOp::BitAnd,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1442,12 +1458,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_relational_expr()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1468,12 +1486,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_shift_expr()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1492,12 +1512,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_additive_expr()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1516,12 +1538,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_multiplicative_expr()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1541,12 +1565,14 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?;
             let rhs = self.parse_cast_expr()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            lhs = Expr::new(
+                ExprKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
                 loc,
-            };
+            );
         }
 
         Ok(lhs)
@@ -1579,25 +1605,30 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         self.advance()?;
                     }
                     self.expect(&TokenKind::RBrace)?;
-                    return Ok(Expr::CompoundLit {
-                        type_name: Box::new(type_name),
-                        init: items,
+                    return Ok(Expr::new(
+                        ExprKind::CompoundLit {
+                            type_name: Box::new(type_name),
+                            init: items,
+                        },
                         loc,
-                    });
+                    ));
                 }
 
                 let expr = self.parse_cast_expr()?;
-                return Ok(Expr::Cast {
-                    type_name: Box::new(type_name),
-                    expr: Box::new(expr),
+                return Ok(Expr::new(
+                    ExprKind::Cast {
+                        type_name: Box::new(type_name),
+                        expr: Box::new(expr),
+                    },
                     loc,
-                });
+                ));
             } else if self.check(&TokenKind::LBrace) {
                 // GCC拡張: ステートメント式 ({ ... })
                 let stmt = self.parse_compound_stmt()?;
                 self.expect(&TokenKind::RParen)?;
                 // ステートメント式の後もpostfixを許可する
-                return self.parse_postfix_on(Expr::StmtExpr(stmt, loc));
+                let stmt_expr = Expr::new(ExprKind::StmtExpr(stmt), loc);
+                return self.parse_postfix_on(stmt_expr);
             } else {
                 // 括弧で囲まれた式 - parse_primary_exprに任せる
                 // いったん戻してparse_unary_exprに任せる
@@ -1621,11 +1652,13 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     self.advance()?;
                     let index = self.parse_expr()?;
                     self.expect(&TokenKind::RBracket)?;
-                    expr = Expr::Index {
-                        expr: Box::new(expr),
-                        index: Box::new(index),
+                    expr = Expr::new(
+                        ExprKind::Index {
+                            expr: Box::new(expr),
+                            index: Box::new(index),
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::LParen => {
                     self.advance()?;
@@ -1638,37 +1671,43 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         self.advance()?;
                     }
                     self.expect(&TokenKind::RParen)?;
-                    expr = Expr::Call {
-                        func: Box::new(expr),
-                        args,
+                    expr = Expr::new(
+                        ExprKind::Call {
+                            func: Box::new(expr),
+                            args,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::Dot => {
                     self.advance()?;
                     let member = self.expect_ident()?;
-                    expr = Expr::Member {
-                        expr: Box::new(expr),
-                        member,
+                    expr = Expr::new(
+                        ExprKind::Member {
+                            expr: Box::new(expr),
+                            member,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::Arrow => {
                     self.advance()?;
                     let member = self.expect_ident()?;
-                    expr = Expr::PtrMember {
-                        expr: Box::new(expr),
-                        member,
+                    expr = Expr::new(
+                        ExprKind::PtrMember {
+                            expr: Box::new(expr),
+                            member,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::PlusPlus => {
                     self.advance()?;
-                    expr = Expr::PostInc(Box::new(expr), loc);
+                    expr = Expr::new(ExprKind::PostInc(Box::new(expr)), loc);
                 }
                 TokenKind::MinusMinus => {
                     self.advance()?;
-                    expr = Expr::PostDec(Box::new(expr), loc);
+                    expr = Expr::new(ExprKind::PostDec(Box::new(expr)), loc);
                 }
                 _ => break,
             }
@@ -1684,42 +1723,42 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             TokenKind::PlusPlus => {
                 self.advance()?;
                 let expr = self.parse_unary_expr()?;
-                Ok(Expr::PreInc(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::PreInc(Box::new(expr)), loc))
             }
             TokenKind::MinusMinus => {
                 self.advance()?;
                 let expr = self.parse_unary_expr()?;
-                Ok(Expr::PreDec(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::PreDec(Box::new(expr)), loc))
             }
             TokenKind::Amp => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::AddrOf(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::AddrOf(Box::new(expr)), loc))
             }
             TokenKind::Star => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::Deref(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::Deref(Box::new(expr)), loc))
             }
             TokenKind::Plus => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::UnaryPlus(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::UnaryPlus(Box::new(expr)), loc))
             }
             TokenKind::Minus => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::UnaryMinus(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::UnaryMinus(Box::new(expr)), loc))
             }
             TokenKind::Tilde => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::BitNot(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::BitNot(Box::new(expr)), loc))
             }
             TokenKind::Bang => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
-                Ok(Expr::LogNot(Box::new(expr), loc))
+                Ok(Expr::new(ExprKind::LogNot(Box::new(expr)), loc))
             }
             TokenKind::KwSizeof => {
                 self.advance()?;
@@ -1729,16 +1768,16 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         // sizeof(type)
                         let type_name = self.parse_type_name()?;
                         self.expect(&TokenKind::RParen)?;
-                        Ok(Expr::SizeofType(Box::new(type_name), loc))
+                        Ok(Expr::new(ExprKind::SizeofType(Box::new(type_name)), loc))
                     } else {
                         // sizeof(expr) - 括弧付きの式
                         let expr = self.parse_expr()?;
                         self.expect(&TokenKind::RParen)?;
-                        Ok(Expr::Sizeof(Box::new(expr), loc))
+                        Ok(Expr::new(ExprKind::Sizeof(Box::new(expr)), loc))
                     }
                 } else {
                     let expr = self.parse_unary_expr()?;
-                    Ok(Expr::Sizeof(Box::new(expr), loc))
+                    Ok(Expr::new(ExprKind::Sizeof(Box::new(expr)), loc))
                 }
             }
             TokenKind::KwAlignof | TokenKind::KwAlignof2 | TokenKind::KwAlignof3 => {
@@ -1746,7 +1785,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 self.expect(&TokenKind::LParen)?;
                 let type_name = self.parse_type_name()?;
                 self.expect(&TokenKind::RParen)?;
-                Ok(Expr::Alignof(Box::new(type_name), loc))
+                Ok(Expr::new(ExprKind::Alignof(Box::new(type_name)), loc))
             }
             // GCC拡張: __extension__ は無視して続行（TinyCC方式）
             TokenKind::KwExtension => {
@@ -1768,11 +1807,13 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     self.advance()?;
                     let index = self.parse_expr()?;
                     self.expect(&TokenKind::RBracket)?;
-                    expr = Expr::Index {
-                        expr: Box::new(expr),
-                        index: Box::new(index),
+                    expr = Expr::new(
+                        ExprKind::Index {
+                            expr: Box::new(expr),
+                            index: Box::new(index),
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::LParen => {
                     self.advance()?;
@@ -1787,37 +1828,43 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         }
                     }
                     self.expect(&TokenKind::RParen)?;
-                    expr = Expr::Call {
-                        func: Box::new(expr),
-                        args,
+                    expr = Expr::new(
+                        ExprKind::Call {
+                            func: Box::new(expr),
+                            args,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::Dot => {
                     self.advance()?;
                     let member = self.expect_ident()?;
-                    expr = Expr::Member {
-                        expr: Box::new(expr),
-                        member,
+                    expr = Expr::new(
+                        ExprKind::Member {
+                            expr: Box::new(expr),
+                            member,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::Arrow => {
                     self.advance()?;
                     let member = self.expect_ident()?;
-                    expr = Expr::PtrMember {
-                        expr: Box::new(expr),
-                        member,
+                    expr = Expr::new(
+                        ExprKind::PtrMember {
+                            expr: Box::new(expr),
+                            member,
+                        },
                         loc,
-                    };
+                    );
                 }
                 TokenKind::PlusPlus => {
                     self.advance()?;
-                    expr = Expr::PostInc(Box::new(expr), loc);
+                    expr = Expr::new(ExprKind::PostInc(Box::new(expr)), loc);
                 }
                 TokenKind::MinusMinus => {
                     self.advance()?;
-                    expr = Expr::PostDec(Box::new(expr), loc);
+                    expr = Expr::new(ExprKind::PostDec(Box::new(expr)), loc);
                 }
                 _ => break,
             }
@@ -1834,27 +1881,27 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             TokenKind::Ident(id) => {
                 let id = *id;
                 self.advance()?;
-                Ok(Expr::Ident(id, loc))
+                Ok(Expr::new(ExprKind::Ident(id), loc))
             }
             TokenKind::IntLit(n) => {
                 let n = *n;
                 self.advance()?;
-                Ok(Expr::IntLit(n, loc))
+                Ok(Expr::new(ExprKind::IntLit(n), loc))
             }
             TokenKind::UIntLit(n) => {
                 let n = *n;
                 self.advance()?;
-                Ok(Expr::UIntLit(n, loc))
+                Ok(Expr::new(ExprKind::UIntLit(n), loc))
             }
             TokenKind::FloatLit(f) => {
                 let f = *f;
                 self.advance()?;
-                Ok(Expr::FloatLit(f, loc))
+                Ok(Expr::new(ExprKind::FloatLit(f), loc))
             }
             TokenKind::CharLit(c) => {
                 let c = *c;
                 self.advance()?;
-                Ok(Expr::CharLit(c, loc))
+                Ok(Expr::new(ExprKind::CharLit(c), loc))
             }
             TokenKind::StringLit(s) => {
                 let mut bytes = s.clone();
@@ -1864,7 +1911,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     bytes.extend_from_slice(s2);
                     self.advance()?;
                 }
-                Ok(Expr::StringLit(bytes, loc))
+                Ok(Expr::new(ExprKind::StringLit(bytes), loc))
             }
             TokenKind::LParen => {
                 self.advance()?;
@@ -1872,7 +1919,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 if self.check(&TokenKind::LBrace) {
                     let stmt = self.parse_compound_stmt()?;
                     self.expect(&TokenKind::RParen)?;
-                    Ok(Expr::StmtExpr(stmt, loc))
+                    Ok(Expr::new(ExprKind::StmtExpr(stmt), loc))
                 } else {
                     let expr = self.parse_expr()?;
                     self.expect(&TokenKind::RParen)?;

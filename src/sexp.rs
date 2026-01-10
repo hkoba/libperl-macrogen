@@ -427,44 +427,44 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
 
     /// 式を出力
     fn print_expr(&mut self, expr: &Expr) -> Result<()> {
-        match expr {
-            Expr::Ident(id, _) => {
+        match &expr.kind {
+            ExprKind::Ident(id) => {
                 self.write_open("ident")?;
                 write!(self.writer, " {}", self.interner.get(*id))?;
                 self.write_close()
             }
-            Expr::IntLit(n, _) => {
+            ExprKind::IntLit(n) => {
                 self.write_open("int")?;
                 write!(self.writer, " {}", n)?;
                 self.write_close()
             }
-            Expr::UIntLit(n, _) => {
+            ExprKind::UIntLit(n) => {
                 self.write_open("uint")?;
                 write!(self.writer, " {}", n)?;
                 self.write_close()
             }
-            Expr::FloatLit(f, _) => {
+            ExprKind::FloatLit(f) => {
                 self.write_open("float")?;
                 write!(self.writer, " {}", f)?;
                 self.write_close()
             }
-            Expr::CharLit(c, _) => {
+            ExprKind::CharLit(c) => {
                 self.write_open("char")?;
                 write!(self.writer, " {}", c)?;
                 self.write_close()
             }
-            Expr::StringLit(s, _) => {
+            ExprKind::StringLit(s) => {
                 self.write_open("string")?;
                 write!(self.writer, " {:?}", String::from_utf8_lossy(s))?;
                 self.write_close()
             }
-            Expr::Index { expr, index, .. } => {
+            ExprKind::Index { expr, index } => {
                 self.write_open("index")?;
                 self.print_expr(expr)?;
                 self.print_expr(index)?;
                 self.write_close()
             }
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 self.write_open("call")?;
                 self.print_expr(func)?;
                 for arg in args {
@@ -472,29 +472,29 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 }
                 self.write_close()
             }
-            Expr::Member { expr, member, .. } => {
+            ExprKind::Member { expr, member } => {
                 self.write_open("member")?;
                 self.print_expr(expr)?;
                 write!(self.writer, " {}", self.interner.get(*member))?;
                 self.write_close()
             }
-            Expr::PtrMember { expr, member, .. } => {
+            ExprKind::PtrMember { expr, member } => {
                 self.write_open("ptr-member")?;
                 self.print_expr(expr)?;
                 write!(self.writer, " {}", self.interner.get(*member))?;
                 self.write_close()
             }
-            Expr::PostInc(e, _) => {
+            ExprKind::PostInc(e) => {
                 self.write_open("post-inc")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::PostDec(e, _) => {
+            ExprKind::PostDec(e) => {
                 self.write_open("post-dec")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::CompoundLit { type_name, init, .. } => {
+            ExprKind::CompoundLit { type_name, init } => {
                 self.write_open("compound-lit")?;
                 self.print_type_name(type_name)?;
                 for item in init {
@@ -502,68 +502,68 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 }
                 self.write_close()
             }
-            Expr::PreInc(e, _) => {
+            ExprKind::PreInc(e) => {
                 self.write_open("pre-inc")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::PreDec(e, _) => {
+            ExprKind::PreDec(e) => {
                 self.write_open("pre-dec")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::AddrOf(e, _) => {
+            ExprKind::AddrOf(e) => {
                 self.write_open("addr-of")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::Deref(e, _) => {
+            ExprKind::Deref(e) => {
                 self.write_open("deref")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::UnaryPlus(e, _) => {
+            ExprKind::UnaryPlus(e) => {
                 self.write_open("unary-plus")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::UnaryMinus(e, _) => {
+            ExprKind::UnaryMinus(e) => {
                 self.write_open("unary-minus")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::BitNot(e, _) => {
+            ExprKind::BitNot(e) => {
                 self.write_open("bit-not")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::LogNot(e, _) => {
+            ExprKind::LogNot(e) => {
                 self.write_open("log-not")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::Sizeof(e, _) => {
+            ExprKind::Sizeof(e) => {
                 self.write_open("sizeof")?;
                 self.print_expr(e)?;
                 self.write_close()
             }
-            Expr::SizeofType(ty, _) => {
+            ExprKind::SizeofType(ty) => {
                 self.write_open("sizeof-type")?;
                 self.print_type_name(ty)?;
                 self.write_close()
             }
-            Expr::Alignof(ty, _) => {
+            ExprKind::Alignof(ty) => {
                 self.write_open("alignof")?;
                 self.print_type_name(ty)?;
                 self.write_close()
             }
-            Expr::Cast { type_name, expr, .. } => {
+            ExprKind::Cast { type_name, expr } => {
                 self.write_open("cast")?;
                 self.print_type_name(type_name)?;
                 self.print_expr(expr)?;
                 self.write_close()
             }
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let op_str = match op {
                     BinOp::Mul => "*",
                     BinOp::Div => "/",
@@ -589,14 +589,14 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.print_expr(rhs)?;
                 self.write_close()
             }
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 self.write_open("?")?;
                 self.print_expr(cond)?;
                 self.print_expr(then_expr)?;
                 self.print_expr(else_expr)?;
                 self.write_close()
             }
-            Expr::Assign { op, lhs, rhs, .. } => {
+            ExprKind::Assign { op, lhs, rhs } => {
                 let op_str = match op {
                     AssignOp::Assign => "=",
                     AssignOp::MulAssign => "*=",
@@ -615,13 +615,13 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.print_expr(rhs)?;
                 self.write_close()
             }
-            Expr::Comma { lhs, rhs, .. } => {
+            ExprKind::Comma { lhs, rhs } => {
                 self.write_open(",")?;
                 self.print_expr(lhs)?;
                 self.print_expr(rhs)?;
                 self.write_close()
             }
-            Expr::StmtExpr(stmt, _) => {
+            ExprKind::StmtExpr(stmt) => {
                 self.write_open("stmt-expr")?;
                 self.print_compound_stmt(stmt)?;
                 self.write_close()
@@ -1165,33 +1165,33 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
 
     /// 式を出力（型注釈付き）
     pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
-        match expr {
-            Expr::Ident(id, _) => {
+        match &expr.kind {
+            ExprKind::Ident(id) => {
                 write!(self.writer, "(ident {})", self.interner.get(*id))?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::IntLit(n, _) => {
+            ExprKind::IntLit(n) => {
                 write!(self.writer, "(int {})", n)?;
                 write!(self.writer, " :type int")?;
             }
-            Expr::UIntLit(n, _) => {
+            ExprKind::UIntLit(n) => {
                 write!(self.writer, "(uint {})", n)?;
                 write!(self.writer, " :type unsigned int")?;
             }
-            Expr::FloatLit(f, _) => {
+            ExprKind::FloatLit(f) => {
                 write!(self.writer, "(float {})", f)?;
                 write!(self.writer, " :type double")?;
             }
-            Expr::CharLit(c, _) => {
+            ExprKind::CharLit(c) => {
                 write!(self.writer, "(char {})", c)?;
                 write!(self.writer, " :type int")?;
             }
-            Expr::StringLit(s, _) => {
+            ExprKind::StringLit(s) => {
                 write!(self.writer, "(string {:?})", String::from_utf8_lossy(s))?;
                 write!(self.writer, " :type char*")?;
             }
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let op_str = match op {
                     BinOp::Mul => "*",
                     BinOp::Div => "/",
@@ -1220,7 +1220,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Assign { op, lhs, rhs, .. } => {
+            ExprKind::Assign { op, lhs, rhs } => {
                 let op_str = match op {
                     AssignOp::Assign => "=",
                     AssignOp::MulAssign => "*=",
@@ -1242,7 +1242,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Cast { type_name, expr: inner, .. } => {
+            ExprKind::Cast { type_name, expr: inner } => {
                 write!(self.writer, "(cast ")?;
                 self.print_type_name(type_name)?;
                 write!(self.writer, " ")?;
@@ -1251,7 +1251,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 write!(self.writer, "(call ")?;
                 self.print_expr(func)?;
                 for arg in args {
@@ -1262,21 +1262,21 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Member { expr: base, member, .. } => {
+            ExprKind::Member { expr: base, member } => {
                 write!(self.writer, "(member ")?;
                 self.print_expr(base)?;
                 write!(self.writer, " {})", self.interner.get(*member))?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::PtrMember { expr: base, member, .. } => {
+            ExprKind::PtrMember { expr: base, member } => {
                 write!(self.writer, "(ptr-member ")?;
                 self.print_expr(base)?;
                 write!(self.writer, " {})", self.interner.get(*member))?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Index { expr: base, index, .. } => {
+            ExprKind::Index { expr: base, index } => {
                 write!(self.writer, "(index ")?;
                 self.print_expr(base)?;
                 write!(self.writer, " ")?;
@@ -1285,94 +1285,94 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::AddrOf(inner, _) => {
+            ExprKind::AddrOf(inner) => {
                 write!(self.writer, "(addr-of ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Deref(inner, _) => {
+            ExprKind::Deref(inner) => {
                 write!(self.writer, "(deref ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::UnaryPlus(inner, _) => {
+            ExprKind::UnaryPlus(inner) => {
                 write!(self.writer, "(unary-plus ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::UnaryMinus(inner, _) => {
+            ExprKind::UnaryMinus(inner) => {
                 write!(self.writer, "(unary-minus ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::BitNot(inner, _) => {
+            ExprKind::BitNot(inner) => {
                 write!(self.writer, "(bit-not ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::LogNot(inner, _) => {
+            ExprKind::LogNot(inner) => {
                 write!(self.writer, "(log-not ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type int")?;
             }
-            Expr::PreInc(inner, _) => {
+            ExprKind::PreInc(inner) => {
                 write!(self.writer, "(pre-inc ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::PreDec(inner, _) => {
+            ExprKind::PreDec(inner) => {
                 write!(self.writer, "(pre-dec ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::PostInc(inner, _) => {
+            ExprKind::PostInc(inner) => {
                 write!(self.writer, "(post-inc ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::PostDec(inner, _) => {
+            ExprKind::PostDec(inner) => {
                 write!(self.writer, "(post-dec ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Sizeof(inner, _) => {
+            ExprKind::Sizeof(inner) => {
                 write!(self.writer, "(sizeof ")?;
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type unsigned long")?;
             }
-            Expr::SizeofType(ty, _) => {
+            ExprKind::SizeofType(ty) => {
                 write!(self.writer, "(sizeof-type ")?;
                 self.print_type_name(ty)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type unsigned long")?;
             }
-            Expr::Alignof(ty, _) => {
+            ExprKind::Alignof(ty) => {
                 write!(self.writer, "(alignof ")?;
                 self.print_type_name(ty)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type unsigned long")?;
             }
-            Expr::Conditional { cond, then_expr, else_expr, .. } => {
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
                 write!(self.writer, "(? ")?;
                 self.print_expr(cond)?;
                 write!(self.writer, " ")?;
@@ -1383,7 +1383,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::Comma { lhs, rhs, .. } => {
+            ExprKind::Comma { lhs, rhs } => {
                 write!(self.writer, "(, ")?;
                 self.print_expr(lhs)?;
                 write!(self.writer, " ")?;
@@ -1392,7 +1392,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::CompoundLit { type_name, init, .. } => {
+            ExprKind::CompoundLit { type_name, init } => {
                 write!(self.writer, "(compound-lit ")?;
                 self.print_type_name(type_name)?;
                 for item in init {
@@ -1402,7 +1402,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 let ty = self.analyzer.infer_expr_type(expr);
                 write!(self.writer, " :type {}", self.type_to_string(&ty))?;
             }
-            Expr::StmtExpr(compound, _) => {
+            ExprKind::StmtExpr(compound) => {
                 write!(self.writer, "(stmt-expr")?;
                 self.print_compound_stmt(compound)?;
                 write!(self.writer, ")")?;

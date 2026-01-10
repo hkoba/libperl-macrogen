@@ -521,7 +521,7 @@ impl<'a> SemanticAnalyzer<'a> {
     /// 式から引数に対する制約を収集
     fn collect_arg_constraint(&mut self, arg: &Expr, func_name: InternedStr, arg_index: usize) {
         // 引数が型変数として登録されている識別子かチェック
-        if let Expr::Ident(name, _) = arg {
+        if let ExprKind::Ident(name) = &arg.kind {
             if let Some(&var) = self.type_vars.get(name) {
                 self.add_constraint(TypeConstraint::FunctionArg {
                     var,
@@ -735,16 +735,16 @@ impl<'a> SemanticAnalyzer<'a> {
 
     /// 式の型を推論
     pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
-        match expr {
+        match &expr.kind {
             // リテラル
-            Expr::IntLit(_, _) => Type::Int,
-            Expr::UIntLit(_, _) => Type::UnsignedInt,
-            Expr::FloatLit(_, _) => Type::Double, // C のデフォルト
-            Expr::CharLit(_, _) => Type::Int,     // char literalはint
-            Expr::StringLit(_, _) => Type::Pointer(Box::new(Type::Char), TypeQualifiers::default()),
+            ExprKind::IntLit(_) => Type::Int,
+            ExprKind::UIntLit(_) => Type::UnsignedInt,
+            ExprKind::FloatLit(_) => Type::Double, // C のデフォルト
+            ExprKind::CharLit(_) => Type::Int,     // char literalはint
+            ExprKind::StringLit(_) => Type::Pointer(Box::new(Type::Char), TypeQualifiers::default()),
 
             // 識別子
-            Expr::Ident(name, _) => {
+            ExprKind::Ident(name) => {
                 if let Some(sym) = self.lookup_symbol(*name) {
                     sym.ty.clone()
                 } else {
@@ -753,15 +753,15 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 後置演算子
-            Expr::PostInc(inner, _) | Expr::PostDec(inner, _) => self.infer_expr_type(inner),
+            ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => self.infer_expr_type(inner),
 
             // 前置演算子
-            Expr::PreInc(inner, _) | Expr::PreDec(inner, _) => self.infer_expr_type(inner),
-            Expr::AddrOf(inner, _) => {
+            ExprKind::PreInc(inner) | ExprKind::PreDec(inner) => self.infer_expr_type(inner),
+            ExprKind::AddrOf(inner) => {
                 let inner_ty = self.infer_expr_type(inner);
                 Type::Pointer(Box::new(inner_ty), TypeQualifiers::default())
             }
-            Expr::Deref(inner, _) => {
+            ExprKind::Deref(inner) => {
                 let inner_ty = self.infer_expr_type(inner);
                 if let Type::Pointer(elem, _) = inner_ty {
                     *elem
@@ -769,17 +769,17 @@ impl<'a> SemanticAnalyzer<'a> {
                     Type::Unknown
                 }
             }
-            Expr::UnaryPlus(inner, _) | Expr::UnaryMinus(inner, _) => self.infer_expr_type(inner),
-            Expr::BitNot(inner, _) => self.infer_expr_type(inner),
-            Expr::LogNot(_, _) => Type::Int,
-            Expr::Sizeof(_, _) | Expr::SizeofType(_, _) => Type::UnsignedLong,
-            Expr::Alignof(_, _) => Type::UnsignedLong,
+            ExprKind::UnaryPlus(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type(inner),
+            ExprKind::BitNot(inner) => self.infer_expr_type(inner),
+            ExprKind::LogNot(_) => Type::Int,
+            ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Type::UnsignedLong,
+            ExprKind::Alignof(_) => Type::UnsignedLong,
 
             // キャスト
-            Expr::Cast { type_name, .. } => self.resolve_type_name(type_name),
+            ExprKind::Cast { type_name, .. } => self.resolve_type_name(type_name),
 
             // 二項演算子
-            Expr::Binary { op, lhs, rhs, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let lhs_ty = self.infer_expr_type(lhs);
                 let rhs_ty = self.infer_expr_type(rhs);
                 match op {
@@ -798,17 +798,17 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 条件演算子
-            Expr::Conditional { then_expr, else_expr, .. } => {
+            ExprKind::Conditional { then_expr, else_expr, .. } => {
                 let then_ty = self.infer_expr_type(then_expr);
                 let else_ty = self.infer_expr_type(else_expr);
                 self.usual_arithmetic_conversion(&then_ty, &else_ty)
             }
 
             // 関数呼び出し
-            Expr::Call { func, args, .. } => {
+            ExprKind::Call { func, args } => {
                 // 制約収集モードの場合、引数の制約を収集
                 if self.constraint_mode {
-                    if let Expr::Ident(func_name, _) = func.as_ref() {
+                    if let ExprKind::Ident(func_name) = &func.kind {
                         for (i, arg) in args.iter().enumerate() {
                             self.collect_arg_constraint(arg, *func_name, i);
                         }
@@ -825,7 +825,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
                 // シンボルテーブルで見つからない場合、ApidocDict を検索
-                if let Expr::Ident(func_name, _) = func.as_ref() {
+                if let ExprKind::Ident(func_name) = &func.kind {
                     if let Some(ret_ty) = self.lookup_apidoc_return_type(*func_name) {
                         return ret_ty;
                     }
@@ -834,16 +834,16 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // メンバーアクセス
-            Expr::Member { expr: base, member, .. } => {
+            ExprKind::Member { expr: base, member } => {
                 let base_ty = self.infer_expr_type(base);
                 self.lookup_member_type(&base_ty, *member)
             }
 
             // ポインタメンバーアクセス
-            Expr::PtrMember { expr: base, member, .. } => {
+            ExprKind::PtrMember { expr: base, member } => {
                 // 制約収集モードの場合、フィールドアクセス制約を収集
                 if self.constraint_mode {
-                    if let Expr::Ident(name, _) = base.as_ref() {
+                    if let ExprKind::Ident(name) = &base.kind {
                         if let Some(&var) = self.type_vars.get(name) {
                             self.add_constraint(TypeConstraint::HasField {
                                 var,
@@ -862,7 +862,7 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 配列添字
-            Expr::Index { expr: base, .. } => {
+            ExprKind::Index { expr: base, .. } => {
                 let base_ty = self.infer_expr_type(base);
                 match base_ty {
                     Type::Pointer(inner, _) => *inner,
@@ -872,16 +872,16 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 代入演算子
-            Expr::Assign { lhs, .. } => self.infer_expr_type(lhs),
+            ExprKind::Assign { lhs, .. } => self.infer_expr_type(lhs),
 
             // コンマ演算子
-            Expr::Comma { rhs, .. } => self.infer_expr_type(rhs),
+            ExprKind::Comma { rhs, .. } => self.infer_expr_type(rhs),
 
             // 複合リテラル
-            Expr::CompoundLit { type_name, .. } => self.resolve_type_name(type_name),
+            ExprKind::CompoundLit { type_name, .. } => self.resolve_type_name(type_name),
 
             // Statement Expression (GCC拡張)
-            Expr::StmtExpr(compound, _) => {
+            ExprKind::StmtExpr(compound) => {
                 // 最後の式文の型を返す
                 if let Some(last) = compound.items.last() {
                     if let BlockItem::Stmt(Stmt::Expr(Some(expr), _)) = last {
