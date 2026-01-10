@@ -12,7 +12,7 @@ use clap::Parser as ClapParser;
 use libperl_macrogen::{
     generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict, CallbackPair,
     CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
-    MacrogenBuilder, PPConfig, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
+    MacrogenBuilder, PPConfig, ParseResult, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
     SourceLocation, ThxCollector, TokenKind, TypedSexpPrinter,
 };
 
@@ -545,6 +545,20 @@ fn run_infer_macro_types(
             info.uses.len(),
             thx_marker
         );
+
+        // 型付き S 式を追加出力
+        if let ParseResult::Expression(ref expr) = info.parse_result {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            let mut printer = TypedSexpPrinter::new(
+                &mut handle,
+                interner,
+                Some(&apidoc),
+                Some(&fields_dict),
+            );
+            let _ = printer.print_expr(expr);
+            let _ = writeln!(handle);
+        }
 
         // 型制約の詳細
         if constraint_count > 0 {
