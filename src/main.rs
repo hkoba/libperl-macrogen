@@ -558,6 +558,7 @@ fn run_infer_macro_types(
             );
             printer.set_pretty(true);
             printer.set_indent(1);  // 行頭にスペース1文字分のインデント
+            printer.set_skip_first_newline(true);  // 先頭の空行を抑制
             let _ = printer.print_expr(expr);
             let _ = writeln!(handle);
         }

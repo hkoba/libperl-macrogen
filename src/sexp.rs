@@ -694,6 +694,8 @@ pub struct TypedSexpPrinter<'a, W: Write> {
     emit_expr_id: bool,
     /// 整形出力の有無
     pretty: bool,
+    /// 先頭の改行をスキップするか（次回の print_expr でクリアされる）
+    skip_first_newline: bool,
 }
 
 impl<'a, W: Write> TypedSexpPrinter<'a, W> {
@@ -711,6 +713,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
             indent: 0,
             emit_expr_id: false,
             pretty: false,
+            skip_first_newline: false,
         }
     }
 
@@ -722,6 +725,11 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     /// 初期インデントを設定
     pub fn set_indent(&mut self, indent: usize) {
         self.indent = indent;
+    }
+
+    /// 先頭の改行をスキップするかを設定
+    pub fn set_skip_first_newline(&mut self, skip: bool) {
+        self.skip_first_newline = skip;
     }
 
     /// ExprId の出力を有効/無効にする
@@ -1188,7 +1196,12 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         // prettyモードでは改行+インデントを出力
         if self.pretty {
-            writeln!(self.writer)?;
+            // skip_first_newline が true の場合は最初の改行をスキップ
+            if self.skip_first_newline {
+                self.skip_first_newline = false;
+            } else {
+                writeln!(self.writer)?;
+            }
             for _ in 0..self.indent {
                 write!(self.writer, "  ")?;
             }
