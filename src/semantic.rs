@@ -739,6 +739,10 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     /// 式の型を推論
+    ///
+    /// 注意: このメソッドは非推奨です。代わりに `collect_expr_constraints` を使用してください。
+    /// `collect_expr_constraints` は全式の型を計算して type_env に追加します。
+    #[deprecated(note = "use collect_expr_constraints instead")]
     pub fn infer_expr_type(&mut self, expr: &Expr) -> Type {
         match &expr.kind {
             // リテラル
@@ -1204,86 +1208,331 @@ impl<'a> SemanticAnalyzer<'a> {
         self.macro_params.contains(&name)
     }
 
-    /// 式全体から型制約を収集（再帰的に走査）
+    /// type_env から式の型文字列を取得
+    fn get_expr_type_str(&self, expr_id: ExprId, type_env: &TypeEnv) -> String {
+        if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
+            if let Some(c) = constraints.first() {
+                return c.ty.clone();
+            }
+        }
+        "<unknown>".to_string()
+    }
+
+    /// 二項演算の結果型を計算（文字列ベース）
+    fn compute_binary_type_str(&self, op: &BinOp, lhs_id: ExprId, rhs_id: ExprId, type_env: &TypeEnv) -> String {
+        match op {
+            // 比較演算子・論理演算子は int を返す
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
+            BinOp::Eq | BinOp::Ne | BinOp::LogAnd | BinOp::LogOr => "int".to_string(),
+            // 算術演算子は通常の型昇格
+            _ => {
+                let lhs_ty = self.get_expr_type_str(lhs_id, type_env);
+                let rhs_ty = self.get_expr_type_str(rhs_id, type_env);
+                self.usual_arithmetic_conversion_str(&lhs_ty, &rhs_ty)
+            }
+        }
+    }
+
+    /// 通常の算術型変換（文字列ベース）
+    fn usual_arithmetic_conversion_str(&self, lhs: &str, rhs: &str) -> String {
+        // 簡易的な実装：ランク付けで大きい方を返す
+        let rank = |ty: &str| -> u8 {
+            match ty {
+                "long double" => 10,
+                "double" => 9,
+                "float" => 8,
+                "unsigned long long" => 7,
+                "long long" => 6,
+                "unsigned long" => 5,
+                "long" => 4,
+                "unsigned int" => 3,
+                "int" => 2,
+                "unsigned short" => 1,
+                "short" => 1,
+                _ => 0,
+            }
+        };
+
+        if rank(lhs) >= rank(rhs) {
+            lhs.to_string()
+        } else {
+            rhs.to_string()
+        }
+    }
+
+    /// 条件演算の結果型を計算（文字列ベース）
+    fn compute_conditional_type_str(&self, then_id: ExprId, else_id: ExprId, type_env: &TypeEnv) -> String {
+        let then_ty = self.get_expr_type_str(then_id, type_env);
+        let else_ty = self.get_expr_type_str(else_id, type_env);
+        self.usual_arithmetic_conversion_str(&then_ty, &else_ty)
+    }
+
+    /// 式全体から型制約を収集し、全式の型を計算（再帰的に走査）
+    ///
+    /// 子式を先に処理し、親式の型を後で計算する。
     pub fn collect_expr_constraints(&mut self, expr: &Expr, type_env: &mut TypeEnv) {
         match &expr.kind {
-            ExprKind::Call { func, args } => {
-                // 関数呼び出しから型制約を収集
-                self.collect_call_constraints(expr.id, func, args, type_env);
-                // 引数も再帰的に走査
-                for arg in args {
-                    self.collect_expr_constraints(arg, type_env);
-                }
+            // リテラル
+            ExprKind::IntLit(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "int", ConstraintSource::Inferred, "integer literal"
+                ));
+            }
+            ExprKind::UIntLit(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "unsigned int", ConstraintSource::Inferred, "unsigned integer literal"
+                ));
+            }
+            ExprKind::FloatLit(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "double", ConstraintSource::Inferred, "float literal"
+                ));
+            }
+            ExprKind::CharLit(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "int", ConstraintSource::Inferred, "char literal"
+                ));
+            }
+            ExprKind::StringLit(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "char*", ConstraintSource::Inferred, "string literal"
+                ));
             }
 
-            ExprKind::Binary { lhs, rhs, .. } => {
-                self.collect_expr_constraints(lhs, type_env);
-                self.collect_expr_constraints(rhs, type_env);
-            }
-
+            // 識別子
             ExprKind::Ident(name) => {
+                // シンボルテーブルから型を取得
+                if let Some(sym) = self.lookup_symbol(*name) {
+                    let ty_str = sym.ty.display(self.interner);
+                    type_env.add_constraint(TypeEnvConstraint::new(
+                        expr.id, &ty_str, ConstraintSource::Inferred, "symbol lookup"
+                    ));
+                }
                 // パラメータ参照の場合、ExprId とパラメータを紐付け
                 if self.is_macro_param(*name) {
                     type_env.link_expr_to_param(expr.id, *name, "parameter reference");
                 }
             }
 
-            ExprKind::Cast { expr: inner, .. } => {
-                self.collect_expr_constraints(inner, type_env);
+            // 関数呼び出し
+            ExprKind::Call { func, args } => {
+                // 子式を先に処理
+                self.collect_expr_constraints(func, type_env);
+                for arg in args {
+                    self.collect_expr_constraints(arg, type_env);
+                }
+                // Call の型制約を追加（RustDeclDict / Apidoc から）
+                self.collect_call_constraints(expr.id, func, args, type_env);
             }
 
-            ExprKind::Index { expr: base, index } => {
-                self.collect_expr_constraints(base, type_env);
-                self.collect_expr_constraints(index, type_env);
+            // 二項演算子
+            ExprKind::Binary { op, lhs, rhs } => {
+                // 子式を先に処理
+                self.collect_expr_constraints(lhs, type_env);
+                self.collect_expr_constraints(rhs, type_env);
+                // 親式の型を計算
+                let result_ty = self.compute_binary_type_str(op, lhs.id, rhs.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &result_ty, ConstraintSource::Inferred, "binary expression"
+                ));
             }
 
-            ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
-                self.collect_expr_constraints(base, type_env);
-            }
-
+            // 条件演算子
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 self.collect_expr_constraints(cond, type_env);
                 self.collect_expr_constraints(then_expr, type_env);
                 self.collect_expr_constraints(else_expr, type_env);
+                let result_ty = self.compute_conditional_type_str(then_expr.id, else_expr.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &result_ty, ConstraintSource::Inferred, "conditional expression"
+                ));
             }
 
+            // キャスト
+            ExprKind::Cast { type_name, expr: inner } => {
+                self.collect_expr_constraints(inner, type_env);
+                let ty = self.resolve_type_name(type_name);
+                let ty_str = ty.display(self.interner);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &ty_str, ConstraintSource::Inferred, "cast expression"
+                ));
+            }
+
+            // 配列添字
+            ExprKind::Index { expr: base, index } => {
+                self.collect_expr_constraints(base, type_env);
+                self.collect_expr_constraints(index, type_env);
+                // 配列/ポインタの要素型を推論
+                let base_ty_str = self.get_expr_type_str(base.id, type_env);
+                let elem_ty = if base_ty_str.ends_with('*') {
+                    base_ty_str.trim_end_matches('*').trim().to_string()
+                } else if base_ty_str.contains('[') {
+                    base_ty_str.split('[').next().unwrap_or(&base_ty_str).trim().to_string()
+                } else {
+                    "<unknown>".to_string()
+                };
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &elem_ty, ConstraintSource::Inferred, "array subscript"
+                ));
+            }
+
+            // メンバーアクセス
+            ExprKind::Member { expr: base, member } => {
+                self.collect_expr_constraints(base, type_env);
+                // TODO: 構造体メンバーの型を取得
+                let _ = member; // unused warning 回避
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "<unknown>", ConstraintSource::Inferred, "member access"
+                ));
+            }
+
+            // ポインタメンバーアクセス
+            ExprKind::PtrMember { expr: base, member } => {
+                self.collect_expr_constraints(base, type_env);
+                // TODO: 構造体メンバーの型を取得
+                let _ = member;
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "<unknown>", ConstraintSource::Inferred, "pointer member access"
+                ));
+            }
+
+            // 代入演算子
             ExprKind::Assign { lhs, rhs, .. } => {
                 self.collect_expr_constraints(lhs, type_env);
                 self.collect_expr_constraints(rhs, type_env);
+                // 代入式の型は左辺の型
+                let lhs_ty = self.get_expr_type_str(lhs.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &lhs_ty, ConstraintSource::Inferred, "assignment expression"
+                ));
             }
 
+            // コンマ演算子
             ExprKind::Comma { lhs, rhs } => {
                 self.collect_expr_constraints(lhs, type_env);
                 self.collect_expr_constraints(rhs, type_env);
+                // コンマ式の型は右辺の型
+                let rhs_ty = self.get_expr_type_str(rhs.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &rhs_ty, ConstraintSource::Inferred, "comma expression"
+                ));
             }
 
-            ExprKind::PreInc(inner)
-            | ExprKind::PreDec(inner)
-            | ExprKind::PostInc(inner)
-            | ExprKind::PostDec(inner)
-            | ExprKind::AddrOf(inner)
-            | ExprKind::Deref(inner)
-            | ExprKind::UnaryPlus(inner)
-            | ExprKind::UnaryMinus(inner)
-            | ExprKind::BitNot(inner)
-            | ExprKind::LogNot(inner)
-            | ExprKind::Sizeof(inner) => {
+            // 前置/後置インクリメント/デクリメント
+            ExprKind::PreInc(inner) | ExprKind::PreDec(inner) |
+            ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
                 self.collect_expr_constraints(inner, type_env);
+                let inner_ty = self.get_expr_type_str(inner.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &inner_ty, ConstraintSource::Inferred, "increment/decrement"
+                ));
             }
 
+            // アドレス取得
+            ExprKind::AddrOf(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                let inner_ty = self.get_expr_type_str(inner.id, type_env);
+                let ptr_ty = format!("{}*", inner_ty);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &ptr_ty, ConstraintSource::Inferred, "address-of"
+                ));
+            }
+
+            // 間接参照
+            ExprKind::Deref(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                let inner_ty = self.get_expr_type_str(inner.id, type_env);
+                let deref_ty = if inner_ty.ends_with('*') {
+                    inner_ty.trim_end_matches('*').trim().to_string()
+                } else {
+                    "<unknown>".to_string()
+                };
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &deref_ty, ConstraintSource::Inferred, "dereference"
+                ));
+            }
+
+            // 単項プラス/マイナス
+            ExprKind::UnaryPlus(inner) | ExprKind::UnaryMinus(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                let inner_ty = self.get_expr_type_str(inner.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &inner_ty, ConstraintSource::Inferred, "unary plus/minus"
+                ));
+            }
+
+            // ビット反転
+            ExprKind::BitNot(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                let inner_ty = self.get_expr_type_str(inner.id, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &inner_ty, ConstraintSource::Inferred, "bitwise not"
+                ));
+            }
+
+            // 論理否定
+            ExprKind::LogNot(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "int", ConstraintSource::Inferred, "logical not"
+                ));
+            }
+
+            // sizeof（式）
+            ExprKind::Sizeof(inner) => {
+                self.collect_expr_constraints(inner, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "unsigned long", ConstraintSource::Inferred, "sizeof expression"
+                ));
+            }
+
+            // sizeof（型）
+            ExprKind::SizeofType(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "unsigned long", ConstraintSource::Inferred, "sizeof type"
+                ));
+            }
+
+            // alignof
+            ExprKind::Alignof(_) => {
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "unsigned long", ConstraintSource::Inferred, "alignof"
+                ));
+            }
+
+            // 複合リテラル
+            ExprKind::CompoundLit { type_name, .. } => {
+                let ty = self.resolve_type_name(type_name);
+                let ty_str = ty.display(self.interner);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, &ty_str, ConstraintSource::Inferred, "compound literal"
+                ));
+            }
+
+            // Statement Expression (GCC拡張)
             ExprKind::StmtExpr(compound) => {
                 self.collect_compound_constraints(compound, type_env);
+                // 最後の式の型を取得
+                if let Some(last_expr_id) = self.get_last_expr_id(compound) {
+                    let last_ty = self.get_expr_type_str(last_expr_id, type_env);
+                    type_env.add_constraint(TypeEnvConstraint::new(
+                        expr.id, &last_ty, ConstraintSource::Inferred, "statement expression"
+                    ));
+                } else {
+                    type_env.add_constraint(TypeEnvConstraint::new(
+                        expr.id, "void", ConstraintSource::Inferred, "statement expression (empty)"
+                    ));
+                }
             }
+        }
+    }
 
-            // リテラルや型操作は制約を生成しない
-            ExprKind::IntLit(_)
-            | ExprKind::UIntLit(_)
-            | ExprKind::FloatLit(_)
-            | ExprKind::CharLit(_)
-            | ExprKind::StringLit(_)
-            | ExprKind::SizeofType(_)
-            | ExprKind::Alignof(_)
-            | ExprKind::CompoundLit { .. } => {}
+    /// 複合文の最後の式の ExprId を取得
+    fn get_last_expr_id(&self, compound: &CompoundStmt) -> Option<ExprId> {
+        if let Some(BlockItem::Stmt(Stmt::Expr(Some(expr), _))) = compound.items.last() {
+            Some(expr.id)
+        } else {
+            None
         }
     }
 

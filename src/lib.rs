@@ -48,7 +48,7 @@ pub use rust_codegen::{CodeFragment, CodeGenOptions, CodeIssue, CodeIssueKind, R
 pub use rust_decl::RustDeclDict;
 pub use lexer::{IdentResolver, Interning, Lexer, LookupOnly, MutableLexer, ReadOnlyLexer};
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
-pub use macro_infer::{compute_and_store_expr_types, InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats, ParseResult};
+pub use macro_infer::{InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats, ParseResult};
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, parse_type_from_string, Parser};
 pub use perl_config::{get_default_target_dir, get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{CallbackPair, MacroDefCallback, PPConfig, Preprocessor};
