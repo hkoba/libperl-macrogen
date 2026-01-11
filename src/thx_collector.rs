@@ -111,6 +111,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
 
         collector.on_macro_defined(&def);
@@ -133,6 +134,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
 
         collector.on_macro_defined(&def);
@@ -155,6 +157,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
 
         collector.on_macro_defined(&def);
@@ -177,6 +180,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
         collector.on_macro_defined(&base_def);
 
@@ -191,6 +195,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
         collector.on_macro_defined(&derived_def);
 
@@ -215,6 +220,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting: false,
         };
 
         collector.on_macro_defined(&def);

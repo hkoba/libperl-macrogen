@@ -518,6 +518,8 @@ mod tests {
         body: Vec<Token>,
     ) {
         let macro_name = interner.intern(name);
+        let has_token_pasting = body.iter()
+            .any(|t| matches!(t.kind, TokenKind::HashHash));
         let def = MacroDef {
             name: macro_name,
             kind: MacroKind::Object,
@@ -526,6 +528,7 @@ mod tests {
             leading_comments: vec![],
             is_builtin: false,
             is_target: true,
+            has_token_pasting,
         };
         table.define(def, interner);
     }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::intern::InternedStr;
 use crate::source::SourceLocation;
-use crate::token::{Comment, Token};
+use crate::token::{Comment, Token, TokenKind};
 
 /// マクロ定義の種類
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +37,8 @@ pub struct MacroDef {
     pub is_builtin: bool,
     /// ターゲットディレクトリで定義されたマクロかどうか
     pub is_target: bool,
+    /// マクロ本体にトークン連結 (##) を含むか
+    pub has_token_pasting: bool,
 }
 
 impl MacroDef {
@@ -46,6 +48,8 @@ impl MacroDef {
         body: Vec<Token>,
         def_loc: SourceLocation,
     ) -> Self {
+        let has_token_pasting = body.iter()
+            .any(|t| matches!(t.kind, TokenKind::HashHash));
         Self {
             name,
             kind: MacroKind::Object,
@@ -54,6 +58,7 @@ impl MacroDef {
             leading_comments: Vec::new(),
             is_builtin: false,
             is_target: false,
+            has_token_pasting,
         }
     }
 
@@ -65,6 +70,8 @@ impl MacroDef {
         body: Vec<Token>,
         def_loc: SourceLocation,
     ) -> Self {
+        let has_token_pasting = body.iter()
+            .any(|t| matches!(t.kind, TokenKind::HashHash));
         Self {
             name,
             kind: MacroKind::Function { params, is_variadic },
@@ -73,6 +80,7 @@ impl MacroDef {
             leading_comments: Vec::new(),
             is_builtin: false,
             is_target: false,
+            has_token_pasting,
         }
     }
 

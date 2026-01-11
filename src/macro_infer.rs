@@ -68,6 +68,9 @@ pub struct MacroInferInfo {
     /// THX 依存（aTHX, tTHX, my_perl を含む）
     pub is_thx_dependent: bool,
 
+    /// トークン連結 (##) を含む（推移的）
+    pub has_token_pasting: bool,
+
     /// パース結果
     pub parse_result: ParseResult,
 
@@ -89,6 +92,7 @@ impl MacroInferInfo {
             uses: HashSet::new(),
             used_by: HashSet::new(),
             is_thx_dependent: false,
+            has_token_pasting: false,
             parse_result: ParseResult::Unparseable(None),
             type_env: TypeEnv::new(),
             infer_status: InferStatus::Pending,
@@ -277,6 +281,7 @@ impl MacroInferContext {
         def: &MacroDef,
         macro_table: &MacroTable,
         thx_macros: &HashSet<InternedStr>,
+        pasting_macros: &HashSet<InternedStr>,
         interner: &'a StringInterner,
         files: &FileRegistry,
         apidoc: Option<&'a ApidocDict>,
@@ -289,6 +294,7 @@ impl MacroInferContext {
         info.has_body = !def.body.is_empty();
         info.is_function = matches!(def.kind, MacroKind::Function { .. });
         info.is_thx_dependent = thx_macros.contains(&def.name);
+        info.has_token_pasting = pasting_macros.contains(&def.name);
 
         // 関数形式マクロの場合、パラメータを取得
         let params: Vec<InternedStr> = match &def.kind {
@@ -297,11 +303,13 @@ impl MacroInferContext {
         };
 
         // マクロ本体を展開（TokenExpander を使用）
+        // expand_with_calls() を使用して関数形式マクロも展開
+        // （DEBUG_l 等の関数マクロが複合文を引数に取る場合に必要）
         let mut expander = TokenExpander::new(macro_table, interner, files);
         if let Some(dict) = rust_decl_dict {
             expander.set_bindings_consts(&dict.consts);
         }
-        let expanded_tokens = expander.expand(&def.body);
+        let expanded_tokens = expander.expand_with_calls(&def.body);
 
         // def-use 関係を収集（展開後のトークンから識別子を抽出）
         self.collect_uses(&expanded_tokens, macro_table, &mut info);
@@ -392,8 +400,15 @@ impl MacroInferContext {
             return ParseResult::Unparseable(Some("empty token sequence".to_string()));
         }
 
+        // 空白・改行をスキップして最初の有効なトークンを探す
+        let first_significant = tokens.iter().find(|t| {
+            !matches!(t.kind, TokenKind::Space | TokenKind::Newline)
+        });
+
         // 先頭トークンが KwDo または KwIf なら文としてパース試行
-        if matches!(tokens[0].kind, TokenKind::KwDo | TokenKind::KwIf) {
+        let is_statement_start = first_significant
+            .is_some_and(|t| matches!(t.kind, TokenKind::KwDo | TokenKind::KwIf));
+        if is_statement_start {
             match parse_statement_from_tokens_ref(tokens.to_vec(), interner, files, typedefs) {
                 Ok(stmt) => return ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
                 Err(_) => {} // フォールスルーして式としてパース
@@ -457,6 +472,47 @@ impl MacroInferContext {
         thx_macros
     }
 
+    /// トークン連結 (##) 依存を収集（推移的閉包）
+    fn collect_pasting_dependencies(
+        &self,
+        macro_table: &MacroTable,
+    ) -> HashSet<InternedStr> {
+        // Phase 1: 直接 ## を含むマクロを収集
+        let mut pasting_macros = HashSet::new();
+        for (name, def) in macro_table.iter() {
+            for token in &def.body {
+                if matches!(token.kind, TokenKind::HashHash) {
+                    pasting_macros.insert(*name);
+                    break;
+                }
+            }
+        }
+
+        // Phase 2: 推移的閉包を計算（## マクロを使用するマクロも ## 依存）
+        loop {
+            let mut added = false;
+            for (name, def) in macro_table.iter() {
+                if pasting_macros.contains(name) {
+                    continue;
+                }
+                for token in &def.body {
+                    if let TokenKind::Ident(id) = token.kind {
+                        if pasting_macros.contains(&id) {
+                            pasting_macros.insert(*name);
+                            added = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        pasting_macros
+    }
+
     /// 全ターゲットマクロを解析
     ///
     /// MacroTable 内の全ターゲットマクロに対して analyze_macro を実行し、
@@ -474,6 +530,8 @@ impl MacroInferContext {
     ) {
         // THX 依存マクロを収集（定義順序に依存しない）
         let thx_macros = self.collect_thx_dependencies(macro_table, thx_symbols);
+        // ## 依存マクロを収集（定義順序に依存しない）
+        let pasting_macros = self.collect_pasting_dependencies(macro_table);
 
         // ターゲットマクロのみを解析
         for def in macro_table.iter_target_macros() {
@@ -481,6 +539,7 @@ impl MacroInferContext {
                 def,
                 macro_table,
                 &thx_macros,
+                &pasting_macros,
                 interner,
                 files,
                 apidoc,
@@ -599,6 +658,7 @@ mod tests {
         assert_eq!(info.name, name);
         assert!(!info.is_target);
         assert!(!info.is_thx_dependent);
+        assert!(!info.has_token_pasting);
         assert!(info.uses.is_empty());
         assert!(info.used_by.is_empty());
         assert!(!info.is_parseable());

@@ -513,12 +513,12 @@ fn run_infer_macro_types(
     let mut has_constraints_count = 0;
 
     // マクロ名でソートするためにベクターに収集
-    // - 関数形式マクロのみ出力
+    // - 関数形式マクロ、または THX 依存のオブジェクトマクロを出力
     // - 空のトークン列を持つマクロ（条件コンパイルフラグ等）は除外
     let mut sorted_macros: Vec<_> = infer_ctx
         .macros
         .iter()
-        .filter(|(_, info)| info.is_target && info.is_function && info.has_body)
+        .filter(|(_, info)| info.is_target && info.has_body && (info.is_function || info.is_thx_dependent))
         .collect();
     sorted_macros.sort_by_key(|(name, _)| interner.get(**name));
 
@@ -536,6 +536,7 @@ fn run_infer_macro_types(
         };
 
         let thx_marker = if info.is_thx_dependent { " [THX]" } else { "" };
+        let pasting_marker = if info.has_token_pasting { " [##]" } else { "" };
         let constraint_count = info.type_env.total_constraint_count();
 
         if constraint_count > 0 {
@@ -543,12 +544,13 @@ fn run_infer_macro_types(
         }
 
         println!(
-            "{}: {} ({} constraints, {} uses){}",
+            "{}: {} ({} constraints, {} uses){}{}",
             name_str,
             parse_status,
             constraint_count,
             info.uses.len(),
-            thx_marker
+            thx_marker,
+            pasting_marker
         );
 
         // 型付き S 式を追加出力（pretty print）

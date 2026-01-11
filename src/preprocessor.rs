@@ -1484,6 +1484,8 @@ impl Preprocessor {
         }
 
         let is_target = self.is_current_file_in_target();
+        let has_token_pasting = body.iter()
+            .any(|t| matches!(t.kind, TokenKind::HashHash));
         let def = MacroDef {
             name,
             kind,
@@ -1492,6 +1494,7 @@ impl Preprocessor {
             leading_comments: std::mem::take(&mut self.pending_comments),
             is_builtin: self.defining_builtin,
             is_target,
+            has_token_pasting,
         };
 
         // コールバックを呼び出し（define の前に呼ぶことで def への参照を渡せる）
