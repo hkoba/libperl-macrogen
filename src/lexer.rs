@@ -3,20 +3,59 @@ use crate::intern::{InternedStr, StringInterner};
 use crate::source::{FileId, SourceLocation};
 use crate::token::{Comment, CommentKind, Token, TokenKind};
 
-/// Lexer
-pub struct Lexer<'a> {
+/// 識別子解決トレイト
+///
+/// Lexer が識別子をトークン化する際に使用する。
+/// 通常モード（Interning）では新しい識別子を intern し、
+/// 読み取り専用モード（LookupOnly）では既存の識別子のみを lookup する。
+pub trait IdentResolver {
+    /// 識別子文字列を InternedStr に解決
+    ///
+    /// 通常モード: intern して常に成功（Some を返す）
+    /// 読み取り専用モード: lookup のみ、見つからなければ None
+    fn resolve_ident(&mut self, s: &str) -> Option<InternedStr>;
+}
+
+/// 通常の intern を行うラッパー
+pub struct Interning<'a>(pub &'a mut StringInterner);
+
+impl IdentResolver for Interning<'_> {
+    fn resolve_ident(&mut self, s: &str) -> Option<InternedStr> {
+        Some(self.0.intern(s)) // 常に成功
+    }
+}
+
+/// lookup のみ行うラッパー（読み取り専用）
+pub struct LookupOnly<'a>(pub &'a StringInterner);
+
+impl IdentResolver for LookupOnly<'_> {
+    fn resolve_ident(&mut self, s: &str) -> Option<InternedStr> {
+        self.0.lookup(s) // 見つからなければ None
+    }
+}
+
+/// Lexer（ジェネリック版）
+pub struct Lexer<'a, R: IdentResolver> {
     source: &'a [u8],
     pos: usize,
     line: u32,
     column: u32,
     file_id: FileId,
-    interner: &'a mut StringInterner,
+    resolver: R,
     /// スペース/タブをトークンとして返すかどうか（TinyCC の PARSE_FLAG_SPACES 相当）
     return_spaces: bool,
+    /// ライフタイムマーカー（'a を使用するため）
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> Lexer<'a> {
-    /// 新しいLexerを作成
+/// 通常の Lexer（mutable interner を使用）
+pub type MutableLexer<'a> = Lexer<'a, Interning<'a>>;
+
+/// 読み取り専用 Lexer（lookup のみ）
+pub type ReadOnlyLexer<'a> = Lexer<'a, LookupOnly<'a>>;
+
+impl<'a> Lexer<'a, Interning<'a>> {
+    /// 新しいLexerを作成（通常モード）
     pub fn new(source: &'a [u8], file_id: FileId, interner: &'a mut StringInterner) -> Self {
         Self {
             source,
@@ -24,10 +63,33 @@ impl<'a> Lexer<'a> {
             line: 1,
             column: 1,
             file_id,
-            interner,
+            resolver: Interning(interner),
             return_spaces: false,
+            _marker: std::marker::PhantomData,
         }
     }
+}
+
+impl<'a> Lexer<'a, LookupOnly<'a>> {
+    /// 新しいLexerを作成（読み取り専用モード）
+    ///
+    /// このモードでは、既に intern 済みの識別子のみを認識する。
+    /// 未知の識別子を検出した場合は LexError::UnknownIdentifier を返す。
+    pub fn new_readonly(source: &'a [u8], file_id: FileId, interner: &'a StringInterner) -> Self {
+        Self {
+            source,
+            pos: 0,
+            line: 1,
+            column: 1,
+            file_id,
+            resolver: LookupOnly(interner),
+            return_spaces: false,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a, R: IdentResolver> Lexer<'a, R> {
 
     /// スペースをトークンとして返すかどうかを設定
     pub fn set_return_spaces(&mut self, enabled: bool) {
@@ -278,6 +340,7 @@ impl<'a> Lexer<'a> {
 
     /// 識別子またはキーワードをスキャン
     fn scan_identifier(&mut self) -> Result<TokenKind> {
+        let loc = self.current_location();
         let start = self.pos;
         while let Some(c) = self.peek() {
             if c.is_ascii_alphanumeric() || c == b'_' {
@@ -293,8 +356,14 @@ impl<'a> Lexer<'a> {
         if let Some(kw) = TokenKind::from_keyword(text) {
             Ok(kw)
         } else {
-            let interned = self.interner.intern(text);
-            Ok(TokenKind::Ident(interned))
+            // resolver を使って識別子を解決
+            match self.resolver.resolve_ident(text) {
+                Some(interned) => Ok(TokenKind::Ident(interned)),
+                None => Err(CompileError::Lex {
+                    loc,
+                    kind: LexError::UnknownIdentifier(text.to_string()),
+                }),
+            }
         }
     }
 

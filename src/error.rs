@@ -35,6 +35,8 @@ pub enum LexError {
     InvalidNumber(String),
     /// 不正なサフィックス
     InvalidSuffix(String),
+    /// 未知の識別子（ReadOnly モードで intern 済みでない識別子を検出）
+    UnknownIdentifier(String),
 }
 
 impl fmt::Display for LexError {
@@ -48,6 +50,7 @@ impl fmt::Display for LexError {
             LexError::InvalidEscape(c) => write!(f, "invalid escape sequence: \\{}", c),
             LexError::InvalidNumber(s) => write!(f, "invalid number: {}", s),
             LexError::InvalidSuffix(s) => write!(f, "invalid suffix: {}", s),
+            LexError::UnknownIdentifier(s) => write!(f, "unknown identifier: {}", s),
         }
     }
 }

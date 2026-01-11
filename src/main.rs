@@ -554,12 +554,8 @@ fn run_infer_macro_types(
             ParseResult::Expression(expr) => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                let mut printer = TypedSexpPrinter::new(
-                    &mut handle,
-                    interner,
-                    Some(&apidoc),
-                    Some(&fields_dict),
-                );
+                let mut printer = TypedSexpPrinter::new(&mut handle, interner);
+                printer.set_type_env(&info.type_env);
                 printer.set_pretty(true);
                 printer.set_indent(1);  // 行頭にスペース1文字分のインデント
                 printer.set_skip_first_newline(true);  // 先頭の空行を抑制
@@ -783,7 +779,7 @@ fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(),
     if let Some(output_path) = output {
         let file = File::create(output_path)?;
         let mut writer = BufWriter::new(file);
-        let mut printer = TypedSexpPrinter::new(&mut writer, pp.interner(), None, None);
+        let mut printer = TypedSexpPrinter::new(&mut writer, pp.interner());
         for decl in &tu.decls {
             printer.print_external_decl(decl)?;
         }
@@ -791,7 +787,7 @@ fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(),
     } else {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner(), None, None);
+        let mut printer = TypedSexpPrinter::new(&mut handle, pp.interner());
         for decl in &tu.decls {
             printer.print_external_decl(decl)?;
         }

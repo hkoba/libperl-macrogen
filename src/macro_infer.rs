@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
-use crate::ast::{BlockItem, Expr, ExprKind};
+use crate::ast::{BlockItem, CompoundStmt, Expr, ExprKind, Stmt};
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
@@ -16,7 +16,7 @@ use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
 use crate::token::TokenKind;
 use crate::token_expander::TokenExpander;
-use crate::type_env::TypeEnv;
+use crate::type_env::{ConstraintSource, TypeConstraint, TypeEnv};
 
 /// マクロのパース結果
 #[derive(Debug, Clone)]
@@ -306,8 +306,30 @@ impl MacroInferContext {
                 fields_dict,
                 rust_decl_dict,
             );
-            analyzer.set_macro_params(&params);
+
+            // apidoc 型情報付きでパラメータをシンボルテーブルに登録
+            analyzer.register_macro_params_from_apidoc(def.name, &params, files, typedefs);
+
+            // 従来の制約収集（関数呼び出しからの制約）
             analyzer.collect_expr_constraints(expr, &mut info.type_env);
+
+            // 全式の型を計算して type_env に保存
+            compute_and_store_expr_types(expr, &mut analyzer, &mut info.type_env, interner);
+
+            // マクロ自体の戻り値型を制約として追加
+            if let Some(apidoc_dict) = apidoc {
+                let macro_name_str = interner.get(def.name);
+                if let Some(entry) = apidoc_dict.get(macro_name_str) {
+                    if let Some(ref return_type) = entry.return_type {
+                        info.type_env.add_return_constraint(TypeConstraint::new(
+                            expr.id,
+                            return_type,
+                            ConstraintSource::Apidoc,
+                            format!("return type of macro {}", macro_name_str),
+                        ));
+                    }
+                }
+            }
         }
 
         self.register(info);
@@ -504,6 +526,115 @@ impl MacroInferContext {
 impl Default for MacroInferContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 式の型を計算して type_env に保存（再帰的に全子式を処理）
+///
+/// SemanticAnalyzer を使って型を推論し、その結果を type_env に保存する。
+/// これにより TypedSexpPrinter は SemanticAnalyzer を持たずに型を取得できる。
+pub fn compute_and_store_expr_types(
+    expr: &Expr,
+    analyzer: &mut SemanticAnalyzer,
+    type_env: &mut TypeEnv,
+    interner: &StringInterner,
+) {
+    // この式の型を計算
+    let ty = analyzer.infer_expr_type(expr);
+    let ty_str = ty.display(interner);
+
+    // type_env に保存
+    type_env.add_constraint(TypeConstraint::new(
+        expr.id,
+        &ty_str,
+        ConstraintSource::Inferred,
+        "computed type",
+    ));
+
+    // 子式を再帰的に処理
+    match &expr.kind {
+        ExprKind::Call { func, args } => {
+            compute_and_store_expr_types(func, analyzer, type_env, interner);
+            for arg in args {
+                compute_and_store_expr_types(arg, analyzer, type_env, interner);
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            compute_and_store_expr_types(lhs, analyzer, type_env, interner);
+            compute_and_store_expr_types(rhs, analyzer, type_env, interner);
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            compute_and_store_expr_types(cond, analyzer, type_env, interner);
+            compute_and_store_expr_types(then_expr, analyzer, type_env, interner);
+            compute_and_store_expr_types(else_expr, analyzer, type_env, interner);
+        }
+        ExprKind::Cast { expr: inner, .. }
+        | ExprKind::PreInc(inner)
+        | ExprKind::PreDec(inner)
+        | ExprKind::PostInc(inner)
+        | ExprKind::PostDec(inner)
+        | ExprKind::AddrOf(inner)
+        | ExprKind::Deref(inner)
+        | ExprKind::UnaryPlus(inner)
+        | ExprKind::UnaryMinus(inner)
+        | ExprKind::BitNot(inner)
+        | ExprKind::LogNot(inner)
+        | ExprKind::Sizeof(inner) => {
+            compute_and_store_expr_types(inner, analyzer, type_env, interner);
+        }
+        ExprKind::Index { expr: base, index } => {
+            compute_and_store_expr_types(base, analyzer, type_env, interner);
+            compute_and_store_expr_types(index, analyzer, type_env, interner);
+        }
+        ExprKind::Member { expr: base, .. }
+        | ExprKind::PtrMember { expr: base, .. } => {
+            compute_and_store_expr_types(base, analyzer, type_env, interner);
+        }
+        ExprKind::Assign { lhs, rhs, .. } => {
+            compute_and_store_expr_types(lhs, analyzer, type_env, interner);
+            compute_and_store_expr_types(rhs, analyzer, type_env, interner);
+        }
+        ExprKind::Comma { lhs, rhs } => {
+            compute_and_store_expr_types(lhs, analyzer, type_env, interner);
+            compute_and_store_expr_types(rhs, analyzer, type_env, interner);
+        }
+        ExprKind::StmtExpr(compound) => {
+            // 複合文内の式も処理
+            compute_compound_expr_types(compound, analyzer, type_env, interner);
+        }
+        // リテラル・識別子・型操作は子式なし
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_)
+        | ExprKind::Alignof(_)
+        | ExprKind::CompoundLit { .. } => {}
+    }
+}
+
+/// 複合文内の式の型を計算して type_env に保存
+fn compute_compound_expr_types(
+    compound: &CompoundStmt,
+    analyzer: &mut SemanticAnalyzer,
+    type_env: &mut TypeEnv,
+    interner: &StringInterner,
+) {
+    for item in &compound.items {
+        match item {
+            BlockItem::Stmt(Stmt::Expr(Some(expr), _)) => {
+                compute_and_store_expr_types(expr, analyzer, type_env, interner);
+            }
+            BlockItem::Stmt(Stmt::Return(Some(expr), _)) => {
+                compute_and_store_expr_types(expr, analyzer, type_env, interner);
+            }
+            BlockItem::Stmt(Stmt::Compound(inner)) => {
+                compute_compound_expr_types(inner, analyzer, type_env, interner);
+            }
+            _ => {}
+        }
     }
 }
 

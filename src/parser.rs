@@ -8,7 +8,8 @@ use crate::ast::*;
 use crate::error::{CompileError, ParseError, Result};
 use crate::intern::{InternedStr, StringInterner};
 use crate::preprocessor::Preprocessor;
-use crate::source::SourceLocation;
+use crate::lexer::{Lexer, LookupOnly};
+use crate::source::{FileId, SourceLocation};
 use crate::token::{MacroBeginInfo, Token, TokenKind};
 use crate::token_source::{TokenSliceRef, TokenSource};
 
@@ -834,7 +835,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     }
 
     /// 型名をパース
-    fn parse_type_name(&mut self) -> Result<TypeName> {
+    pub fn parse_type_name(&mut self) -> Result<TypeName> {
         let specs = self.parse_decl_specs()?;
         let declarator = if self.check(&TokenKind::RParen) {
             None
@@ -2227,6 +2228,47 @@ pub fn parse_expression_from_tokens_ref(
     let mut source = TokenSliceRef::new(tokens, interner, files);
     let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
     parser.parse_expr_only()
+}
+
+/// 型文字列から TypeName をパース
+///
+/// apidoc 等の型文字列（例: "SV *", "const char *"）をパースして
+/// TypeName AST を返す。ReadOnlyLexer を使用するため、
+/// 型文字列内の識別子は既に intern 済みである必要がある。
+///
+/// # Arguments
+/// * `type_str` - パースする型文字列
+/// * `interner` - 文字列インターナーへの参照（読み取り専用）
+/// * `files` - ファイルレジストリへの参照
+/// * `typedefs` - typedef名のセットへの参照
+///
+/// # Returns
+/// パースされた TypeName AST、または識別子が未知の場合はエラー
+pub fn parse_type_from_string(
+    type_str: &str,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<TypeName> {
+    // 型文字列用のダミー FileId（エラー時の位置情報は限定的）
+    let file_id = FileId::default();
+
+    // ReadOnlyLexer でトークン化（新規 intern なし）
+    let mut lexer = Lexer::<LookupOnly>::new_readonly(type_str.as_bytes(), file_id, interner);
+
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer.next_token()?;
+        if matches!(token.kind, TokenKind::Eof) {
+            break;
+        }
+        tokens.push(token);
+    }
+
+    // パース
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.parse_type_name()
 }
 
 #[cfg(test)]

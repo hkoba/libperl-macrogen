@@ -8,8 +8,9 @@ use crate::apidoc::ApidocDict;
 use crate::ast::*;
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
+use crate::parser::parse_type_from_string;
 use crate::rust_decl::RustDeclDict;
-use crate::source::SourceLocation;
+use crate::source::{FileRegistry, SourceLocation};
 use crate::type_env::{ConstraintSource, TypeEnv, TypeConstraint as TypeEnvConstraint};
 use crate::unified_type::{IntSize, UnifiedType};
 
@@ -898,7 +899,7 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     /// TypeName から型を解決
-    fn resolve_type_name(&self, type_name: &TypeName) -> Type {
+    pub fn resolve_type_name(&self, type_name: &TypeName) -> Type {
         let base_ty = self.resolve_decl_specs_readonly(&type_name.specs);
         if let Some(ref abs_decl) = type_name.declarator {
             self.apply_abstract_declarator(&base_ty, abs_decl)
@@ -1148,6 +1149,54 @@ impl<'a> SemanticAnalyzer<'a> {
     /// マクロパラメータをクリア
     pub fn clear_macro_params(&mut self) {
         self.macro_params.clear();
+    }
+
+    /// マクロパラメータを apidoc 型情報付きでシンボルテーブルに登録
+    ///
+    /// # Arguments
+    /// * `macro_name` - マクロ名
+    /// * `params` - パラメータ名のリスト
+    /// * `files` - ファイルレジストリ
+    /// * `typedefs` - typedef 名セット
+    pub fn register_macro_params_from_apidoc(
+        &mut self,
+        macro_name: InternedStr,
+        params: &[InternedStr],
+        files: &FileRegistry,
+        typedefs: &HashSet<InternedStr>,
+    ) {
+        // macro_params に名前を登録（既存の動作を維持）
+        self.macro_params.clear();
+        for &param in params {
+            self.macro_params.insert(param);
+        }
+
+        // apidoc からマクロ情報を取得
+        if let Some(apidoc) = self.apidoc {
+            let macro_name_str = self.interner.get(macro_name);
+            if let Some(entry) = apidoc.get(macro_name_str) {
+                // パラメータをシンボルとして登録
+                for (i, &param_name) in params.iter().enumerate() {
+                    if let Some(apidoc_arg) = entry.args.get(i) {
+                        // parser で型文字列をパース
+                        if let Ok(type_name) = parse_type_from_string(
+                            &apidoc_arg.ty,
+                            self.interner,
+                            files,
+                            typedefs,
+                        ) {
+                            let ty = self.resolve_type_name(&type_name);
+                            self.define_symbol(Symbol {
+                                name: param_name,
+                                ty,
+                                loc: SourceLocation::default(),
+                                kind: SymbolKind::Variable,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// 識別子がマクロパラメータかどうか

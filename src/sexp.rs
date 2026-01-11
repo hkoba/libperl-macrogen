@@ -4,11 +4,9 @@
 
 use std::io::{Result, Write};
 
-use crate::apidoc::ApidocDict;
 use crate::ast::*;
-use crate::fields_dict::FieldsDict;
 use crate::intern::StringInterner;
-use crate::semantic::{SemanticAnalyzer, Type};
+use crate::type_env::TypeEnv;
 
 /// S-expression出力プリンター
 pub struct SexpPrinter<'a, W: Write> {
@@ -688,7 +686,8 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
 pub struct TypedSexpPrinter<'a, W: Write> {
     writer: W,
     interner: &'a StringInterner,
-    analyzer: SemanticAnalyzer<'a>,
+    /// 型環境（型制約を保持）
+    type_env: Option<&'a TypeEnv>,
     indent: usize,
     /// ExprId を出力するかどうか
     emit_expr_id: bool,
@@ -703,18 +702,35 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     pub fn new(
         writer: W,
         interner: &'a StringInterner,
-        apidoc: Option<&'a ApidocDict>,
-        fields_dict: Option<&'a FieldsDict>,
     ) -> Self {
         Self {
             writer,
             interner,
-            analyzer: SemanticAnalyzer::new(interner, apidoc, fields_dict),
+            type_env: None,
             indent: 0,
             emit_expr_id: false,
             pretty: false,
             skip_first_newline: false,
         }
+    }
+
+    /// type_env を設定
+    pub fn set_type_env(&mut self, type_env: &'a TypeEnv) {
+        self.type_env = Some(type_env);
+    }
+
+    /// ExprId から型文字列を取得
+    fn get_type_str(&self, expr_id: ExprId) -> String {
+        if let Some(type_env) = self.type_env {
+            // expr_constraints から型を取得
+            if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
+                // 複数制約がある場合は最初のものを使用
+                if let Some(constraint) = constraints.first() {
+                    return constraint.ty.clone();
+                }
+            }
+        }
+        "<unknown>".to_string()
     }
 
     /// 整形出力の有無を設定
@@ -747,9 +763,6 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
 
     /// 宣言を出力
     fn print_declaration(&mut self, decl: &Declaration) -> Result<()> {
-        // シンボルを登録
-        self.analyzer.process_declaration(decl);
-
         self.write_open("declaration")?;
         self.print_decl_specs(&decl.specs)?;
         for init_decl in &decl.declarators {
@@ -762,52 +775,10 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
 
     /// 関数定義を出力
     fn print_function_def(&mut self, func: &FunctionDef) -> Result<()> {
-        // 関数をグローバルスコープに登録
-        let return_ty = self.analyzer.resolve_decl_specs(&func.specs);
-        let func_ty = self.analyzer.apply_declarator(&return_ty, &func.declarator);
-
-        if let Some(name) = func.declarator.name {
-            use crate::semantic::{Symbol, SymbolKind};
-            self.analyzer.define_symbol(Symbol {
-                name,
-                ty: func_ty.clone(),
-                loc: func.loc().clone(),
-                kind: SymbolKind::Function,
-            });
-        }
-
         self.write_open("function-def")?;
         self.print_decl_specs(&func.specs)?;
         self.print_declarator(&func.declarator)?;
-
-        // 関数本体用のスコープを開始し、パラメータを登録
-        self.analyzer.push_scope();
-
-        // パラメータを登録
-        if let Type::Function { params, .. } = &func_ty {
-            for derived in &func.declarator.derived {
-                if let DerivedDecl::Function(param_list) = derived {
-                    for (param, param_ty) in param_list.params.iter().zip(params.iter()) {
-                        if let Some(ref decl) = param.declarator {
-                            if let Some(name) = decl.name {
-                                use crate::semantic::{Symbol, SymbolKind};
-                                self.analyzer.define_symbol(Symbol {
-                                    name,
-                                    ty: param_ty.clone(),
-                                    loc: func.loc().clone(),
-                                    kind: SymbolKind::Variable,
-                                });
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
         self.print_compound_stmt(&func.body)?;
-        self.analyzer.pop_scope();
-
         self.write_close()?;
         writeln!(self.writer)?;
         Ok(())
@@ -1059,7 +1030,6 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
         for item in &stmt.items {
             match item {
                 BlockItem::Decl(decl) => {
-                    self.analyzer.process_declaration(decl);
                     write!(self.writer, " ")?;
                     self.print_decl_inline(decl)?;
                 }
@@ -1093,8 +1063,6 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if let Some(e) = expr {
                     write!(self.writer, " ")?;
                     self.print_expr(e)?;
-                    let ty = self.analyzer.infer_expr_type(e);
-                    write!(self.writer, " :type {}", self.type_to_string(&ty))?;
                 }
                 write!(self.writer, ")")
             }
@@ -1132,7 +1100,6 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                             self.print_expr(e)?;
                         }
                         ForInit::Decl(d) => {
-                            self.analyzer.process_declaration(d);
                             write!(self.writer, " ")?;
                             self.print_decl_inline(d)?;
                         }
@@ -1213,8 +1180,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 write!(self.writer, "(ident")?;
                 self.write_expr_id(expr.id)?;
                 write!(self.writer, " {})", self.interner.get(*id))?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::IntLit(n) => {
                 write!(self.writer, "(int")?;
@@ -1274,8 +1240,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(rhs)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Assign { op, lhs, rhs } => {
                 let op_str = match op {
@@ -1298,8 +1263,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(rhs)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Cast { type_name, expr: inner } => {
                 write!(self.writer, "(cast ")?;
@@ -1307,8 +1271,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Call { func, args } => {
                 write!(self.writer, "(call")?;
@@ -1319,24 +1282,21 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                     self.print_expr(arg)?;
                 }
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Member { expr: base, member } => {
                 write!(self.writer, "(member")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(base)?;
                 write!(self.writer, " {})", self.interner.get(*member))?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::PtrMember { expr: base, member } => {
                 write!(self.writer, "(ptr-member")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(base)?;
                 write!(self.writer, " {})", self.interner.get(*member))?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Index { expr: base, index } => {
                 write!(self.writer, "(index")?;
@@ -1345,48 +1305,42 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(index)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::AddrOf(inner) => {
                 write!(self.writer, "(addr-of")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Deref(inner) => {
                 write!(self.writer, "(deref")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::UnaryPlus(inner) => {
                 write!(self.writer, "(unary-plus")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::UnaryMinus(inner) => {
                 write!(self.writer, "(unary-minus")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::BitNot(inner) => {
                 write!(self.writer, "(bit-not")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::LogNot(inner) => {
                 write!(self.writer, "(log-not")?;
@@ -1400,32 +1354,28 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::PreDec(inner) => {
                 write!(self.writer, "(pre-dec")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::PostInc(inner) => {
                 write!(self.writer, "(post-inc")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::PostDec(inner) => {
                 write!(self.writer, "(post-dec")?;
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(inner)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Sizeof(inner) => {
                 write!(self.writer, "(sizeof")?;
@@ -1455,8 +1405,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(else_expr)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::Comma { lhs, rhs } => {
                 write!(self.writer, "(,")?;
@@ -1465,8 +1414,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 if !self.pretty { write!(self.writer, " ")?; }
                 self.print_expr(rhs)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::CompoundLit { type_name, init } => {
                 write!(self.writer, "(compound-lit ")?;
@@ -1475,15 +1423,13 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                     self.print_initializer(&Initializer::List(vec![item.clone()]))?;
                 }
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
             ExprKind::StmtExpr(compound) => {
                 write!(self.writer, "(stmt-expr")?;
                 self.print_compound_stmt(compound)?;
                 write!(self.writer, ")")?;
-                let ty = self.analyzer.infer_expr_type(expr);
-                write!(self.writer, " :type {}", self.type_to_string(&ty))?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
         }
         if self.pretty {
@@ -1511,11 +1457,6 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
         }
         write!(self.writer, ")")?;
         Ok(())
-    }
-
-    /// 型を文字列に変換
-    fn type_to_string(&self, ty: &Type) -> String {
-        ty.display(self.interner)
     }
 
     /// ExprId を出力（emit_expr_id が有効な場合）
