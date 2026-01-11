@@ -513,10 +513,11 @@ fn run_infer_macro_types(
     let mut has_constraints_count = 0;
 
     // マクロ名でソートするためにベクターに収集
+    // 空のトークン列を持つマクロ（条件コンパイルフラグ等）は除外
     let mut sorted_macros: Vec<_> = infer_ctx
         .macros
         .iter()
-        .filter(|(_, info)| info.is_target)
+        .filter(|(_, info)| info.is_target && info.has_body)
         .collect();
     sorted_macros.sort_by_key(|(name, _)| interner.get(**name));
 
