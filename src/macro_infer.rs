@@ -14,7 +14,6 @@ use crate::parser::parse_expression_from_tokens_ref;
 use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
-use crate::thx_collector::ThxCollector;
 use crate::token::TokenKind;
 use crate::token_expander::TokenExpander;
 use crate::type_env::TypeEnv;
@@ -26,8 +25,8 @@ pub enum ParseResult {
     Expression(Box<Expr>),
     /// 文としてパース成功
     Statement(Vec<BlockItem>),
-    /// パース不能
-    Unparseable,
+    /// パース不能（エラーメッセージ付き）
+    Unparseable(Option<String>),
 }
 
 /// 推論状態
@@ -84,7 +83,7 @@ impl MacroInferInfo {
             uses: HashSet::new(),
             used_by: HashSet::new(),
             is_thx_dependent: false,
-            parse_result: ParseResult::Unparseable,
+            parse_result: ParseResult::Unparseable(None),
             type_env: TypeEnv::new(),
             infer_status: InferStatus::Pending,
         }
@@ -112,7 +111,7 @@ impl MacroInferInfo {
 
     /// パース可能かどうか
     pub fn is_parseable(&self) -> bool {
-        !matches!(self.parse_result, ParseResult::Unparseable)
+        !matches!(self.parse_result, ParseResult::Unparseable(_))
     }
 }
 
@@ -271,16 +270,17 @@ impl MacroInferContext {
         &mut self,
         def: &MacroDef,
         macro_table: &MacroTable,
-        thx_collector: &ThxCollector,
+        thx_macros: &HashSet<InternedStr>,
         interner: &'a StringInterner,
         files: &FileRegistry,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        typedefs: &HashSet<InternedStr>,
     ) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
-        info.is_thx_dependent = thx_collector.is_thx_dependent(def.name);
+        info.is_thx_dependent = thx_macros.contains(&def.name);
 
         // 関数形式マクロの場合、パラメータを取得
         let params: Vec<InternedStr> = match &def.kind {
@@ -296,7 +296,7 @@ impl MacroInferContext {
         self.collect_uses(&expanded_tokens, macro_table, &mut info);
 
         // パースを試行
-        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files);
+        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
 
         // パース成功した場合、型制約を収集
         if let ParseResult::Expression(ref expr) = info.parse_result {
@@ -336,19 +336,67 @@ impl MacroInferContext {
         tokens: &[crate::token::Token],
         interner: &StringInterner,
         files: &FileRegistry,
+        typedefs: &HashSet<InternedStr>,
     ) -> ParseResult {
         if tokens.is_empty() {
-            return ParseResult::Unparseable;
+            return ParseResult::Unparseable(Some("empty token sequence".to_string()));
         }
-
-        // 空の typedef セット（マクロ解析時は typedef 情報なし）
-        let typedefs = HashSet::new();
 
         // 式としてパースを試行
-        match parse_expression_from_tokens_ref(tokens.to_vec(), interner, files, &typedefs) {
+        match parse_expression_from_tokens_ref(tokens.to_vec(), interner, files, typedefs) {
             Ok(expr) => ParseResult::Expression(Box::new(expr)),
-            Err(_) => ParseResult::Unparseable,
+            Err(err) => ParseResult::Unparseable(Some(err.format_with_files(files))),
         }
+    }
+
+    /// 全マクロから THX 依存関係を収集（定義順序に依存しない）
+    ///
+    /// 2パスで推移的閉包を計算:
+    /// 1. 直接 aTHX, tTHX, my_perl を含むマクロを収集
+    /// 2. THX マクロを使用するマクロも THX 依存として追加（収束まで繰り返し）
+    fn collect_thx_dependencies(
+        &self,
+        macro_table: &MacroTable,
+        thx_symbols: (InternedStr, InternedStr, InternedStr),
+    ) -> HashSet<InternedStr> {
+        let (sym_athx, sym_tthx, sym_my_perl) = thx_symbols;
+
+        // Phase 1: 直接 THX トークンを含むマクロを収集
+        let mut thx_macros = HashSet::new();
+        for (name, def) in macro_table.iter() {
+            for token in &def.body {
+                if let TokenKind::Ident(id) = token.kind {
+                    if id == sym_athx || id == sym_tthx || id == sym_my_perl {
+                        thx_macros.insert(*name);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Phase 2: 推移的閉包を計算（THX マクロを使用するマクロも THX 依存）
+        loop {
+            let mut added = false;
+            for (name, def) in macro_table.iter() {
+                if thx_macros.contains(name) {
+                    continue;
+                }
+                for token in &def.body {
+                    if let TokenKind::Ident(id) = token.kind {
+                        if thx_macros.contains(&id) {
+                            thx_macros.insert(*name);
+                            added = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        thx_macros
     }
 
     /// 全ターゲットマクロを解析
@@ -358,24 +406,29 @@ impl MacroInferContext {
     pub fn analyze_all_macros<'a>(
         &mut self,
         macro_table: &MacroTable,
-        thx_collector: &ThxCollector,
         interner: &'a StringInterner,
         files: &FileRegistry,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        typedefs: &HashSet<InternedStr>,
+        thx_symbols: (InternedStr, InternedStr, InternedStr),
     ) {
+        // THX 依存マクロを収集（定義順序に依存しない）
+        let thx_macros = self.collect_thx_dependencies(macro_table, thx_symbols);
+
         // ターゲットマクロのみを解析
         for def in macro_table.iter_target_macros() {
             self.analyze_macro(
                 def,
                 macro_table,
-                thx_collector,
+                &thx_macros,
                 interner,
                 files,
                 apidoc,
                 fields_dict,
                 rust_decl_dict,
+                typedefs,
             );
         }
 

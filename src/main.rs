@@ -10,10 +10,10 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict, CallbackPair,
+    generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
     CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
     MacrogenBuilder, PPConfig, ParseResult, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
-    SourceLocation, ThxCollector, TokenKind, TypedSexpPrinter,
+    SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -392,12 +392,8 @@ fn run_infer_macro_types(
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
-    // コールバックペアを作成して Preprocessor に設定
-    let callback_pair = CallbackPair::new(
-        ApidocCollector::new(),
-        ThxCollector::new(pp.interner_mut()),
-    );
-    pp.set_macro_def_callback(Box::new(callback_pair));
+    // ApidocCollector を Preprocessor に設定
+    pp.set_macro_def_callback(Box::new(ApidocCollector::new()));
 
     // パーサー作成
     let mut parser = match Parser::new(pp) {
@@ -413,15 +409,15 @@ fn run_infer_macro_types(
         std::ops::ControlFlow::Continue(())
     });
 
+    // パーサーから typedef 辞書を取得
+    let typedefs = parser.typedefs().clone();
+
     // コールバックを取り出してダウンキャスト
     let callback = pp.take_macro_def_callback().expect("callback should exist");
-    let pair = callback
+    let apidoc_collector = callback
         .into_any()
-        .downcast::<CallbackPair<ApidocCollector, ThxCollector>>()
+        .downcast::<ApidocCollector>()
         .expect("callback type mismatch");
-
-    let apidoc_collector = pair.first;
-    let thx_collector = pair.second;
 
     // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
     {
@@ -455,18 +451,24 @@ fn run_infer_macro_types(
     // MacroInferContext を作成して解析
     let mut infer_ctx = MacroInferContext::new();
 
+    // THX シンボルを事前に intern
+    let sym_athx = pp.interner_mut().intern("aTHX");
+    let sym_tthx = pp.interner_mut().intern("tTHX");
+    let sym_my_perl = pp.interner_mut().intern("my_perl");
+    let thx_symbols = (sym_athx, sym_tthx, sym_my_perl);
 
     let interner = pp.interner();
     let files = pp.files();
 
     infer_ctx.analyze_all_macros(
         pp.macros(),
-        &thx_collector,
         interner,
         files,
         Some(&apidoc),
         Some(&fields_dict),
         rust_decl_dict.as_ref(),
+        &typedefs,
+        thx_symbols,
     );
 
     // パース結果の統計を収集
@@ -500,8 +502,9 @@ fn run_infer_macro_types(
 
     // コメントから収集した apidoc 数
     eprintln!("Apidoc from comments: {}", apidoc_from_comments);
-    // THX 依存マクロ数
-    eprintln!("THX-dependent macros: {}", thx_collector.len());
+    // THX 依存マクロ数（解析済みターゲットマクロのうち）
+    let thx_count = infer_ctx.macros.values().filter(|info| info.is_target && info.is_thx_dependent).count();
+    eprintln!("THX-dependent macros: {}", thx_count);
     eprintln!();
 
     // 各マクロの詳細を出力（辞書順）
@@ -547,20 +550,26 @@ fn run_infer_macro_types(
         );
 
         // 型付き S 式を追加出力（pretty print）
-        if let ParseResult::Expression(ref expr) = info.parse_result {
-            let stdout = io::stdout();
-            let mut handle = stdout.lock();
-            let mut printer = TypedSexpPrinter::new(
-                &mut handle,
-                interner,
-                Some(&apidoc),
-                Some(&fields_dict),
-            );
-            printer.set_pretty(true);
-            printer.set_indent(1);  // 行頭にスペース1文字分のインデント
-            printer.set_skip_first_newline(true);  // 先頭の空行を抑制
-            let _ = printer.print_expr(expr);
-            let _ = writeln!(handle);
+        match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                let mut printer = TypedSexpPrinter::new(
+                    &mut handle,
+                    interner,
+                    Some(&apidoc),
+                    Some(&fields_dict),
+                );
+                printer.set_pretty(true);
+                printer.set_indent(1);  // 行頭にスペース1文字分のインデント
+                printer.set_skip_first_newline(true);  // 先頭の空行を抑制
+                let _ = printer.print_expr(expr);
+                let _ = writeln!(handle);
+            }
+            ParseResult::Unparseable(Some(err_msg)) => {
+                println!("  error: {}", err_msg);
+            }
+            _ => {}
         }
 
         // 型制約の詳細
