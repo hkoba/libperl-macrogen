@@ -297,7 +297,10 @@ impl MacroInferContext {
         };
 
         // マクロ本体を展開（TokenExpander を使用）
-        let expander = TokenExpander::new(macro_table, interner, files);
+        let mut expander = TokenExpander::new(macro_table, interner, files);
+        if let Some(dict) = rust_decl_dict {
+            expander.set_bindings_consts(&dict.consts);
+        }
         let expanded_tokens = expander.expand(&def.body);
 
         // def-use 関係を収集（展開後のトークンから識別子を抽出）

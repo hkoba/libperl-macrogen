@@ -12,6 +12,20 @@ use crate::token::{
     MacroBeginInfo, MacroEndInfo, MacroInvocationKind, Token, TokenId, TokenKind,
 };
 
+/// キーの存在チェックのみを抽象化する trait
+///
+/// HashMap<String, V> の値の型を隠蔽し、キー検索のみを公開する。
+pub trait KeySet {
+    fn contains(&self, key: &str) -> bool;
+}
+
+// HashMap<String, V> に対する汎用実装
+impl<V> KeySet for HashMap<String, V> {
+    fn contains(&self, key: &str) -> bool {
+        self.contains_key(key)
+    }
+}
+
 /// 部分トークン列のマクロ展開器
 ///
 /// MacroTable は readonly で、新しいマクロ定義は追加しない。
@@ -26,6 +40,8 @@ pub struct TokenExpander<'a> {
     no_expand: HashSet<InternedStr>,
     /// マクロ展開マーカーを出力するか
     emit_markers: bool,
+    /// bindings.rs 定数名のキーセット（値の型は隠蔽）
+    bindings_consts: Option<&'a dyn KeySet>,
 }
 
 impl<'a> TokenExpander<'a> {
@@ -41,7 +57,13 @@ impl<'a> TokenExpander<'a> {
             files,
             no_expand: HashSet::new(),
             emit_markers: false,
+            bindings_consts: None,
         }
+    }
+
+    /// bindings.rs の定数名セットを設定
+    pub fn set_bindings_consts(&mut self, consts: &'a dyn KeySet) {
+        self.bindings_consts = Some(consts);
     }
 
     /// 展開しないマクロを追加
@@ -86,6 +108,15 @@ impl<'a> TokenExpander<'a> {
                     if self.no_expand.contains(id) {
                         result.push(token.clone());
                         continue;
+                    }
+
+                    // bindings.rs に定数として存在すればそのまま
+                    if let Some(consts) = self.bindings_consts {
+                        let name_str = self.interner.get(*id);
+                        if consts.contains(name_str) {
+                            result.push(token.clone());
+                            continue;
+                        }
                     }
 
                     // 再帰防止
@@ -135,6 +166,16 @@ impl<'a> TokenExpander<'a> {
                         result.push(token.clone());
                         i += 1;
                         continue;
+                    }
+
+                    // bindings.rs に定数として存在すればそのまま
+                    if let Some(consts) = self.bindings_consts {
+                        let name_str = self.interner.get(*id);
+                        if consts.contains(name_str) {
+                            result.push(token.clone());
+                            i += 1;
+                            continue;
+                        }
                     }
 
                     // 再帰防止
@@ -312,6 +353,24 @@ impl<'a> TokenExpander<'a> {
                         result.extend(expanded);
                     } else if self.no_expand.contains(id) || visited.contains(id) {
                         result.push(token.clone());
+                    } else if let Some(consts) = self.bindings_consts {
+                        // bindings.rs に定数として存在すればそのまま
+                        let name_str = self.interner.get(*id);
+                        if consts.contains(name_str) {
+                            result.push(token.clone());
+                        } else if let Some(def) = self.macro_table.get(*id) {
+                            // マクロ呼び出し（関数マクロでなければ展開）
+                            if !def.is_function() {
+                                visited.insert(*id);
+                                let expanded = self.expand_object_macro(def, token, visited);
+                                result.extend(expanded);
+                                visited.remove(id);
+                            } else {
+                                result.push(token.clone());
+                            }
+                        } else {
+                            result.push(token.clone());
+                        }
                     } else if let Some(def) = self.macro_table.get(*id) {
                         // マクロ呼び出し（関数マクロでなければ展開）
                         if !def.is_function() {
@@ -557,5 +616,59 @@ mod tests {
         assert!(matches!(result[0].kind, TokenKind::Ident(_)));
         assert!(matches!(result[1].kind, TokenKind::Plus));
         assert!(matches!(result[2].kind, TokenKind::IntLit(1)));
+    }
+
+    #[test]
+    fn test_bindings_consts_suppression() {
+        let (mut interner, mut table, files) = make_interner_and_table();
+
+        // BAR を 100 に展開するマクロを定義
+        let value_token = Token::new(TokenKind::IntLit(100), SourceLocation::default());
+        define_object_macro(&mut interner, &mut table, "BAR", vec![value_token]);
+
+        // BAR を含むトークン列を作成
+        let bar_token = make_token(&mut interner, "BAR");
+
+        // bindings_consts に BAR を登録
+        let mut bindings_consts: HashMap<String, String> = HashMap::new();
+        bindings_consts.insert("BAR".to_string(), "u32".to_string());
+
+        // bindings_consts を設定
+        let mut expander = TokenExpander::new(&table, &interner, &files);
+        expander.set_bindings_consts(&bindings_consts);
+
+        // BAR は展開されない（bindings_consts に存在するため）
+        let result = expander.expand(&[bar_token]);
+
+        assert_eq!(result.len(), 1);
+        // 識別子のまま残る
+        assert!(matches!(result[0].kind, TokenKind::Ident(_)));
+    }
+
+    #[test]
+    fn test_bindings_consts_not_in_list() {
+        let (mut interner, mut table, files) = make_interner_and_table();
+
+        // BAR を 100 に展開するマクロを定義
+        let value_token = Token::new(TokenKind::IntLit(100), SourceLocation::default());
+        define_object_macro(&mut interner, &mut table, "BAR", vec![value_token]);
+
+        // BAR を含むトークン列を作成
+        let bar_token = make_token(&mut interner, "BAR");
+
+        // bindings_consts に BAR は含まない
+        let mut bindings_consts: HashMap<String, String> = HashMap::new();
+        bindings_consts.insert("FOO".to_string(), "u32".to_string());
+
+        // bindings_consts を設定
+        let mut expander = TokenExpander::new(&table, &interner, &files);
+        expander.set_bindings_consts(&bindings_consts);
+
+        // BAR は展開される（bindings_consts に存在しないため）
+        let result = expander.expand(&[bar_token]);
+
+        assert_eq!(result.len(), 1);
+        // 100 に展開される
+        assert!(matches!(result[0].kind, TokenKind::IntLit(100)));
     }
 }

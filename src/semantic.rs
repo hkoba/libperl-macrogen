@@ -1370,6 +1370,19 @@ impl<'a> SemanticAnalyzer<'a> {
                     type_env.add_constraint(TypeEnvConstraint::new(
                         expr.id, &ty_str, ConstraintSource::Inferred, "symbol lookup"
                     ));
+                // RustDeclDict から定数の型を取得
+                } else if let Some(rust_decl_dict) = self.rust_decl_dict {
+                    if let Some(rust_const) = rust_decl_dict.lookup_const(name_str) {
+                        type_env.add_constraint(TypeEnvConstraint::new(
+                            expr.id, &rust_const.ty, ConstraintSource::RustBindings, "bindings constant"
+                        ));
+                    } else if name_str == "my_perl" {
+                        // THX 由来の my_perl はデフォルトで *mut PerlInterpreter
+                        type_env.add_constraint(TypeEnvConstraint::new(
+                            expr.id, "*mut PerlInterpreter", ConstraintSource::Inferred,
+                            "THX default type"
+                        ));
+                    }
                 } else if name_str == "my_perl" {
                     // THX 由来の my_perl はデフォルトで *mut PerlInterpreter
                     type_env.add_constraint(TypeEnvConstraint::new(
