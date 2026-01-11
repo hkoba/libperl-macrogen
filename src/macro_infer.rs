@@ -57,6 +57,8 @@ pub struct MacroInferInfo {
     pub is_target: bool,
     /// マクロ本体にトークンがあるかどうか
     pub has_body: bool,
+    /// 関数形式マクロかどうか
+    pub is_function: bool,
 
     /// このマクロが使用する他のマクロ（def-use 関係）
     pub uses: HashSet<InternedStr>,
@@ -83,6 +85,7 @@ impl MacroInferInfo {
             name,
             is_target: false,
             has_body: false,
+            is_function: false,
             uses: HashSet::new(),
             used_by: HashSet::new(),
             is_thx_dependent: false,
@@ -284,6 +287,7 @@ impl MacroInferContext {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
         info.has_body = !def.body.is_empty();
+        info.is_function = matches!(def.kind, MacroKind::Function { .. });
         info.is_thx_dependent = thx_macros.contains(&def.name);
 
         // 関数形式マクロの場合、パラメータを取得
