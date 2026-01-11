@@ -92,6 +92,8 @@ pub struct Parser<'a, S: TokenSource> {
     macro_ctx: MacroContext,
     /// マクロマーカーを処理するか（emit_markers=true の場合に true にする）
     handle_macro_markers: bool,
+    /// do-while 文の末尾セミコロンを省略可能にするフラグ
+    allow_missing_semi: bool,
 }
 
 /// Preprocessor 専用の後方互換コンストラクタ
@@ -140,6 +142,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             typedefs,
             macro_ctx: MacroContext::new(),
             handle_macro_markers: false,
+            allow_missing_semi: false,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -155,6 +158,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             typedefs,
             macro_ctx: MacroContext::new(),
             handle_macro_markers: false,
+            allow_missing_semi: false,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -216,6 +220,17 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     /// マクロ本体など、式だけをパースしたい場合に使用
     pub fn parse_expr_only(&mut self) -> Result<Expr> {
         self.parse_expr()
+    }
+
+    /// 文をパース（末尾セミコロン省略可能）
+    ///
+    /// マクロ body のパースなど、do-while の末尾セミコロンが
+    /// 省略されている場合に使用する。
+    pub fn parse_stmt_allow_missing_semi(&mut self) -> Result<Stmt> {
+        self.allow_missing_semi = true;
+        let result = self.parse_stmt();
+        self.allow_missing_semi = false;
+        result
     }
 
     /// 外部宣言をパース
@@ -1171,7 +1186,15 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         self.expect(&TokenKind::LParen)?;
         let cond = Box::new(self.parse_expr()?);
         self.expect(&TokenKind::RParen)?;
-        self.expect(&TokenKind::Semi)?;
+
+        // allow_missing_semi が true の場合、; は任意
+        if self.allow_missing_semi {
+            if self.check(&TokenKind::Semi) {
+                self.advance()?;
+            }
+        } else {
+            self.expect(&TokenKind::Semi)?;
+        }
 
         Ok(Stmt::DoWhile { body, cond, loc })
     }
@@ -2228,6 +2251,26 @@ pub fn parse_expression_from_tokens_ref(
     let mut source = TokenSliceRef::new(tokens, interner, files);
     let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
     parser.parse_expr_only()
+}
+
+/// トークン列を文としてパース（参照ベース版）
+///
+/// マクロ body のパースに使用。do-while の末尾セミコロンは省略可能。
+///
+/// # Arguments
+/// * `tokens` - パースするトークン列
+/// * `interner` - 文字列インターナーへの参照
+/// * `files` - ファイルレジストリへの参照
+/// * `typedefs` - typedef名のセットへの参照
+pub fn parse_statement_from_tokens_ref(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<Stmt> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.parse_stmt_allow_missing_semi()
 }
 
 /// 型文字列から TypeName をパース

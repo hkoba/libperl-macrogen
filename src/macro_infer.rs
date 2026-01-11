@@ -10,7 +10,7 @@ use crate::ast::{BlockItem, Expr, ExprKind};
 use crate::fields_dict::FieldsDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
-use crate::parser::parse_expression_from_tokens_ref;
+use crate::parser::{parse_expression_from_tokens_ref, parse_statement_from_tokens_ref};
 use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
@@ -329,6 +329,26 @@ impl MacroInferContext {
             }
         }
 
+        // Statement の場合も型制約を収集
+        if let ParseResult::Statement(ref block_items) = info.parse_result {
+            let mut analyzer = SemanticAnalyzer::with_rust_decl_dict(
+                interner,
+                apidoc,
+                fields_dict,
+                rust_decl_dict,
+            );
+
+            // apidoc 型情報付きでパラメータをシンボルテーブルに登録
+            analyzer.register_macro_params_from_apidoc(def.name, &params, files, typedefs);
+
+            // 各 BlockItem について型制約を収集
+            for item in block_items {
+                if let BlockItem::Stmt(stmt) = item {
+                    analyzer.collect_stmt_constraints(stmt, &mut info.type_env);
+                }
+            }
+        }
+
         self.register(info);
     }
 
@@ -349,7 +369,7 @@ impl MacroInferContext {
         }
     }
 
-    /// トークン列を式としてパース試行
+    /// トークン列を式または文としてパース試行
     fn try_parse_tokens(
         &self,
         tokens: &[crate::token::Token],
@@ -359,6 +379,14 @@ impl MacroInferContext {
     ) -> ParseResult {
         if tokens.is_empty() {
             return ParseResult::Unparseable(Some("empty token sequence".to_string()));
+        }
+
+        // 先頭トークンが KwDo または KwIf なら文としてパース試行
+        if matches!(tokens[0].kind, TokenKind::KwDo | TokenKind::KwIf) {
+            match parse_statement_from_tokens_ref(tokens.to_vec(), interner, files, typedefs) {
+                Ok(stmt) => return ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+                Err(_) => {} // フォールスルーして式としてパース
+            }
         }
 
         // 式としてパースを試行

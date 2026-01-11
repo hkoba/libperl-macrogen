@@ -1055,7 +1055,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
     }
 
     /// 文を出力
-    fn print_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+    pub fn print_stmt(&mut self, stmt: &Stmt) -> Result<()> {
         match stmt {
             Stmt::Compound(compound) => self.print_compound_stmt(compound),
             Stmt::Expr(expr, _) => {

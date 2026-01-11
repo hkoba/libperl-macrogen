@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
     generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
-    CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
+    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
     MacrogenBuilder, PPConfig, ParseResult, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
 };
@@ -560,6 +560,21 @@ fn run_infer_macro_types(
                 printer.set_indent(1);  // 行頭にスペース1文字分のインデント
                 printer.set_skip_first_newline(true);  // 先頭の空行を抑制
                 let _ = printer.print_expr(expr);
+                let _ = writeln!(handle);
+            }
+            ParseResult::Statement(block_items) => {
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                let mut printer = TypedSexpPrinter::new(&mut handle, interner);
+                printer.set_type_env(&info.type_env);
+                printer.set_pretty(true);
+                printer.set_indent(1);
+                printer.set_skip_first_newline(true);
+                for item in block_items {
+                    if let BlockItem::Stmt(stmt) = item {
+                        let _ = printer.print_stmt(stmt);
+                    }
+                }
                 let _ = writeln!(handle);
             }
             ParseResult::Unparseable(Some(err_msg)) => {

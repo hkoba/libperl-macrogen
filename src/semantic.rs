@@ -1267,6 +1267,67 @@ impl<'a> SemanticAnalyzer<'a> {
         self.usual_arithmetic_conversion_str(&then_ty, &else_ty)
     }
 
+    /// 文から式の型制約を収集（再帰的に走査）
+    ///
+    /// 文に含まれる式に対して `collect_expr_constraints` を呼び出す。
+    pub fn collect_stmt_constraints(&mut self, stmt: &Stmt, type_env: &mut TypeEnv) {
+        match stmt {
+            Stmt::Compound(compound) => {
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(s) => self.collect_stmt_constraints(s, type_env),
+                        BlockItem::Decl(_) => {} // 宣言は型制約収集の対象外
+                    }
+                }
+            }
+            Stmt::Expr(Some(expr), _) => {
+                self.collect_expr_constraints(expr, type_env);
+            }
+            Stmt::If { cond, then_stmt, else_stmt, .. } => {
+                self.collect_expr_constraints(cond, type_env);
+                self.collect_stmt_constraints(then_stmt, type_env);
+                if let Some(else_s) = else_stmt {
+                    self.collect_stmt_constraints(else_s, type_env);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                self.collect_expr_constraints(cond, type_env);
+                self.collect_stmt_constraints(body, type_env);
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                self.collect_stmt_constraints(body, type_env);
+                self.collect_expr_constraints(cond, type_env);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(ForInit::Expr(e)) = init {
+                    self.collect_expr_constraints(e, type_env);
+                }
+                if let Some(c) = cond {
+                    self.collect_expr_constraints(c, type_env);
+                }
+                if let Some(s) = step {
+                    self.collect_expr_constraints(s, type_env);
+                }
+                self.collect_stmt_constraints(body, type_env);
+            }
+            Stmt::Return(Some(expr), _) => {
+                self.collect_expr_constraints(expr, type_env);
+            }
+            Stmt::Switch { expr, body, .. } => {
+                self.collect_expr_constraints(expr, type_env);
+                self.collect_stmt_constraints(body, type_env);
+            }
+            Stmt::Case { expr, stmt, .. } => {
+                self.collect_expr_constraints(expr, type_env);
+                self.collect_stmt_constraints(stmt, type_env);
+            }
+            Stmt::Default { stmt, .. } | Stmt::Label { stmt, .. } => {
+                self.collect_stmt_constraints(stmt, type_env);
+            }
+            _ => {} // Break, Continue, Goto, Asm, Expr(None), Return(None)
+        }
+    }
+
     /// 式全体から型制約を収集し、全式の型を計算（再帰的に走査）
     ///
     /// 子式を先に処理し、親式の型を後で計算する。
