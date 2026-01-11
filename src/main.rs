@@ -565,11 +565,12 @@ fn run_infer_macro_types(
             ParseResult::Statement(block_items) => {
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
+                let _ = write!(handle, " ");  // 最初の行頭スペース
                 let mut printer = TypedSexpPrinter::new(&mut handle, interner);
                 printer.set_type_env(&info.type_env);
                 printer.set_pretty(true);
-                printer.set_indent(1);
-                printer.set_skip_first_newline(true);
+                printer.set_indent(1);  // 行頭にスペース1文字分のインデント
+                printer.set_skip_first_newline(true);  // 先頭の空行を抑制
                 for item in block_items {
                     if let BlockItem::Stmt(stmt) = item {
                         let _ = printer.print_stmt(stmt);
