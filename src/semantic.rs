@@ -1483,7 +1483,13 @@ impl<'a> SemanticAnalyzer<'a> {
                 let base_ty = self.get_expr_type_str(base.id, type_env);
                 let member_name = self.interner.get(*member);
                 let member_ty = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
+                    // ベース型が既知の場合：従来通り
                     self.lookup_field_type_by_name(struct_name, *member)
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                } else if let Some(fields_dict) = self.fields_dict {
+                    // ベース型が不明な場合：一致型があればそれを使用（O(1)）
+                    fields_dict.get_consistent_field_type(*member)
+                        .map(|s| s.to_string())
                         .unwrap_or_else(|| "<unknown>".to_string())
                 } else {
                     "<unknown>".to_string()

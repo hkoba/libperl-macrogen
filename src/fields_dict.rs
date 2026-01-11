@@ -25,6 +25,8 @@ pub struct FieldsDict {
     field_types: HashMap<(InternedStr, InternedStr), FieldType>,
     /// typedef名 -> 構造体名のマッピング (例: XPV -> xpv)
     typedef_to_struct: HashMap<InternedStr, InternedStr>,
+    /// 一致型キャッシュ: フィールド名 -> 一致型（全バリアントで型が同じ場合のみ Some）
+    consistent_type_cache: HashMap<InternedStr, Option<String>>,
 }
 
 impl FieldsDict {
@@ -455,6 +457,56 @@ impl FieldsDict {
         } else {
             false
         }
+    }
+
+    // ==================== Consistent Type Cache ====================
+
+    /// 一致型キャッシュを構築
+    ///
+    /// 全フィールドについて、全バリアントで型が一致するかを事前計算する。
+    /// パース完了後、型推論前に1回呼び出す。
+    pub fn build_consistent_type_cache(&mut self) {
+        self.consistent_type_cache.clear();
+
+        for (&field_name, structs) in &self.field_to_structs {
+            let consistent_type = self.compute_consistent_type(field_name, structs);
+            self.consistent_type_cache.insert(field_name, consistent_type);
+        }
+    }
+
+    /// 一致型を計算（内部用）
+    fn compute_consistent_type(
+        &self,
+        field_name: InternedStr,
+        structs: &HashSet<InternedStr>,
+    ) -> Option<String> {
+        if structs.is_empty() {
+            return None;
+        }
+
+        let mut first_type: Option<&str> = None;
+
+        for struct_name in structs {
+            if let Some(ft) = self.field_types.get(&(*struct_name, field_name)) {
+                match first_type {
+                    None => first_type = Some(&ft.rust_type),
+                    Some(t) if t != ft.rust_type => return None, // 不一致
+                    Some(_) => {} // 一致、続行
+                }
+            }
+        }
+
+        first_type.map(|s| s.to_string())
+    }
+
+    /// キャッシュから一致型を取得（O(1)）
+    ///
+    /// フィールドが全バリアントで同じ型を持つ場合、その型を返す。
+    /// 型が不一致、またはフィールドが存在しない場合は None。
+    pub fn get_consistent_field_type(&self, field_name: InternedStr) -> Option<&str> {
+        self.consistent_type_cache
+            .get(&field_name)
+            .and_then(|opt| opt.as_deref())
     }
 
     // ==================== Dump and Debug ====================

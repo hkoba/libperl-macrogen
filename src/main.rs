@@ -432,6 +432,9 @@ fn run_infer_macro_types(
         fields_dict.set_unique_field_type(sv_flags, sv);
     }
 
+    // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
+    fields_dict.build_consistent_type_cache();
+
     // Apidoc をロード（ファイルから + コメントから）
     let mut apidoc = if let Some(path) = apidoc_path {
         ApidocDict::load_auto(path)?
