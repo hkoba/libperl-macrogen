@@ -1301,13 +1301,22 @@ impl<'a> SemanticAnalyzer<'a> {
 
             // 識別子
             ExprKind::Ident(name) => {
+                let name_str = self.interner.get(*name);
+
                 // シンボルテーブルから型を取得
                 if let Some(sym) = self.lookup_symbol(*name) {
                     let ty_str = sym.ty.display(self.interner);
                     type_env.add_constraint(TypeEnvConstraint::new(
                         expr.id, &ty_str, ConstraintSource::Inferred, "symbol lookup"
                     ));
+                } else if name_str == "my_perl" {
+                    // THX 由来の my_perl はデフォルトで *mut PerlInterpreter
+                    type_env.add_constraint(TypeEnvConstraint::new(
+                        expr.id, "*mut PerlInterpreter", ConstraintSource::Inferred,
+                        "THX default type"
+                    ));
                 }
+
                 // パラメータ参照の場合、ExprId とパラメータを紐付け
                 if self.is_macro_param(*name) {
                     type_env.link_expr_to_param(expr.id, *name, "parameter reference");
@@ -1379,20 +1388,36 @@ impl<'a> SemanticAnalyzer<'a> {
             // メンバーアクセス
             ExprKind::Member { expr: base, member } => {
                 self.collect_expr_constraints(base, type_env);
-                // TODO: 構造体メンバーの型を取得
-                let _ = member; // unused warning 回避
+
+                let base_ty = self.get_expr_type_str(base.id, type_env);
+                let member_name = self.interner.get(*member);
+                // 直接アクセスの場合、base_ty は構造体名そのもの
+                let member_ty = self.lookup_field_type_by_name(&base_ty, *member)
+                    .unwrap_or_else(|| "<unknown>".to_string());
+
                 type_env.add_constraint(TypeEnvConstraint::new(
-                    expr.id, "<unknown>", ConstraintSource::Inferred, "member access"
+                    expr.id, &member_ty, ConstraintSource::Inferred,
+                    format!("{}.{}", base_ty, member_name)
                 ));
             }
 
             // ポインタメンバーアクセス
             ExprKind::PtrMember { expr: base, member } => {
                 self.collect_expr_constraints(base, type_env);
-                // TODO: 構造体メンバーの型を取得
-                let _ = member;
+
+                // ベース型からメンバー型を推論
+                let base_ty = self.get_expr_type_str(base.id, type_env);
+                let member_name = self.interner.get(*member);
+                let member_ty = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
+                    self.lookup_field_type_by_name(struct_name, *member)
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                } else {
+                    "<unknown>".to_string()
+                };
+
                 type_env.add_constraint(TypeEnvConstraint::new(
-                    expr.id, "<unknown>", ConstraintSource::Inferred, "pointer member access"
+                    expr.id, &member_ty, ConstraintSource::Inferred,
+                    format!("{}->{}", base_ty, member_name)
                 ));
             }
 
@@ -1534,6 +1559,43 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             None
         }
+    }
+
+    /// ポインタ型文字列から構造体名を抽出（文字列として返す）
+    /// 例: "XPV*" → Some("XPV"), "*mut SV" → Some("SV")
+    fn extract_struct_name_from_pointer_type<'b>(&self, ty_str: &'b str) -> Option<&'b str> {
+        let trimmed = ty_str.trim();
+
+        // "*mut TYPE" 形式（Rust スタイル）
+        if let Some(rest) = trimmed.strip_prefix("*mut ") {
+            return Some(rest.trim());
+        }
+        // "* mut TYPE" 形式（syn の出力形式）
+        if let Some(rest) = trimmed.strip_prefix("* mut ") {
+            return Some(rest.trim());
+        }
+        // "*const TYPE" 形式
+        if let Some(rest) = trimmed.strip_prefix("*const ") {
+            return Some(rest.trim());
+        }
+        // "* const TYPE" 形式
+        if let Some(rest) = trimmed.strip_prefix("* const ") {
+            return Some(rest.trim());
+        }
+
+        // "TYPE*" 形式（C スタイル）
+        if let Some(base) = trimmed.strip_suffix('*') {
+            return Some(base.trim());
+        }
+
+        None
+    }
+
+    /// 構造体メンバーの型を取得（FieldsDict から、構造体名は文字列）
+    fn lookup_field_type_by_name(&self, struct_name: &str, field_name: InternedStr) -> Option<String> {
+        let fields_dict = self.fields_dict?;
+        let field_type = fields_dict.get_field_type_by_name(struct_name, field_name, self.interner)?;
+        Some(field_type.rust_type.clone())
     }
 
     /// 関数呼び出しから型制約を収集

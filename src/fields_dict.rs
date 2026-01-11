@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StructSpec, TypeSpec};
+use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StorageClass, StructSpec, TypeSpec};
 use crate::intern::{InternedStr, StringInterner};
 
 /// フィールドの型情報
@@ -23,6 +23,8 @@ pub struct FieldsDict {
     field_to_structs: HashMap<InternedStr, HashSet<InternedStr>>,
     /// (構造体名, フィールド名) -> フィールド型
     field_types: HashMap<(InternedStr, InternedStr), FieldType>,
+    /// typedef名 -> 構造体名のマッピング (例: XPV -> xpv)
+    typedef_to_struct: HashMap<InternedStr, InternedStr>,
 }
 
 impl FieldsDict {
@@ -51,6 +53,11 @@ impl FieldsDict {
 
     /// 宣言からフィールド情報を収集
     fn collect_from_declaration(&mut self, decl: &Declaration, interner: &StringInterner) {
+        // typedef struct xpv XPV; のような宣言を検出して typedef マッピングを登録
+        if decl.specs.storage == Some(StorageClass::Typedef) {
+            self.collect_typedef_aliases(decl, interner);
+        }
+
         for type_spec in &decl.specs.type_specs {
             match type_spec {
                 TypeSpec::Struct(spec) => {
@@ -61,6 +68,38 @@ impl FieldsDict {
                     self.collect_from_struct_spec(spec, interner);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// typedef 宣言から typedef名 -> 構造体名 のマッピングを収集
+    /// 例: typedef struct xpv XPV; → XPV -> xpv
+    fn collect_typedef_aliases(&mut self, decl: &Declaration, _interner: &StringInterner) {
+        // 構造体/共用体の名前を取得
+        let mut struct_name: Option<InternedStr> = None;
+        for type_spec in &decl.specs.type_specs {
+            match type_spec {
+                TypeSpec::Struct(spec) | TypeSpec::Union(spec) => {
+                    if let Some(name) = spec.name {
+                        struct_name = Some(name);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 構造体名がある場合、宣言子から typedef 名を取得
+        if let Some(s_name) = struct_name {
+            for init_decl in &decl.declarators {
+                // ポインタなしの直接typedef のみ対象
+                // 例: typedef struct xpv XPV; は対象
+                //     typedef struct xpv *XPV; は対象外
+                if init_decl.declarator.derived.is_empty() {
+                    if let Some(typedef_name) = init_decl.declarator.name {
+                        self.typedef_to_struct.insert(typedef_name, s_name);
+                    }
+                }
             }
         }
     }
@@ -270,6 +309,60 @@ impl FieldsDict {
     pub fn get_unique_field_type(&self, field_name: InternedStr) -> Option<&FieldType> {
         let struct_name = self.lookup_unique(field_name)?;
         self.field_types.get(&(struct_name, field_name))
+    }
+
+    /// 構造体名（文字列）とフィールド名からフィールド型を取得
+    /// StringInterner が immutable な場合に使用する
+    /// typedef 名でも検索可能（例: XPV で検索すると xpv のフィールドを返す）
+    pub fn get_field_type_by_name(
+        &self,
+        struct_name_str: &str,
+        field_name: InternedStr,
+        interner: &StringInterner,
+    ) -> Option<&FieldType> {
+        // まず直接検索
+        for ((s_name, f_name), field_type) in &self.field_types {
+            if interner.get(*s_name) == struct_name_str && *f_name == field_name {
+                return Some(field_type);
+            }
+        }
+
+        // typedef 名から構造体名を解決して再検索
+        if let Some(resolved_struct_name) = self.resolve_typedef_by_name(struct_name_str, interner) {
+            let resolved_str = interner.get(resolved_struct_name);
+            for ((s_name, f_name), field_type) in &self.field_types {
+                if interner.get(*s_name) == resolved_str && *f_name == field_name {
+                    return Some(field_type);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// typedef 名を登録
+    pub fn register_typedef(&mut self, typedef_name: InternedStr, struct_name: InternedStr) {
+        self.typedef_to_struct.insert(typedef_name, struct_name);
+    }
+
+    /// typedef 名から構造体名を解決（InternedStr ベース）
+    pub fn resolve_typedef(&self, typedef_name: InternedStr) -> Option<InternedStr> {
+        self.typedef_to_struct.get(&typedef_name).copied()
+    }
+
+    /// typedef 名から構造体名を解決（文字列ベース）
+    fn resolve_typedef_by_name(&self, typedef_name_str: &str, interner: &StringInterner) -> Option<InternedStr> {
+        for (typedef_name, struct_name) in &self.typedef_to_struct {
+            if interner.get(*typedef_name) == typedef_name_str {
+                return Some(*struct_name);
+            }
+        }
+        None
+    }
+
+    /// 登録された typedef の数を取得
+    pub fn typedef_count(&self) -> usize {
+        self.typedef_to_struct.len()
     }
 
     /// フィールド型をオーバーライド設定
