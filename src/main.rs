@@ -500,7 +500,8 @@ fn run_infer_macro_types(
     eprintln!("  - Unparseable: {}", unparseable_count);
     eprintln!("Confirmed (type complete): {}", stats.confirmed);
     eprintln!("Unconfirmed (pending): {}", stats.unconfirmed);
-    eprintln!("Unknown (unparseable): {}", stats.unknown);
+    eprintln!("Args unknown: {}", stats.args_unknown);
+    eprintln!("Return unknown: {}", stats.return_unknown);
     eprintln!();
 
     // コメントから収集した apidoc 数

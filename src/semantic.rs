@@ -356,6 +356,8 @@ pub struct SemanticAnalyzer<'a> {
     constraint_mode: bool,
     /// マクロパラメータ名の集合（型制約収集用）
     macro_params: HashSet<InternedStr>,
+    /// 確定済みマクロの戻り値型（マクロ名 -> 戻り値型）
+    macro_return_types: HashMap<String, String>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -391,7 +393,18 @@ impl<'a> SemanticAnalyzer<'a> {
             constraints: Vec::new(),
             constraint_mode: false,
             macro_params: HashSet::new(),
+            macro_return_types: HashMap::new(),
         }
+    }
+
+    /// 確定済みマクロの戻り値型を登録
+    pub fn register_macro_return_type(&mut self, macro_name: &str, return_type: &str) {
+        self.macro_return_types.insert(macro_name.to_string(), return_type.to_string());
+    }
+
+    /// マクロの戻り値型を取得
+    pub fn get_macro_return_type(&self, macro_name: &str) -> Option<&str> {
+        self.macro_return_types.get(macro_name).map(|s| s.as_str())
     }
 
     /// 新しいスコープを開始
@@ -1749,6 +1762,17 @@ impl<'a> SemanticAnalyzer<'a> {
                     type_env.add_constraint(return_constraint);
                 }
             }
+        }
+
+        // 確定済みマクロの戻り値型を参照
+        if let Some(return_type) = self.macro_return_types.get(func_name_str) {
+            let return_constraint = TypeEnvConstraint::new(
+                call_expr_id,
+                return_type,
+                ConstraintSource::Inferred,
+                format!("return type of macro {}()", func_name_str),
+            );
+            type_env.add_constraint(return_constraint);
         }
     }
 

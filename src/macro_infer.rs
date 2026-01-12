@@ -77,8 +77,11 @@ pub struct MacroInferInfo {
     /// 型環境（収集された型制約）
     pub type_env: TypeEnv,
 
-    /// 推論状態
-    pub infer_status: InferStatus,
+    /// 引数の型推論状態
+    pub args_infer_status: InferStatus,
+
+    /// 戻り値の型推論状態
+    pub return_infer_status: InferStatus,
 }
 
 impl MacroInferInfo {
@@ -95,8 +98,15 @@ impl MacroInferInfo {
             has_token_pasting: false,
             parse_result: ParseResult::Unparseable(None),
             type_env: TypeEnv::new(),
-            infer_status: InferStatus::Pending,
+            args_infer_status: InferStatus::Pending,
+            return_infer_status: InferStatus::Pending,
         }
+    }
+
+    /// 引数と戻り値の両方が確定しているか
+    pub fn is_fully_confirmed(&self) -> bool {
+        self.args_infer_status == InferStatus::TypeComplete
+            && self.return_infer_status == InferStatus::TypeComplete
     }
 
     /// 使用するマクロを追加
@@ -122,6 +132,29 @@ impl MacroInferInfo {
     /// パース可能かどうか
     pub fn is_parseable(&self) -> bool {
         !matches!(self.parse_result, ParseResult::Unparseable(_))
+    }
+
+    /// マクロの戻り値型を取得
+    ///
+    /// 1. return_constraints があればそれを使用
+    /// 2. 式マクロの場合、ルート式の型制約を使用
+    pub fn get_return_type(&self) -> Option<&str> {
+        // まず return_constraints を確認
+        if let Some(ty) = self.type_env.get_return_type() {
+            return Some(ty);
+        }
+
+        // 式マクロの場合、ルート式の型を取得
+        if let ParseResult::Expression(ref expr) = self.parse_result {
+            if let Some(constraints) = self.type_env.get_expr_constraints(expr.id) {
+                // 最初の制約の型を返す
+                if let Some(constraint) = constraints.first() {
+                    return Some(&constraint.ty);
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -197,16 +230,14 @@ impl MacroInferContext {
     /// 各マクロの状態に基づいて confirmed/unconfirmed/unknown に分類する。
     pub fn classify_initial(&mut self) {
         for (name, info) in &self.macros {
-            match info.infer_status {
-                InferStatus::TypeComplete => {
-                    self.confirmed.insert(*name);
-                }
-                InferStatus::TypeIncomplete | InferStatus::Pending => {
-                    self.unconfirmed.insert(*name);
-                }
-                InferStatus::TypeUnknown => {
-                    self.unknown.insert(*name);
-                }
+            if info.is_fully_confirmed() {
+                self.confirmed.insert(*name);
+            } else if info.args_infer_status == InferStatus::TypeUnknown
+                || info.return_infer_status == InferStatus::TypeUnknown
+            {
+                self.unknown.insert(*name);
+            } else {
+                self.unconfirmed.insert(*name);
             }
         }
     }
@@ -248,34 +279,210 @@ impl MacroInferContext {
         self.unconfirmed.remove(&name);
         self.confirmed.insert(name);
         if let Some(info) = self.macros.get_mut(&name) {
-            info.infer_status = InferStatus::TypeComplete;
+            info.args_infer_status = InferStatus::TypeComplete;
+            info.return_infer_status = InferStatus::TypeComplete;
         }
     }
 
-    /// マクロを未知に移動
-    pub fn mark_unknown(&mut self, name: InternedStr) {
+    /// マクロを未知に移動（引数側）
+    pub fn mark_args_unknown(&mut self, name: InternedStr) {
+        if let Some(info) = self.macros.get_mut(&name) {
+            info.args_infer_status = InferStatus::TypeUnknown;
+        }
+    }
+
+    /// マクロを未知に移動（戻り値側）
+    pub fn mark_return_unknown(&mut self, name: InternedStr) {
+        if let Some(info) = self.macros.get_mut(&name) {
+            info.return_infer_status = InferStatus::TypeUnknown;
+        }
+    }
+
+    /// マクロを unknown 集合に移動
+    pub fn move_to_unknown(&mut self, name: InternedStr) {
         self.unconfirmed.remove(&name);
         self.unknown.insert(name);
-        if let Some(info) = self.macros.get_mut(&name) {
-            info.infer_status = InferStatus::TypeUnknown;
-        }
     }
 
     /// 統計情報を取得
     pub fn stats(&self) -> MacroInferStats {
+        let mut args_unknown = 0;
+        let mut return_unknown = 0;
+        for info in self.macros.values() {
+            if info.args_infer_status == InferStatus::TypeUnknown {
+                args_unknown += 1;
+            }
+            if info.return_infer_status == InferStatus::TypeUnknown {
+                return_unknown += 1;
+            }
+        }
         MacroInferStats {
             total: self.macros.len(),
             confirmed: self.confirmed.len(),
             unconfirmed: self.unconfirmed.len(),
-            unknown: self.unknown.len(),
+            args_unknown,
+            return_unknown,
         }
     }
 
-    /// マクロを解析して MacroInferInfo を作成
+    /// Phase 1: MacroInferInfo の初期構築（パースまで、型推論なし）
+    ///
+    /// 返り値: (info, has_pasting_direct, has_thx_direct)
+    /// - has_pasting_direct: マクロ本体に直接 ## が含まれるか
+    /// - has_thx_direct: マクロ本体に直接 aTHX/tTHX/my_perl が含まれるか
+    pub fn build_macro_info(
+        &self,
+        def: &MacroDef,
+        macro_table: &MacroTable,
+        interner: &StringInterner,
+        files: &FileRegistry,
+        rust_decl_dict: Option<&RustDeclDict>,
+        typedefs: &HashSet<InternedStr>,
+        thx_symbols: (InternedStr, InternedStr, InternedStr),
+    ) -> (MacroInferInfo, bool, bool) {
+        let mut info = MacroInferInfo::new(def.name);
+        info.is_target = def.is_target;
+        info.has_body = !def.body.is_empty();
+        info.is_function = matches!(def.kind, MacroKind::Function { .. });
+
+        // 直接 ## を含むかチェック
+        let has_pasting_direct = def.body.iter().any(|t| matches!(t.kind, TokenKind::HashHash));
+
+        // 直接 THX トークンを含むかチェック
+        let (sym_athx, sym_tthx, sym_my_perl) = thx_symbols;
+        let has_thx_direct = def.body.iter().any(|t| {
+            if let TokenKind::Ident(id) = t.kind {
+                id == sym_athx || id == sym_tthx || id == sym_my_perl
+            } else {
+                false
+            }
+        });
+
+        // 初期値を設定（後で propagate で上書きされる可能性あり）
+        info.has_token_pasting = has_pasting_direct;
+        info.is_thx_dependent = has_thx_direct;
+
+        // マクロ本体を展開（TokenExpander を使用）
+        let mut expander = TokenExpander::new(macro_table, interner, files);
+        if let Some(dict) = rust_decl_dict {
+            expander.set_bindings_consts(&dict.consts);
+        }
+        let expanded_tokens = expander.expand_with_calls(&def.body);
+
+        // def-use 関係を収集（展開後のトークンから識別子を抽出）
+        self.collect_uses(&expanded_tokens, macro_table, &mut info);
+
+        // パースを試行
+        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+
+        (info, has_pasting_direct, has_thx_direct)
+    }
+
+    /// Phase 2: 型推論の適用
+    ///
+    /// 既に登録済みの MacroInferInfo に対して型制約を収集する
+    pub fn infer_macro_types<'a>(
+        &mut self,
+        name: InternedStr,
+        params: &[InternedStr],
+        interner: &'a StringInterner,
+        files: &FileRegistry,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+        rust_decl_dict: Option<&'a RustDeclDict>,
+        typedefs: &HashSet<InternedStr>,
+    ) {
+        // 先に確定済みマクロの戻り値型を収集（借用の競合を避けるため）
+        let confirmed_return_types = self.collect_confirmed_return_types(interner);
+
+        let info = match self.macros.get_mut(&name) {
+            Some(info) => info,
+            None => return,
+        };
+
+        // パース成功した場合、型制約を収集
+        if let ParseResult::Expression(ref expr) = info.parse_result {
+            let mut analyzer = SemanticAnalyzer::with_rust_decl_dict(
+                interner,
+                apidoc,
+                fields_dict,
+                rust_decl_dict,
+            );
+
+            // 確定済みマクロの戻り値型を登録
+            for (macro_name, return_type) in &confirmed_return_types {
+                analyzer.register_macro_return_type(macro_name, return_type);
+            }
+
+            // apidoc 型情報付きでパラメータをシンボルテーブルに登録
+            analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
+
+            // 全式の型制約を収集
+            analyzer.collect_expr_constraints(expr, &mut info.type_env);
+
+            // マクロ自体の戻り値型を制約として追加
+            if let Some(apidoc_dict) = apidoc {
+                let macro_name_str = interner.get(name);
+                if let Some(entry) = apidoc_dict.get(macro_name_str) {
+                    if let Some(ref return_type) = entry.return_type {
+                        info.type_env.add_return_constraint(TypeConstraint::new(
+                            expr.id,
+                            return_type,
+                            ConstraintSource::Apidoc,
+                            format!("return type of macro {}", macro_name_str),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Statement の場合も型制約を収集
+        if let ParseResult::Statement(ref block_items) = info.parse_result {
+            let mut analyzer = SemanticAnalyzer::with_rust_decl_dict(
+                interner,
+                apidoc,
+                fields_dict,
+                rust_decl_dict,
+            );
+
+            // 確定済みマクロの戻り値型を登録
+            for (macro_name, return_type) in &confirmed_return_types {
+                analyzer.register_macro_return_type(macro_name, return_type);
+            }
+
+            // apidoc 型情報付きでパラメータをシンボルテーブルに登録
+            analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
+
+            // 各 BlockItem について型制約を収集
+            for item in block_items {
+                if let BlockItem::Stmt(stmt) = item {
+                    analyzer.collect_stmt_constraints(stmt, &mut info.type_env);
+                }
+            }
+        }
+    }
+
+    /// 確定済みマクロの戻り値型を収集
+    fn collect_confirmed_return_types(&self, interner: &StringInterner) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for confirmed_name in &self.confirmed {
+            if let Some(confirmed_info) = self.macros.get(confirmed_name) {
+                // MacroInferInfo::get_return_type() を使用（ルート式の型も考慮）
+                if let Some(return_type) = confirmed_info.get_return_type() {
+                    let name_str = interner.get(*confirmed_name);
+                    result.push((name_str.to_string(), return_type.to_string()));
+                }
+            }
+        }
+        result
+    }
+
+    /// マクロを解析して MacroInferInfo を作成（従来のAPI - 互換性のため保持）
     ///
     /// 1. マクロ本体をパース（式 or 文）
     /// 2. def-use 関係を収集（使用するマクロ/関数）
     /// 3. 初期型制約を収集
+    #[allow(dead_code)]
     pub fn analyze_macro<'a>(
         &mut self,
         def: &MacroDef,
@@ -427,6 +634,9 @@ impl MacroInferContext {
     /// 2パスで推移的閉包を計算:
     /// 1. 直接 aTHX, tTHX, my_perl を含むマクロを収集
     /// 2. THX マクロを使用するマクロも THX 依存として追加（収束まで繰り返し）
+    ///
+    /// Note: 現在は propagate_flag_via_used_by で代替
+    #[allow(dead_code)]
     fn collect_thx_dependencies(
         &self,
         macro_table: &MacroTable,
@@ -473,6 +683,9 @@ impl MacroInferContext {
     }
 
     /// トークン連結 (##) 依存を収集（推移的閉包）
+    ///
+    /// Note: 現在は propagate_flag_via_used_by で代替
+    #[allow(dead_code)]
     fn collect_pasting_dependencies(
         &self,
         macro_table: &MacroTable,
@@ -528,32 +741,136 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
     ) {
-        // THX 依存マクロを収集（定義順序に依存しない）
-        let thx_macros = self.collect_thx_dependencies(macro_table, thx_symbols);
-        // ## 依存マクロを収集（定義順序に依存しない）
-        let pasting_macros = self.collect_pasting_dependencies(macro_table);
+        // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
+        let mut thx_initial = HashSet::new();
+        let mut pasting_initial = HashSet::new();
 
-        // ターゲットマクロのみを解析
         for def in macro_table.iter_target_macros() {
-            self.analyze_macro(
-                def,
-                macro_table,
-                &thx_macros,
-                &pasting_macros,
-                interner,
-                files,
-                apidoc,
-                fields_dict,
-                rust_decl_dict,
-                typedefs,
+            let (info, has_pasting, has_thx) = self.build_macro_info(
+                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols
             );
+            if has_pasting {
+                pasting_initial.insert(def.name);
+            }
+            if has_thx {
+                thx_initial.insert(def.name);
+            }
+            self.register(info);
         }
 
-        // def-use 関係を構築
+        // Step 2: used_by を構築
         self.build_use_relations();
 
-        // 初期分類
-        self.classify_initial();
+        // Step 3: THX の推移閉包を計算（used_by 経由）
+        self.propagate_flag_via_used_by(&thx_initial, true);
+
+        // Step 4: ## の推移閉包を計算（used_by 経由）
+        self.propagate_flag_via_used_by(&pasting_initial, false);
+
+        // Step 5: 全マクロを unconfirmed に
+        for name in self.macros.keys().copied().collect::<Vec<_>>() {
+            self.unconfirmed.insert(name);
+        }
+
+        // Step 6: 依存順に型推論
+        self.infer_types_in_dependency_order(
+            macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs
+        );
+    }
+
+    /// used_by を辿ってフラグを推移的に伝播
+    ///
+    /// is_thx が true の場合は is_thx_dependent を、false の場合は has_token_pasting を設定
+    fn propagate_flag_via_used_by(&mut self, initial_set: &HashSet<InternedStr>, is_thx: bool) {
+        // 初期集合のフラグを設定
+        for name in initial_set {
+            if let Some(info) = self.macros.get_mut(name) {
+                if is_thx {
+                    info.is_thx_dependent = true;
+                } else {
+                    info.has_token_pasting = true;
+                }
+            }
+        }
+
+        // used_by を辿って伝播
+        let mut to_propagate: Vec<InternedStr> = initial_set.iter().copied().collect();
+
+        while let Some(name) = to_propagate.pop() {
+            let used_by_list: Vec<InternedStr> = self.macros
+                .get(&name)
+                .map(|info| info.used_by.iter().copied().collect())
+                .unwrap_or_default();
+
+            for user in used_by_list {
+                if let Some(user_info) = self.macros.get_mut(&user) {
+                    let flag = if is_thx {
+                        &mut user_info.is_thx_dependent
+                    } else {
+                        &mut user_info.has_token_pasting
+                    };
+                    if !*flag {
+                        *flag = true;
+                        to_propagate.push(user);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 依存順に型推論を実行
+    fn infer_types_in_dependency_order<'a>(
+        &mut self,
+        macro_table: &MacroTable,
+        interner: &'a StringInterner,
+        files: &FileRegistry,
+        apidoc: Option<&'a ApidocDict>,
+        fields_dict: Option<&'a FieldsDict>,
+        rust_decl_dict: Option<&'a RustDeclDict>,
+        typedefs: &HashSet<InternedStr>,
+    ) {
+        loop {
+            let candidates = self.get_inference_candidates();
+            if candidates.is_empty() {
+                // 残りを全て unknown へ
+                let remaining: Vec<_> = self.unconfirmed.iter().copied().collect();
+                for name in remaining {
+                    self.move_to_unknown(name);
+                }
+                break;
+            }
+
+            for name in candidates {
+                // パラメータを取得
+                let params: Vec<InternedStr> = macro_table
+                    .get(name)
+                    .map(|def| match &def.kind {
+                        MacroKind::Function { params, .. } => params.clone(),
+                        MacroKind::Object => vec![],
+                    })
+                    .unwrap_or_default();
+
+                // 型推論を実行
+                self.infer_macro_types(
+                    name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs
+                );
+
+                // 推論結果に基づいて分類
+                let is_confirmed = self.macros.get(&name)
+                    .map(|info| {
+                        // 戻り値型が決まっていれば confirmed とする
+                        // MacroInferInfo::get_return_type() を使用（ルート式の型も考慮）
+                        info.get_return_type().is_some()
+                    })
+                    .unwrap_or(false);
+
+                if is_confirmed {
+                    self.mark_confirmed(name);
+                } else {
+                    self.move_to_unknown(name);
+                }
+            }
+        }
     }
 
     /// 式から使用される関数/マクロを再帰的に収集
@@ -630,15 +947,18 @@ pub struct MacroInferStats {
     pub total: usize,
     pub confirmed: usize,
     pub unconfirmed: usize,
-    pub unknown: usize,
+    /// 引数の型が unknown のマクロ数
+    pub args_unknown: usize,
+    /// 戻り値の型が unknown のマクロ数
+    pub return_unknown: usize,
 }
 
 impl std::fmt::Display for MacroInferStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "MacroInferStats {{ total: {}, confirmed: {}, unconfirmed: {}, unknown: {} }}",
-            self.total, self.confirmed, self.unconfirmed, self.unknown
+            "MacroInferStats {{ total: {}, confirmed: {}, unconfirmed: {}, args_unknown: {}, return_unknown: {} }}",
+            self.total, self.confirmed, self.unconfirmed, self.args_unknown, self.return_unknown
         )
     }
 }
@@ -662,7 +982,8 @@ mod tests {
         assert!(info.uses.is_empty());
         assert!(info.used_by.is_empty());
         assert!(!info.is_parseable());
-        assert_eq!(info.infer_status, InferStatus::Pending);
+        assert_eq!(info.args_infer_status, InferStatus::Pending);
+        assert_eq!(info.return_infer_status, InferStatus::Pending);
     }
 
     #[test]
@@ -731,7 +1052,8 @@ mod tests {
 
         // BAZ is standalone (confirmed)
         let mut baz_info = MacroInferInfo::new(baz);
-        baz_info.infer_status = InferStatus::TypeComplete;
+        baz_info.args_infer_status = InferStatus::TypeComplete;
+        baz_info.return_infer_status = InferStatus::TypeComplete;
         ctx.register(baz_info);
 
         ctx.classify_initial();

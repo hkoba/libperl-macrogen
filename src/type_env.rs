@@ -166,6 +166,11 @@ impl TypeEnv {
         self.return_constraints.len()
     }
 
+    /// 戻り値の型を取得（最初の制約から）
+    pub fn get_return_type(&self) -> Option<&str> {
+        self.return_constraints.first().map(|c| c.ty.as_str())
+    }
+
     /// 全制約の総数
     pub fn total_constraint_count(&self) -> usize {
         self.param_constraint_count() + self.expr_constraint_count() + self.return_constraint_count()
