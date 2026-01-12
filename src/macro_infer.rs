@@ -381,6 +381,7 @@ impl MacroInferContext {
     /// Phase 2: 型推論の適用
     ///
     /// 既に登録済みの MacroInferInfo に対して型制約を収集する
+    /// `return_types_cache` は確定済みマクロの戻り値型キャッシュ
     pub fn infer_macro_types<'a>(
         &mut self,
         name: InternedStr,
@@ -391,10 +392,8 @@ impl MacroInferContext {
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
         typedefs: &HashSet<InternedStr>,
+        return_types_cache: &HashMap<String, String>,
     ) {
-        // 先に確定済みマクロの戻り値型を収集（借用の競合を避けるため）
-        let confirmed_return_types = self.collect_confirmed_return_types(interner);
-
         let info = match self.macros.get_mut(&name) {
             Some(info) => info,
             None => return,
@@ -409,10 +408,8 @@ impl MacroInferContext {
                 rust_decl_dict,
             );
 
-            // 確定済みマクロの戻り値型を登録
-            for (macro_name, return_type) in &confirmed_return_types {
-                analyzer.register_macro_return_type(macro_name, return_type);
-            }
+            // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
+            analyzer.set_macro_return_types(return_types_cache);
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
             analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
@@ -445,10 +442,8 @@ impl MacroInferContext {
                 rust_decl_dict,
             );
 
-            // 確定済みマクロの戻り値型を登録
-            for (macro_name, return_type) in &confirmed_return_types {
-                analyzer.register_macro_return_type(macro_name, return_type);
-            }
+            // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
+            analyzer.set_macro_return_types(return_types_cache);
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
             analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
@@ -462,19 +457,13 @@ impl MacroInferContext {
         }
     }
 
-    /// 確定済みマクロの戻り値型を収集
-    fn collect_confirmed_return_types(&self, interner: &StringInterner) -> Vec<(String, String)> {
-        let mut result = Vec::new();
-        for confirmed_name in &self.confirmed {
-            if let Some(confirmed_info) = self.macros.get(confirmed_name) {
-                // MacroInferInfo::get_return_type() を使用（ルート式の型も考慮）
-                if let Some(return_type) = confirmed_info.get_return_type() {
-                    let name_str = interner.get(*confirmed_name);
-                    result.push((name_str.to_string(), return_type.to_string()));
-                }
-            }
-        }
-        result
+    /// マクロの戻り値型を取得（キャッシュ更新用）
+    pub fn get_macro_return_type(&self, name: InternedStr, interner: &StringInterner) -> Option<(String, String)> {
+        self.macros.get(&name).and_then(|info| {
+            info.get_return_type().map(|ty| {
+                (interner.get(name).to_string(), ty.to_string())
+            })
+        })
     }
 
     /// マクロを解析して MacroInferInfo を作成（従来のAPI - 互換性のため保持）
@@ -829,6 +818,9 @@ impl MacroInferContext {
         rust_decl_dict: Option<&'a RustDeclDict>,
         typedefs: &HashSet<InternedStr>,
     ) {
+        // 確定済みマクロの戻り値型キャッシュ（O(N²) を避けるため）
+        let mut return_types_cache: HashMap<String, String> = HashMap::new();
+
         loop {
             let candidates = self.get_inference_candidates();
             if candidates.is_empty() {
@@ -850,9 +842,10 @@ impl MacroInferContext {
                     })
                     .unwrap_or_default();
 
-                // 型推論を実行
+                // 型推論を実行（キャッシュを渡す）
                 self.infer_macro_types(
-                    name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs
+                    name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs,
+                    &return_types_cache,
                 );
 
                 // 推論結果に基づいて分類
@@ -865,6 +858,10 @@ impl MacroInferContext {
                     .unwrap_or(false);
 
                 if is_confirmed {
+                    // キャッシュに戻り値型を追加
+                    if let Some((macro_name, return_type)) = self.get_macro_return_type(name, interner) {
+                        return_types_cache.insert(macro_name, return_type);
+                    }
                     self.mark_confirmed(name);
                 } else {
                     self.move_to_unknown(name);

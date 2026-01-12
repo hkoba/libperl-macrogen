@@ -397,9 +397,17 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
-    /// 確定済みマクロの戻り値型を登録
+    /// 確定済みマクロの戻り値型を登録（単一マクロ）
+    #[allow(dead_code)]
     pub fn register_macro_return_type(&mut self, macro_name: &str, return_type: &str) {
         self.macro_return_types.insert(macro_name.to_string(), return_type.to_string());
+    }
+
+    /// 確定済みマクロの戻り値型を一括設定（キャッシュから）
+    ///
+    /// O(N²) を避けるため、キャッシュ全体を一度にクローンする
+    pub fn set_macro_return_types(&mut self, cache: &HashMap<String, String>) {
+        self.macro_return_types = cache.clone();
     }
 
     /// マクロの戻り値型を取得
