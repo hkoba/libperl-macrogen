@@ -359,8 +359,8 @@ pub struct SemanticAnalyzer<'a> {
     constraint_mode: bool,
     /// マクロパラメータ名の集合（型制約収集用）
     macro_params: HashSet<InternedStr>,
-    /// 確定済みマクロの戻り値型（マクロ名 -> 戻り値型）
-    macro_return_types: HashMap<String, String>,
+    /// 確定済みマクロの戻り値型（マクロ名 -> 戻り値型）への参照
+    macro_return_types: Option<&'a HashMap<String, String>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -398,26 +398,20 @@ impl<'a> SemanticAnalyzer<'a> {
             constraints: Vec::new(),
             constraint_mode: false,
             macro_params: HashSet::new(),
-            macro_return_types: HashMap::new(),
+            macro_return_types: None,
         }
     }
 
-    /// 確定済みマクロの戻り値型を登録（単一マクロ）
-    #[allow(dead_code)]
-    pub fn register_macro_return_type(&mut self, macro_name: &str, return_type: &str) {
-        self.macro_return_types.insert(macro_name.to_string(), return_type.to_string());
-    }
-
-    /// 確定済みマクロの戻り値型を一括設定（キャッシュから）
-    ///
-    /// O(N²) を避けるため、キャッシュ全体を一度にクローンする
-    pub fn set_macro_return_types(&mut self, cache: &HashMap<String, String>) {
-        self.macro_return_types = cache.clone();
+    /// 確定済みマクロの戻り値型キャッシュへの参照を設定
+    pub fn set_macro_return_types(&mut self, cache: &'a HashMap<String, String>) {
+        self.macro_return_types = Some(cache);
     }
 
     /// マクロの戻り値型を取得
     pub fn get_macro_return_type(&self, macro_name: &str) -> Option<&str> {
-        self.macro_return_types.get(macro_name).map(|s| s.as_str())
+        self.macro_return_types
+            .and_then(|cache| cache.get(macro_name))
+            .map(|s| s.as_str())
     }
 
     /// 新しいスコープを開始
@@ -1876,7 +1870,7 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         // 確定済みマクロの戻り値型を参照
-        if let Some(return_type) = self.macro_return_types.get(func_name_str) {
+        if let Some(return_type) = self.get_macro_return_type(func_name_str) {
             let return_constraint = TypeEnvConstraint::new(
                 call_expr_id,
                 return_type,
