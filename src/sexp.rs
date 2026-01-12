@@ -624,6 +624,15 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.print_compound_stmt(stmt)?;
                 self.write_close()
             }
+            ExprKind::Assert { kind, condition } => {
+                let kind_str = match kind {
+                    AssertKind::Assert => "assert",
+                    AssertKind::AssertUnderscore => "assert_",
+                };
+                self.write_open(kind_str)?;
+                self.print_expr(condition)?;
+                self.write_close()
+            }
         }
     }
 
@@ -1430,6 +1439,17 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 self.print_compound_stmt(compound)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
+            }
+            ExprKind::Assert { kind, condition } => {
+                let kind_str = match kind {
+                    AssertKind::Assert => "assert",
+                    AssertKind::AssertUnderscore => "assert_",
+                };
+                write!(self.writer, "({}", kind_str)?;
+                if !self.pretty { write!(self.writer, " ")?; }
+                self.print_expr(condition)?;
+                write!(self.writer, ")")?;
+                write!(self.writer, " :type void")?;
             }
         }
         if self.pretty {

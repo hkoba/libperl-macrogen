@@ -10,9 +10,9 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
-    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, InlineFnDict, MacroAnalyzer2, MacroCategory2, MacroInferContext,
-    MacrogenBuilder, PPConfig, ParseResult, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
+    get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
+    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, InlineFnDict, MacroInferContext,
+    PPConfig, ParseResult, Parser, Preprocessor, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
@@ -72,15 +72,15 @@ struct Cli {
     #[arg(long = "parse-rust-bindings")]
     parse_rust_bindings: Option<PathBuf>,
 
-    /// マクロ関数を解析（Def-Use chain、カテゴリ分類、型推論）
-    #[arg(long = "analyze-macros")]
-    analyze_macros: bool,
+    // 廃止予定: --analyze-macros (MacroAnalyzer2 使用)
+    // #[arg(long = "analyze-macros")]
+    // analyze_macros: bool,
 
-    /// マクロとinline関数からRust関数を生成
-    #[arg(long = "gen-rust-fns")]
-    gen_rust_fns: bool,
+    // 廃止予定: --gen-rust-fns (macrogen 使用)
+    // #[arg(long = "gen-rust-fns")]
+    // gen_rust_fns: bool,
 
-    /// Rustバインディングファイル（--gen-rust-fns用）
+    /// Rustバインディングファイル（--infer-macro-types用）
     #[arg(long = "bindings")]
     bindings: Option<PathBuf>,
 
@@ -88,9 +88,9 @@ struct Cli {
     #[arg(long = "apidoc")]
     apidoc: Option<PathBuf>,
 
-    /// デバッグ: マクロ変換を即座に出力
-    #[arg(long = "debug-macro-gen")]
-    debug_macro_gen: bool,
+    // 廃止予定: --debug-macro-gen (MacroAnalyzer2, RustCodeGen 使用)
+    // #[arg(long = "debug-macro-gen")]
+    // debug_macro_gen: bool,
 
     /// 進行状況を表示
     #[arg(long = "progress")]
@@ -157,19 +157,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // --gen-rust-fnsはライブラリAPIを使用するため、プリプロセッサを作成しない
-    if cli.gen_rust_fns {
-        let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
-        return run_gen_rust_fns_lib(
-            &input,
-            &bindings,
-            cli.apidoc.as_ref(),
-            cli.output.as_ref(),
-            &config,
-            cli.progress,
-            cli.macro_comments,
-        );
-    }
+    // 廃止予定: --gen-rust-fns
+    // if cli.gen_rust_fns {
+    //     let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
+    //     return run_gen_rust_fns_lib(...);
+    // }
 
     // プリプロセッサを初期化してファイルを処理
     let mut pp = Preprocessor::new(config);
@@ -189,15 +181,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
         run_dump_fields_dict(&mut pp, cli.target_dir.as_ref())?;
-    } else if cli.analyze_macros {
-        // --analyze-macros: マクロ関数を解析
-        run_analyze_macros(&mut pp, cli.target_dir.as_ref())?;
+    // 廃止予定: --analyze-macros
+    // } else if cli.analyze_macros {
+    //     run_analyze_macros(&mut pp, cli.target_dir.as_ref())?;
     } else if cli.infer_macro_types {
         // --infer-macro-types: マクロ型推論
         run_infer_macro_types(&mut pp, cli.apidoc.as_ref(), cli.bindings.as_ref())?;
-    } else if cli.debug_macro_gen {
-        // --debug-macro-gen: デバッグ用即時出力モード
-        run_debug_macro_gen(&mut pp)?;
+    // 廃止予定: --debug-macro-gen
+    // } else if cli.debug_macro_gen {
+    //     run_debug_macro_gen(&mut pp)?;
     } else {
         // 通常: パースしてS-expression出力
         let mut parser = match Parser::new(&mut pp) {
@@ -322,66 +314,10 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) ->
     Ok(())
 }
 
-/// マクロ関数を解析
-fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    // フィールド辞書を作成（パースしながら収集）
-    let mut fields_dict = FieldsDict::new();
-
-    // ターゲットディレクトリを設定
-    let target_dir_str = target_dir
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| {
-            get_default_target_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        });
-
-    // パースしてフィールド辞書を構築
-    let mut parser = match Parser::new(pp) {
-        Ok(p) => p,
-        Err(e) => return Err(format_error(&e, pp).into()),
-    };
-
-    parser.parse_each(|result, _loc, _path, interner| {
-        if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
-        }
-        std::ops::ControlFlow::Continue(())
-    });
-
-    // パース中に収集したtypedef名を取得（マクロパース時のキャスト式判定用）
-    let typedefs = parser.typedefs().clone();
-
-    // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
-    // set_unique_field_type を使って既存の登録を上書き
-    {
-        let interner = pp.interner_mut();
-        let sv = interner.intern("sv");
-        let sv_any = interner.intern("sv_any");
-        let sv_refcnt = interner.intern("sv_refcnt");
-        let sv_flags = interner.intern("sv_flags");
-
-        fields_dict.set_unique_field_type(sv_any, sv);
-        fields_dict.set_unique_field_type(sv_refcnt, sv);
-        fields_dict.set_unique_field_type(sv_flags, sv);
-    }
-
-    // マクロ解析
-    let interner = pp.interner();
-    let files = pp.files();
-    let apidoc = ApidocDict::new(); // 空のApidocDict（分析モードでは使用しない）
-    let mut analyzer = MacroAnalyzer2::new(interner, files, &apidoc, &fields_dict, &target_dir_str);
-    analyzer.set_typedefs(typedefs);
-    analyzer.analyze(pp.macros());
-
-    // 統計情報を出力
-    eprintln!("{}", analyzer.dump_stats());
-
-    // Def-Use chain を出力
-    println!("{}", analyzer.dump_def_use());
-
-    Ok(())
-}
+// 廃止予定: run_analyze_macros (MacroAnalyzer2 使用)
+// fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+//     ...
+// }
 
 /// マクロ型推論（ExprId + TypeEnv ベース）
 fn run_infer_macro_types(
@@ -470,6 +406,11 @@ fn run_infer_macro_types(
     let sym_my_perl = pp.interner_mut().intern("my_perl");
     let thx_symbols = (sym_athx, sym_tthx, sym_my_perl);
 
+    // assert シンボルを事前に intern
+    let sym_assert = pp.interner_mut().intern("assert");
+    let sym_assert_ = pp.interner_mut().intern("assert_");
+    let assert_symbols = (sym_assert, sym_assert_);
+
     let interner = pp.interner();
     let files = pp.files();
 
@@ -483,6 +424,7 @@ fn run_infer_macro_types(
         Some(&inline_fn_dict),
         &typedefs,
         thx_symbols,
+        assert_symbols,
     );
 
     // パース結果の統計を収集
@@ -620,185 +562,15 @@ fn run_infer_macro_types(
     Ok(())
 }
 
-/// マクロとinline関数からRust関数を生成（ライブラリAPI使用版）
-fn run_gen_rust_fns_lib(
-    input: &PathBuf,
-    bindings_path: &PathBuf,
-    apidoc_path: Option<&PathBuf>,
-    output: Option<&PathBuf>,
-    pp_config: &PPConfig,
-    progress: bool,
-    macro_comments: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // MacrogenBuilderで設定を構築
-    let mut builder = MacrogenBuilder::new(input, bindings_path)
-        .pp_config(pp_config.clone())
-        .add_field_type("sv_any", "sv")
-        .add_field_type("sv_refcnt", "sv")
-        .add_field_type("sv_flags", "sv")
-        .verbose(true)
-        .progress(progress)
-        .emit_macro_comments(macro_comments);
+// 廃止予定: run_gen_rust_fns_lib (macrogen 使用)
+// fn run_gen_rust_fns_lib(...) -> Result<(), Box<dyn std::error::Error>> {
+//     ...
+// }
 
-    if let Some(apidoc) = apidoc_path {
-        builder = builder.apidoc(apidoc);
-    }
-
-    let config = builder.build();
-
-    // 生成実行
-    let result = generate(&config)?;
-
-    // 出力
-    if let Some(output_path) = output {
-        std::fs::write(output_path, &result.code)?;
-    } else {
-        print!("{}", result.code);
-    }
-
-    Ok(())
-}
-
-/// デバッグ: マクロ変換を即座に出力
-fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
-    // フィールド辞書を作成
-    let mut fields_dict = FieldsDict::new();
-
-    // ターゲットディレクトリを設定
-    let target_dir_str = get_default_target_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    // パースしてフィールド辞書を構築
-    let mut parser = match Parser::new(pp) {
-        Ok(p) => p,
-        Err(e) => return Err(format_error(&e, pp).into()),
-    };
-
-    let mut inline_count = 0usize;
-    let mut inline_fn_dict = InlineFnDict::new();
-
-    parser.parse_each(|result, _loc, path, interner| {
-        if let Ok(ref decl) = result {
-            // フィールド情報を収集
-            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
-
-            // inline関数を収集
-            if decl.is_target() {
-                if let ExternalDecl::FunctionDef(func_def) = decl {
-                    if func_def.specs.is_inline {
-                        inline_fn_dict.collect_from_function_def(func_def);
-                        if let Some(name) = func_def.declarator.name {
-                            let name_str = interner.get(name);
-                            let path_str = path.to_string_lossy();
-                            println!("// INLINE: {} (from {})", name_str, path_str);
-                            inline_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-        std::ops::ControlFlow::Continue(())
-    });
-
-    // パース中に収集したtypedef名を取得（マクロパース時のキャスト式判定用）
-    let typedefs = parser.typedefs().clone();
-
-    eprintln!("Found {} inline functions", inline_count);
-
-    // sv_any, sv_refcnt, sv_flags を登録
-    {
-        let interner = pp.interner_mut();
-        let sv = interner.intern("sv");
-        let sv_any = interner.intern("sv_any");
-        let sv_refcnt = interner.intern("sv_refcnt");
-        let sv_flags = interner.intern("sv_flags");
-        fields_dict.set_unique_field_type(sv_any, sv);
-        fields_dict.set_unique_field_type(sv_refcnt, sv);
-        fields_dict.set_unique_field_type(sv_flags, sv);
-    }
-
-    // マクロ解析
-    let interner = pp.interner();
-    let files = pp.files();
-    let apidoc = ApidocDict::new(); // 空のApidocDict
-    let mut analyzer = MacroAnalyzer2::new(interner, files, &apidoc, &fields_dict, &target_dir_str);
-    analyzer.set_typedefs(typedefs);
-    analyzer.analyze(pp.macros());
-
-    // RustCodeGen
-    let codegen = RustCodeGen::new(interner, &fields_dict);
-
-    // マクロを即座に出力（名前順ではない）
-    // 引数のある関数マクロのみを対象とする
-    use libperl_macrogen::MacroKind;
-
-    let macros = pp.macros();
-    let mut success_count = 0usize;
-    let mut failure_count = 0usize;
-    let mut skipped_object_macros = 0usize;
-
-    for (name, info) in analyzer.iter() {
-        if !info.is_target {
-            continue;
-        }
-
-        let name_str = interner.get(*name);
-
-        let def = match macros.get(*name) {
-            Some(d) => d,
-            None => {
-                println!("// FAILED: {} - macro not found", name_str);
-                failure_count += 1;
-                continue;
-            }
-        };
-
-        // オブジェクトマクロ（引数なし）はスキップ
-        if matches!(def.kind, MacroKind::Object) {
-            skipped_object_macros += 1;
-            continue;
-        }
-
-        if info.category != MacroCategory2::Expression {
-            println!("// FAILED: {} - category: {:?}", name_str, info.category);
-            failure_count += 1;
-            continue;
-        }
-
-        // マクロ本体をパース（展開済みトークンも取得）
-        let (expanded, parse_result) = analyzer.parse_macro_body(def, macros);
-        let expr = match parse_result {
-            Ok(e) => e,
-            Err(e) => {
-                let expanded_str = expanded.iter()
-                    .map(|t| t.kind.format(interner))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                println!("// FAILED: {} - parse error: {}", name_str, e);
-                println!("//   expanded: {}", expanded_str);
-                failure_count += 1;
-                continue;
-            }
-        };
-
-        let frag = codegen.macro_to_rust_fn(def, info, &expr);
-        if frag.has_issues() {
-            println!("// FAILED: {} - {}", name_str, frag.issues_summary());
-            for line in frag.code.lines() {
-                println!("// {}", line);
-            }
-            failure_count += 1;
-        } else {
-            println!("{}", frag.code);
-            success_count += 1;
-        }
-    }
-
-    eprintln!("Macros: {} success, {} failures (skipped {} object macros)",
-        success_count, failure_count, skipped_object_macros);
-    Ok(())
-}
+// 廃止予定: run_debug_macro_gen (MacroAnalyzer2, RustCodeGen 使用)
+// fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>> {
+//     ...
+// }
 
 /// 型注釈付きS-expression出力モードで実行
 fn run_typed_sexp(pp: &mut Preprocessor, output: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {

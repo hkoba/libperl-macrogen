@@ -582,6 +582,12 @@ pub enum ExprKind {
 
     // GCC拡張: ステートメント式 ({ ... })
     StmtExpr(CompoundStmt),
+
+    /// アサーション式（マクロが空に展開されても保持）
+    Assert {
+        kind: AssertKind,
+        condition: Box<Expr>,
+    },
 }
 
 /// 式ノード
@@ -667,6 +673,15 @@ pub enum AssignOp {
     AndAssign,
     XorAssign,
     OrAssign,
+}
+
+/// アサーションマクロの種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertKind {
+    /// assert(condition)
+    Assert,
+    /// assert_(condition) - 末尾カンマ付き
+    AssertUnderscore,
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
-use crate::ast::{BlockItem, Expr, ExprKind};
+use crate::ast::{AssertKind, BlockItem, Expr, ExprKind};
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
@@ -340,6 +340,7 @@ impl MacroInferContext {
         rust_decl_dict: Option<&RustDeclDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
+        assert_symbols: (InternedStr, InternedStr),
     ) -> (MacroInferInfo, bool, bool) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
@@ -364,10 +365,14 @@ impl MacroInferContext {
         info.is_thx_dependent = has_thx_direct;
 
         // マクロ本体を展開（TokenExpander を使用）
+        let (sym_assert, sym_assert_) = assert_symbols;
         let mut expander = TokenExpander::new(macro_table, interner, files);
         if let Some(dict) = rust_decl_dict {
             expander.set_bindings_consts(&dict.consts);
         }
+        // assert マクロを展開しないよう登録
+        expander.add_no_expand(sym_assert);
+        expander.add_no_expand(sym_assert_);
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
         // def-use 関係を収集（展開後のトークンから識別子を抽出）
@@ -375,6 +380,21 @@ impl MacroInferContext {
 
         // パースを試行
         info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+
+        // パース成功した場合、assert 呼び出しを Assert 式に変換
+        match &mut info.parse_result {
+            ParseResult::Expression(expr) => {
+                convert_assert_calls(expr, interner);
+            }
+            ParseResult::Statement(items) => {
+                for item in items {
+                    if let BlockItem::Stmt(stmt) = item {
+                        convert_assert_calls_in_stmt(stmt, interner);
+                    }
+                }
+            }
+            ParseResult::Unparseable(_) => {}
+        }
 
         (info, has_pasting_direct, has_thx_direct)
     }
@@ -736,6 +756,7 @@ impl MacroInferContext {
         inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
+        assert_symbols: (InternedStr, InternedStr),
     ) {
         // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
         let mut thx_initial = HashSet::new();
@@ -743,7 +764,7 @@ impl MacroInferContext {
 
         for def in macro_table.iter_target_macros() {
             let (info, has_pasting, has_thx) = self.build_macro_info(
-                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols
+                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, assert_symbols
             );
             if has_pasting {
                 pasting_initial.insert(def.name);
@@ -943,6 +964,162 @@ impl MacroInferContext {
 impl Default for MacroInferContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// マクロ名がアサーションマクロかどうかを判定
+fn detect_assert_kind(name: &str) -> Option<AssertKind> {
+    match name {
+        "assert" => Some(AssertKind::Assert),
+        "assert_" => Some(AssertKind::AssertUnderscore),
+        _ => None,
+    }
+}
+
+/// AST 内の assert/assert_ 呼び出しを Assert 式に変換
+///
+/// パース後に呼び出し、`Call { func: Ident("assert"), args }` を
+/// `Assert { kind, condition }` に変換する。
+fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
+    match &mut expr.kind {
+        ExprKind::Call { func, args } => {
+            // 子を先に処理
+            convert_assert_calls(func, interner);
+            for arg in args.iter_mut() {
+                convert_assert_calls(arg, interner);
+            }
+
+            // assert/assert_ 呼び出しを検出
+            if let ExprKind::Ident(name) = &func.kind {
+                let name_str = interner.get(*name);
+                if let Some(kind) = detect_assert_kind(name_str) {
+                    if let Some(condition) = args.pop() {
+                        expr.kind = ExprKind::Assert {
+                            kind,
+                            condition: Box::new(condition),
+                        };
+                    }
+                }
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            convert_assert_calls(lhs, interner);
+            convert_assert_calls(rhs, interner);
+        }
+        ExprKind::Cast { expr: inner, .. }
+        | ExprKind::PreInc(inner)
+        | ExprKind::PreDec(inner)
+        | ExprKind::PostInc(inner)
+        | ExprKind::PostDec(inner)
+        | ExprKind::AddrOf(inner)
+        | ExprKind::Deref(inner)
+        | ExprKind::UnaryPlus(inner)
+        | ExprKind::UnaryMinus(inner)
+        | ExprKind::BitNot(inner)
+        | ExprKind::LogNot(inner)
+        | ExprKind::Sizeof(inner) => {
+            convert_assert_calls(inner, interner);
+        }
+        ExprKind::Index { expr: base, index } => {
+            convert_assert_calls(base, interner);
+            convert_assert_calls(index, interner);
+        }
+        ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+            convert_assert_calls(base, interner);
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            convert_assert_calls(cond, interner);
+            convert_assert_calls(then_expr, interner);
+            convert_assert_calls(else_expr, interner);
+        }
+        ExprKind::Assign { lhs, rhs, .. } => {
+            convert_assert_calls(lhs, interner);
+            convert_assert_calls(rhs, interner);
+        }
+        ExprKind::Comma { lhs, rhs } => {
+            convert_assert_calls(lhs, interner);
+            convert_assert_calls(rhs, interner);
+        }
+        ExprKind::Assert { condition, .. } => {
+            convert_assert_calls(condition, interner);
+        }
+        ExprKind::CompoundLit { init, .. } => {
+            for item in init {
+                if let crate::ast::Initializer::Expr(e) = &mut item.init {
+                    convert_assert_calls(e, interner);
+                }
+            }
+        }
+        ExprKind::StmtExpr(compound) => {
+            for item in &mut compound.items {
+                if let BlockItem::Stmt(stmt) = item {
+                    convert_assert_calls_in_stmt(stmt, interner);
+                }
+            }
+        }
+        // リテラルや識別子など、再帰不要
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_)
+        | ExprKind::Alignof(_) => {}
+    }
+}
+
+/// Statement 内の assert 呼び出しを変換
+fn convert_assert_calls_in_stmt(stmt: &mut crate::ast::Stmt, interner: &StringInterner) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Expr(Some(expr), _) => convert_assert_calls(expr, interner),
+        Stmt::If { cond, then_stmt, else_stmt, .. } => {
+            convert_assert_calls(cond, interner);
+            convert_assert_calls_in_stmt(then_stmt, interner);
+            if let Some(else_s) = else_stmt {
+                convert_assert_calls_in_stmt(else_s, interner);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            convert_assert_calls(cond, interner);
+            convert_assert_calls_in_stmt(body, interner);
+        }
+        Stmt::DoWhile { body, cond, .. } => {
+            convert_assert_calls_in_stmt(body, interner);
+            convert_assert_calls(cond, interner);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(crate::ast::ForInit::Expr(e)) = init {
+                convert_assert_calls(e, interner);
+            }
+            if let Some(c) = cond {
+                convert_assert_calls(c, interner);
+            }
+            if let Some(s) = step {
+                convert_assert_calls(s, interner);
+            }
+            convert_assert_calls_in_stmt(body, interner);
+        }
+        Stmt::Switch { expr, body, .. } => {
+            convert_assert_calls(expr, interner);
+            convert_assert_calls_in_stmt(body, interner);
+        }
+        Stmt::Return(Some(expr), _) => convert_assert_calls(expr, interner),
+        Stmt::Compound(compound) => {
+            for item in &mut compound.items {
+                match item {
+                    BlockItem::Stmt(s) => convert_assert_calls_in_stmt(s, interner),
+                    BlockItem::Decl(_) => {}
+                }
+            }
+        }
+        Stmt::Label { stmt: s, .. }
+        | Stmt::Case { stmt: s, .. }
+        | Stmt::Default { stmt: s, .. } => {
+            convert_assert_calls_in_stmt(s, interner);
+        }
+        _ => {}
     }
 }
 

@@ -983,6 +983,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 Type::Void
             }
+
+            // アサーション式
+            ExprKind::Assert { .. } => Type::Void,
         }
     }
 
@@ -1712,6 +1715,14 @@ impl<'a> SemanticAnalyzer<'a> {
                         expr.id, "void", ConstraintSource::Inferred, "statement expression (empty)"
                     ));
                 }
+            }
+
+            // アサーション式
+            ExprKind::Assert { condition, .. } => {
+                self.collect_expr_constraints(condition, type_env);
+                type_env.add_constraint(TypeEnvConstraint::new(
+                    expr.id, "void", ConstraintSource::Inferred, "assertion"
+                ));
             }
         }
     }

@@ -9,18 +9,18 @@ pub mod error;
 pub mod fields_dict;
 pub mod inline_fn;
 pub mod intern;
-pub mod iterative_infer;
+// pub mod iterative_infer;  // 廃止予定
 pub mod lexer;
-pub mod macro_analysis;
-pub mod macro_analyzer2;
+// pub mod macro_analysis;   // 廃止予定
+// pub mod macro_analyzer2;  // 廃止予定
 pub mod macro_def;
 pub mod macro_infer;
-pub mod macrogen;
+// pub mod macrogen;         // 廃止予定（廃止モジュールに依存）
 pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
 pub mod preprocessor;
-pub mod rust_codegen;
+// pub mod rust_codegen;     // 廃止予定
 pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
@@ -40,13 +40,10 @@ pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Re
 pub use fields_dict::FieldsDict;
 pub use inline_fn::InlineFnDict;
 pub use intern::{InternedStr, StringInterner};
-pub use iterative_infer::{
-    c_type_to_rust, extract_called_functions, extract_called_functions_from_compound,
-    FunctionSignature, InferenceContext, PendingFunction,
-};
-pub use macro_analysis::{MacroAnalyzer, MacroCategory, MacroInfo};
-pub use macro_analyzer2::{MacroAnalyzer2, MacroCategory as MacroCategory2, MacroInfo2};
-pub use rust_codegen::{CodeFragment, CodeGenOptions, CodeIssue, CodeIssueKind, RustCodeGen};
+// 廃止予定: iterative_infer
+// 廃止予定: macro_analysis
+// 廃止予定: macro_analyzer2
+// 廃止予定: rust_codegen
 pub use rust_decl::RustDeclDict;
 pub use lexer::{IdentResolver, Interning, Lexer, LookupOnly, MutableLexer, ReadOnlyLexer};
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
@@ -65,10 +62,7 @@ pub use type_env::{ConstraintSource, ParamLink, TypeConstraint, TypeEnv};
 pub use type_registry::{TypeEquality, TypeRegistry, TypeRegistryStats};
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
 
-// マクロ生成ライブラリ
-pub use macrogen::{
-    generate, MacrogenBuilder, MacrogenConfig, MacrogenError, MacrogenResult, MacrogenStats,
-};
+// 廃止予定: macrogen
 
 #[cfg(test)]
 mod tests {

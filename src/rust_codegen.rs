@@ -538,6 +538,13 @@ impl<'a> RustCodeGen<'a> {
                     )
                 }
             }
+
+            ExprKind::Assert { condition, .. } => {
+                let cond_frag = self.expr_to_rust(condition);
+                let mut result = CodeFragment::ok(format!("debug_assert!(({}) != 0)", cond_frag.code));
+                result.merge_issues(&cond_frag);
+                result
+            }
         }
     }
 

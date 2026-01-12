@@ -388,6 +388,9 @@ impl<'a> InferenceContext<'a> {
             ExprKind::StmtExpr(compound) => {
                 self.infer_from_compound_stmt(compound, params, known_types);
             }
+            ExprKind::Assert { condition, .. } => {
+                self.infer_from_expr(condition, params, known_types);
+            }
             // リテラルや識別子は走査不要
             ExprKind::Ident(_)
             | ExprKind::IntLit(_)
@@ -832,6 +835,9 @@ fn extract_called_functions_inner(expr: &Expr, interner: &StringInterner, result
         }
         ExprKind::StmtExpr(compound) => {
             extract_called_functions_from_compound(compound, interner, result);
+        }
+        ExprKind::Assert { condition, .. } => {
+            extract_called_functions_inner(condition, interner, result);
         }
         // リテラルや識別子は走査不要
         ExprKind::Ident(_)
