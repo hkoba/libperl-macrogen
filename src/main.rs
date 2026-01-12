@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
     generate, get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
-    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, MacroAnalyzer2, MacroCategory2, MacroInferContext,
+    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, InlineFnDict, MacroAnalyzer2, MacroCategory2, MacroInferContext,
     MacrogenBuilder, PPConfig, ParseResult, Parser, Preprocessor, RustCodeGen, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
 };
@@ -401,10 +401,20 @@ fn run_infer_macro_types(
         Err(e) => return Err(format_error(&e, pp).into()),
     };
 
-    // parse_each でフィールド辞書を構築（同時にマクロ定義→コールバック呼び出し）
+    // inline 関数辞書を作成
+    let mut inline_fn_dict = InlineFnDict::new();
+
+    // parse_each でフィールド辞書と inline 関数を収集（同時にマクロ定義→コールバック呼び出し）
     parser.parse_each(|result, _loc, _path, interner| {
         if let Ok(ref decl) = result {
             fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
+
+            // inline 関数を収集
+            if decl.is_target() {
+                if let ExternalDecl::FunctionDef(func_def) = decl {
+                    inline_fn_dict.collect_from_function_def(func_def);
+                }
+            }
         }
         std::ops::ControlFlow::Continue(())
     });
@@ -470,6 +480,7 @@ fn run_infer_macro_types(
         Some(&apidoc),
         Some(&fields_dict),
         rust_decl_dict.as_ref(),
+        Some(&inline_fn_dict),
         &typedefs,
         thx_symbols,
     );
@@ -665,16 +676,18 @@ fn run_debug_macro_gen(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::
     };
 
     let mut inline_count = 0usize;
+    let mut inline_fn_dict = InlineFnDict::new();
 
     parser.parse_each(|result, _loc, path, interner| {
         if let Ok(ref decl) = result {
             // フィールド情報を収集
             fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
-            // inline関数を即座に出力
+            // inline関数を収集
             if decl.is_target() {
                 if let ExternalDecl::FunctionDef(func_def) = decl {
                     if func_def.specs.is_inline {
+                        inline_fn_dict.collect_from_function_def(func_def);
                         if let Some(name) = func_def.declarator.name {
                             let name_str = interner.get(name);
                             let path_str = path.to_string_lossy();

@@ -94,6 +94,22 @@ This command:
 - Reads API documentation from `samples/embed.fnc`
 - Generates Rust functions from C macros
 
+### Testing Macro Type Inference (--infer-macro-types)
+
+**IMPORTANT**: Type inference requires both `--bindings` and `--apidoc` options to work correctly.
+
+```bash
+cargo run --bin libperl-macrogen -- --auto --infer-macro-types samples/wrapper.h --bindings samples/bindings.rs --apidoc samples/embed.fnc
+```
+
+This command:
+- Uses `samples/wrapper.h` as input
+- Reads Rust type bindings from `samples/bindings.rs` (required for function signatures)
+- Reads API documentation from `samples/embed.fnc` (required for macro/function type hints)
+- Performs type inference on all macros and outputs statistics
+
+Without `--bindings` and `--apidoc`, type inference will have limited information and produce more `<unknown>` type results.
+
 ### Manual Options (alternative)
 
 If `--auto` doesn't work, use explicit options:

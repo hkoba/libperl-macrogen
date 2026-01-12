@@ -7,6 +7,7 @@ pub mod apidoc;
 pub mod ast;
 pub mod error;
 pub mod fields_dict;
+pub mod inline_fn;
 pub mod intern;
 pub mod iterative_infer;
 pub mod lexer;
@@ -37,6 +38,7 @@ pub use apidoc::{ApidocArg, ApidocCollector, ApidocDict, ApidocEntry, ApidocFlag
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use fields_dict::FieldsDict;
+pub use inline_fn::InlineFnDict;
 pub use intern::{InternedStr, StringInterner};
 pub use iterative_infer::{
     c_type_to_rust, extract_called_functions, extract_called_functions_from_compound,

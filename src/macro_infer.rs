@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::apidoc::ApidocDict;
 use crate::ast::{BlockItem, Expr, ExprKind};
 use crate::fields_dict::FieldsDict;
+use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::parser::{parse_expression_from_tokens_ref, parse_statement_from_tokens_ref};
@@ -391,6 +392,7 @@ impl MacroInferContext {
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &HashSet<InternedStr>,
         return_types_cache: &HashMap<String, String>,
     ) {
@@ -406,6 +408,7 @@ impl MacroInferContext {
                 apidoc,
                 fields_dict,
                 rust_decl_dict,
+                inline_fn_dict,
             );
 
             // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
@@ -440,6 +443,7 @@ impl MacroInferContext {
                 apidoc,
                 fields_dict,
                 rust_decl_dict,
+                inline_fn_dict,
             );
 
             // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
@@ -520,6 +524,7 @@ impl MacroInferContext {
                 apidoc,
                 fields_dict,
                 rust_decl_dict,
+                None, // inline_fn_dict (deprecated function doesn't use it)
             );
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
@@ -551,6 +556,7 @@ impl MacroInferContext {
                 apidoc,
                 fields_dict,
                 rust_decl_dict,
+                None, // inline_fn_dict (deprecated function doesn't use it)
             );
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
@@ -727,6 +733,7 @@ impl MacroInferContext {
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
     ) {
@@ -763,7 +770,7 @@ impl MacroInferContext {
 
         // Step 6: 依存順に型推論
         self.infer_types_in_dependency_order(
-            macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs
+            macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs
         );
     }
 
@@ -816,6 +823,7 @@ impl MacroInferContext {
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &HashSet<InternedStr>,
     ) {
         // 確定済みマクロの戻り値型キャッシュ（O(N²) を避けるため）
@@ -844,7 +852,7 @@ impl MacroInferContext {
 
                 // 型推論を実行（キャッシュを渡す）
                 self.infer_macro_types(
-                    name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, typedefs,
+                    name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs,
                     &return_types_cache,
                 );
 

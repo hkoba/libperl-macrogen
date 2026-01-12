@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::apidoc::ApidocDict;
 use crate::ast::*;
 use crate::fields_dict::FieldsDict;
+use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::parser::parse_type_from_string;
 use crate::rust_decl::RustDeclDict;
@@ -346,6 +347,8 @@ pub struct SemanticAnalyzer<'a> {
     fields_dict: Option<&'a FieldsDict>,
     /// RustDeclDict への参照 (bindings.rs の関数型情報)
     rust_decl_dict: Option<&'a RustDeclDict>,
+    /// InlineFnDict への参照 (inline関数のAST情報)
+    inline_fn_dict: Option<&'a InlineFnDict>,
     /// 型変数マップ (引数名 -> TypeVar)
     type_vars: HashMap<InternedStr, TypeVar>,
     /// 次の型変数ID
@@ -367,15 +370,16 @@ impl<'a> SemanticAnalyzer<'a> {
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
     ) -> Self {
-        Self::with_rust_decl_dict(interner, apidoc, fields_dict, None)
+        Self::with_rust_decl_dict(interner, apidoc, fields_dict, None, None)
     }
 
-    /// RustDeclDict を指定して意味解析器を作成
+    /// RustDeclDict と InlineFnDict を指定して意味解析器を作成
     pub fn with_rust_decl_dict(
         interner: &'a StringInterner,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        inline_fn_dict: Option<&'a InlineFnDict>,
     ) -> Self {
         let global_scope = Scope::new(None);
         Self {
@@ -388,6 +392,7 @@ impl<'a> SemanticAnalyzer<'a> {
             apidoc,
             fields_dict,
             rust_decl_dict,
+            inline_fn_dict,
             type_vars: HashMap::new(),
             next_type_var: 0,
             constraints: Vec::new(),
@@ -542,6 +547,64 @@ impl<'a> SemanticAnalyzer<'a> {
         let param = rust_fn.params.get(arg_index)?;
         // Rust型文字列 (e.g., "*mut *mut SV") を Type に変換
         Some(self.parse_rust_type_string(&param.ty))
+    }
+
+    /// InlineFnDict から inline 関数の引数型を取得
+    fn lookup_inline_fn_param_type(&self, func_name: InternedStr, arg_index: usize) -> Option<Type> {
+        let dict = self.inline_fn_dict?;
+        let func_def = dict.get(func_name)?;
+
+        // Declarator から ParamList を取得
+        let param_list = func_def.declarator.derived.iter()
+            .find_map(|d| match d {
+                DerivedDecl::Function(params) => Some(params),
+                _ => None,
+            })?;
+
+        let param = param_list.params.get(arg_index)?;
+
+        // ParamDecl から Type を構築
+        let base_ty = self.resolve_decl_specs_readonly(&param.specs);
+        if let Some(ref declarator) = param.declarator {
+            Some(self.apply_declarator(&base_ty, declarator))
+        } else {
+            Some(base_ty)
+        }
+    }
+
+    /// InlineFnDict から inline 関数の戻り値型を取得
+    fn lookup_inline_fn_return_type(&self, func_name: InternedStr) -> Option<Type> {
+        let dict = self.inline_fn_dict?;
+        let func_def = dict.get(func_name)?;
+
+        // DeclSpecs から戻り値の基本型を取得
+        let base_ty = self.resolve_decl_specs_readonly(&func_def.specs);
+
+        // Declarator のポインタ等を適用（Function より前の derived 部分のみ）
+        Some(self.apply_return_type_declarator(&base_ty, &func_def.declarator))
+    }
+
+    /// 戻り値型用の Declarator 適用（Function より前のポインタ部分のみ）
+    fn apply_return_type_declarator(&self, base_type: &Type, decl: &Declarator) -> Type {
+        let mut ty = base_type.clone();
+
+        for derived in &decl.derived {
+            match derived {
+                DerivedDecl::Pointer(quals) => {
+                    ty = Type::Pointer(Box::new(ty), quals.clone());
+                }
+                DerivedDecl::Array(arr) => {
+                    let _size = &arr.size;
+                    ty = Type::Array(Box::new(ty), None);
+                }
+                DerivedDecl::Function(_) => {
+                    // Function に到達したらポインタの処理は終了
+                    break;
+                }
+            }
+        }
+
+        ty
     }
 
     /// 式から引数に対する制約を収集
@@ -1769,6 +1832,35 @@ impl<'a> SemanticAnalyzer<'a> {
                     );
                     type_env.add_constraint(return_constraint);
                 }
+            }
+        }
+
+        // InlineFnDict から型を取得
+        if self.inline_fn_dict.is_some() {
+            // 引数の型
+            for (i, arg) in args.iter().enumerate() {
+                if let Some(ty) = self.lookup_inline_fn_param_type(func_name, i) {
+                    let ty_str = ty.display(self.interner);
+                    let constraint = TypeEnvConstraint::new(
+                        arg.id,
+                        &ty_str,
+                        ConstraintSource::InlineFn,
+                        format!("arg {} of inline {}()", i, func_name_str),
+                    );
+                    type_env.add_constraint(constraint);
+                }
+            }
+
+            // 戻り値型
+            if let Some(ty) = self.lookup_inline_fn_return_type(func_name) {
+                let ty_str = ty.display(self.interner);
+                let return_constraint = TypeEnvConstraint::new(
+                    call_expr_id,
+                    &ty_str,
+                    ConstraintSource::InlineFn,
+                    format!("return type of inline {}()", func_name_str),
+                );
+                type_env.add_constraint(return_constraint);
             }
         }
 

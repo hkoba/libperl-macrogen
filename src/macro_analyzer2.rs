@@ -403,6 +403,7 @@ impl<'a> MacroAnalyzer2<'a> {
                     Some(self.apidoc),
                     Some(self.fields_dict),
                     self.rust_decl_dict,
+                    None, // inline_fn_dict
                 );
 
                 // パラメータの型変数を登録

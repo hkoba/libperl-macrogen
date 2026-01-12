@@ -20,6 +20,8 @@ pub enum ConstraintSource {
     RustBindings,
     /// apidoc（embed.fnc 等）から取得
     Apidoc,
+    /// inline 関数の AST から取得
+    InlineFn,
     /// 推論で導出
     Inferred,
 }
@@ -30,6 +32,7 @@ impl std::fmt::Display for ConstraintSource {
             Self::CHeader => write!(f, "c-header"),
             Self::RustBindings => write!(f, "rust-bindings"),
             Self::Apidoc => write!(f, "apidoc"),
+            Self::InlineFn => write!(f, "inline-fn"),
             Self::Inferred => write!(f, "inferred"),
         }
     }
