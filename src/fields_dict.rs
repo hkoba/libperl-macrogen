@@ -30,6 +30,10 @@ pub struct FieldsDict {
     /// SV ファミリーメンバー（_SV_HEAD マクロを使用する構造体）
     /// 動的に検出される
     sv_family_members: HashSet<InternedStr>,
+    /// _SV_HEAD(typeName) の typeName → 構造体名のマッピング
+    /// 例: "XPVAV" → av, "XPVCV" → cv
+    /// SvANY キャストパターンによる型推論に使用
+    sv_head_type_to_struct: HashMap<String, InternedStr>,
 }
 
 impl FieldsDict {
@@ -398,9 +402,44 @@ impl FieldsDict {
         self.sv_family_members.insert(struct_name);
     }
 
+    /// SV ファミリーメンバーと typeName を同時に登録
+    ///
+    /// _SV_HEAD(typeName) マクロの引数から、typeName → 構造体名のマッピングを構築する。
+    /// 例: add_sv_family_member_with_type(av, "XPVAV*") → "XPVAV" → av
+    ///
+    /// void* は汎用型のためマッピングには含めない。
+    pub fn add_sv_family_member_with_type(&mut self, struct_name: InternedStr, type_name: &str) {
+        self.sv_family_members.insert(struct_name);
+
+        // ポインタ記号を除去して正規化
+        let normalized = type_name.trim().trim_end_matches('*').trim();
+        if !normalized.is_empty() && normalized != "void" {
+            self.sv_head_type_to_struct.insert(normalized.to_string(), struct_name);
+        }
+    }
+
+    /// typeName から構造体名を取得
+    ///
+    /// _SV_HEAD(typeName) で登録された typeName から対応する構造体名を取得する。
+    /// SvANY キャストパターン (例: (XPVAV*) SvANY(av)) の型推論に使用。
+    pub fn get_struct_for_sv_head_type(&self, type_name: &str) -> Option<InternedStr> {
+        let normalized = type_name.trim().trim_end_matches('*').trim();
+        self.sv_head_type_to_struct.get(normalized).copied()
+    }
+
     /// 動的に検出された SV ファミリーメンバーの数を取得
     pub fn sv_family_members_count(&self) -> usize {
         self.sv_family_members.len()
+    }
+
+    /// typeName → 構造体名マッピングの数を取得
+    pub fn sv_head_type_mapping_count(&self) -> usize {
+        self.sv_head_type_to_struct.len()
+    }
+
+    /// typeName → 構造体名マッピングをイテレート
+    pub fn sv_head_type_to_struct_iter(&self) -> impl Iterator<Item = (&String, &InternedStr)> {
+        self.sv_head_type_to_struct.iter()
     }
 
     /// SV_HEAD マクロで定義される共通フィールド

@@ -12,7 +12,7 @@ use clap::Parser as ClapParser;
 use libperl_macrogen::{
     get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
     BlockItem, CompileError, Declaration, ExternalDecl, FieldsDict, FileId, InlineFnDict,
-    MacroCallWatcher, MacroInferContext, PPConfig, ParseResult, Parser, Preprocessor,
+    MacroCallWatcher, MacroInferContext, NoExpandSymbols, PPConfig, ParseResult, Parser, Preprocessor,
     RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypeSpec, TypedSexpPrinter,
 };
 
@@ -365,8 +365,14 @@ fn run_infer_macro_types(
                     if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
                         if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
                             if watcher.take_called() {
+                                // _SV_HEAD(typeName) の引数を取得
+                                let type_name = watcher.last_args()
+                                    .and_then(|args| args.first().cloned())
+                                    .unwrap_or_default();
+
                                 for name in struct_names {
-                                    fields_dict.add_sv_family_member(name);
+                                    // typeName → 構造体名マッピングも同時に登録
+                                    fields_dict.add_sv_family_member_with_type(name, &type_name);
                                 }
                             }
                         }
@@ -428,10 +434,8 @@ fn run_infer_macro_types(
     let sym_my_perl = pp.interner_mut().intern("my_perl");
     let thx_symbols = (sym_athx, sym_tthx, sym_my_perl);
 
-    // assert シンボルを事前に intern
-    let sym_assert = pp.interner_mut().intern("assert");
-    let sym_assert_ = pp.interner_mut().intern("assert_");
-    let assert_symbols = (sym_assert, sym_assert_);
+    // 展開を抑制するマクロシンボルを作成（assert, SvANY など）
+    let no_expand = NoExpandSymbols::new(pp.interner_mut());
 
     let interner = pp.interner();
     let files = pp.files();
@@ -446,8 +450,21 @@ fn run_infer_macro_types(
         Some(&inline_fn_dict),
         &typedefs,
         thx_symbols,
-        assert_symbols,
+        no_expand,
     );
+
+    // SvANY パターンから追加の型制約を適用
+    // パラメータの ExprId を使って expr_constraints に制約を追加
+    let mut sv_any_constraint_count = 0;
+    let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
+    for name in macro_names {
+        sv_any_constraint_count += infer_ctx.apply_sv_any_constraints(
+            name,
+            &fields_dict,
+            no_expand,
+            interner,
+        );
+    }
 
     // パース結果の統計を収集
     let mut expr_count = 0;
@@ -484,6 +501,8 @@ fn run_infer_macro_types(
     // THX 依存マクロ数（解析済みターゲットマクロのうち）
     let thx_count = infer_ctx.macros.values().filter(|info| info.is_target && info.is_thx_dependent).count();
     eprintln!("THX-dependent macros: {}", thx_count);
+    // SvANY パターンから推論された型制約数
+    eprintln!("SvANY pattern constraints: {}", sv_any_constraint_count);
     eprintln!();
 
     // 各マクロの詳細を出力（辞書順）
@@ -539,6 +558,7 @@ fn run_infer_macro_types(
                 let mut handle = stdout.lock();
                 let mut printer = TypedSexpPrinter::new(&mut handle, interner);
                 printer.set_type_env(&info.type_env);
+                printer.set_param_map(&info.params);
                 printer.set_pretty(true);
                 printer.set_indent(1);  // 行頭にスペース1文字分のインデント
                 printer.set_skip_first_newline(true);  // 先頭の空行を抑制
@@ -551,6 +571,7 @@ fn run_infer_macro_types(
                 let _ = write!(handle, " ");  // 最初の行頭スペース
                 let mut printer = TypedSexpPrinter::new(&mut handle, interner);
                 printer.set_type_env(&info.type_env);
+                printer.set_param_map(&info.params);
                 printer.set_pretty(true);
                 printer.set_indent(1);  // 行頭にスペース1文字分のインデント
                 printer.set_skip_first_newline(true);  // 先頭の空行を抑制

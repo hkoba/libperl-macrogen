@@ -697,6 +697,8 @@ pub struct TypedSexpPrinter<'a, W: Write> {
     interner: &'a StringInterner,
     /// 型環境（型制約を保持）
     type_env: Option<&'a TypeEnv>,
+    /// パラメータ名から ExprId へのマッピング（マクロ展開時に使用）
+    param_map: Option<std::collections::HashMap<crate::intern::InternedStr, ExprId>>,
     indent: usize,
     /// ExprId を出力するかどうか
     emit_expr_id: bool,
@@ -716,6 +718,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
             writer,
             interner,
             type_env: None,
+            param_map: None,
             indent: 0,
             emit_expr_id: false,
             pretty: false,
@@ -728,6 +731,20 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
         self.type_env = Some(type_env);
     }
 
+    /// パラメータ名から ExprId へのマッピングを設定
+    pub fn set_param_map(&mut self, params: &[crate::macro_infer::MacroParam]) {
+        let mut map = std::collections::HashMap::new();
+        for param in params {
+            map.insert(param.name, param.expr.id);
+        }
+        self.param_map = Some(map);
+    }
+
+    /// パラメータ名から ExprId へのマッピングをクリア
+    pub fn clear_param_map(&mut self) {
+        self.param_map = None;
+    }
+
     /// ExprId から型文字列を取得
     fn get_type_str(&self, expr_id: ExprId) -> String {
         if let Some(type_env) = self.type_env {
@@ -736,6 +753,29 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 // 複数制約がある場合は最初のものを使用
                 if let Some(constraint) = constraints.first() {
                     return constraint.ty.to_display_string(self.interner);
+                }
+            }
+        }
+        "<unknown>".to_string()
+    }
+
+    /// 識別子の型文字列を取得（パラメータマッピングも考慮）
+    fn get_ident_type_str(&self, expr_id: ExprId, ident_name: crate::intern::InternedStr) -> String {
+        if let Some(type_env) = self.type_env {
+            // まず直接の制約を確認
+            if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
+                if let Some(constraint) = constraints.first() {
+                    return constraint.ty.to_display_string(self.interner);
+                }
+            }
+            // 直接の制約がない場合、パラメータマッピングを参照
+            if let Some(param_map) = &self.param_map {
+                if let Some(&param_expr_id) = param_map.get(&ident_name) {
+                    if let Some(constraints) = type_env.expr_constraints.get(&param_expr_id) {
+                        if let Some(constraint) = constraints.first() {
+                            return constraint.ty.to_display_string(self.interner);
+                        }
+                    }
                 }
             }
         }
@@ -1189,7 +1229,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 write!(self.writer, "(ident")?;
                 self.write_expr_id(expr.id)?;
                 write!(self.writer, " {})", self.interner.get(*id))?;
-                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
+                write!(self.writer, " :type {}", self.get_ident_type_str(expr.id, *id))?;
             }
             ExprKind::IntLit(n) => {
                 write!(self.writer, "(int")?;

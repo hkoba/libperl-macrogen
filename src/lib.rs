@@ -39,7 +39,10 @@ pub use intern::{InternedStr, StringInterner};
 pub use rust_decl::RustDeclDict;
 pub use lexer::{IdentResolver, Interning, Lexer, LookupOnly, MutableLexer, ReadOnlyLexer};
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
-pub use macro_infer::{InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats, ParseResult};
+pub use macro_infer::{
+    detect_sv_any_patterns, InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats,
+    NoExpandSymbols, ParseResult, SvAnyPattern,
+};
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, parse_type_from_string, Parser};
 pub use perl_config::{get_default_target_dir, get_perl_config, PerlConfig, PerlConfigError};
 pub use preprocessor::{

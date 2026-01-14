@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
-use crate::ast::{AssertKind, BlockItem, Expr, ExprKind};
+use crate::ast::{AssertKind, BlockItem, DerivedDecl, Expr, ExprKind, Stmt, TypeName, TypeSpec};
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
@@ -23,6 +23,297 @@ use crate::type_env::{ConstraintSource, TypeConstraint, TypeEnv};
 // use std::io;
 // use crate::SexpPrinter;
 
+/// 展開を抑制するマクロシンボル
+///
+/// これらのマクロは展開せずに AST に関数呼び出しとして残す。
+/// パターン検出（SvANY）や特殊処理（assert）に使用。
+#[derive(Debug, Clone, Copy)]
+pub struct NoExpandSymbols {
+    /// assert マクロ
+    pub assert: InternedStr,
+    /// assert_ マクロ（Perl 独自）
+    pub assert_: InternedStr,
+    /// SvANY マクロ（SV ファミリー型推論用）
+    pub sv_any: InternedStr,
+}
+
+impl NoExpandSymbols {
+    /// 新しい NoExpandSymbols を作成
+    pub fn new(interner: &mut StringInterner) -> Self {
+        Self {
+            assert: interner.intern("assert"),
+            assert_: interner.intern("assert_"),
+            sv_any: interner.intern("SvANY"),
+        }
+    }
+
+    /// 全シンボルをイテレート
+    pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
+        [self.assert, self.assert_, self.sv_any].into_iter()
+    }
+}
+
+// ============================================================================
+// SvANY パターン検出
+// ============================================================================
+
+/// SvANY パターンの検出結果
+///
+/// `((XPVAV*) SvANY(av))` のようなパターンから抽出した情報
+#[derive(Debug, Clone)]
+pub struct SvAnyPattern {
+    /// キャスト先の型名（例: "XPVAV"）
+    pub cast_type: String,
+    /// SvANY の引数の識別子
+    pub arg_ident: InternedStr,
+}
+
+/// 式から SvANY パターンを再帰的に検出
+pub fn detect_sv_any_patterns(
+    expr: &Expr,
+    sv_any_id: InternedStr,
+    interner: &StringInterner,
+) -> Vec<SvAnyPattern> {
+    let mut patterns = Vec::new();
+    detect_sv_any_patterns_recursive(expr, sv_any_id, interner, &mut patterns);
+    patterns
+}
+
+/// 式から SvANY パターンを再帰的に検出（内部関数）
+fn detect_sv_any_patterns_recursive(
+    expr: &Expr,
+    sv_any_id: InternedStr,
+    interner: &StringInterner,
+    patterns: &mut Vec<SvAnyPattern>,
+) {
+    match &expr.kind {
+        ExprKind::Cast { type_name, expr: inner } => {
+            // キャスト先がポインタ型か確認
+            if let Some(cast_type) = extract_pointer_base_type(type_name, interner) {
+                // 内部が SvANY 呼び出しか確認
+                if let Some(arg) = extract_sv_any_arg(inner, sv_any_id) {
+                    patterns.push(SvAnyPattern {
+                        cast_type,
+                        arg_ident: arg,
+                    });
+                }
+                // MUTABLE_PTR 経由のパターンも検出
+                else if let Some(arg) = extract_sv_any_through_mutable_ptr(inner, sv_any_id, interner) {
+                    patterns.push(SvAnyPattern {
+                        cast_type,
+                        arg_ident: arg,
+                    });
+                }
+            }
+            // 内部も再帰的に検索
+            detect_sv_any_patterns_recursive(inner, sv_any_id, interner, patterns);
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            detect_sv_any_patterns_recursive(lhs, sv_any_id, interner, patterns);
+            detect_sv_any_patterns_recursive(rhs, sv_any_id, interner, patterns);
+        }
+        ExprKind::Call { func, args } => {
+            detect_sv_any_patterns_recursive(func, sv_any_id, interner, patterns);
+            for arg in args {
+                detect_sv_any_patterns_recursive(arg, sv_any_id, interner, patterns);
+            }
+        }
+        ExprKind::Index { expr: base, index } => {
+            detect_sv_any_patterns_recursive(base, sv_any_id, interner, patterns);
+            detect_sv_any_patterns_recursive(index, sv_any_id, interner, patterns);
+        }
+        ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+            detect_sv_any_patterns_recursive(base, sv_any_id, interner, patterns);
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            detect_sv_any_patterns_recursive(cond, sv_any_id, interner, patterns);
+            detect_sv_any_patterns_recursive(then_expr, sv_any_id, interner, patterns);
+            detect_sv_any_patterns_recursive(else_expr, sv_any_id, interner, patterns);
+        }
+        ExprKind::Assign { lhs, rhs, .. } | ExprKind::Comma { lhs, rhs } => {
+            detect_sv_any_patterns_recursive(lhs, sv_any_id, interner, patterns);
+            detect_sv_any_patterns_recursive(rhs, sv_any_id, interner, patterns);
+        }
+        ExprKind::PreInc(inner) | ExprKind::PreDec(inner)
+        | ExprKind::PostInc(inner) | ExprKind::PostDec(inner)
+        | ExprKind::AddrOf(inner) | ExprKind::Deref(inner)
+        | ExprKind::UnaryPlus(inner) | ExprKind::UnaryMinus(inner)
+        | ExprKind::BitNot(inner) | ExprKind::LogNot(inner)
+        | ExprKind::Sizeof(inner) => {
+            detect_sv_any_patterns_recursive(inner, sv_any_id, interner, patterns);
+        }
+        ExprKind::StmtExpr(compound) => {
+            for item in &compound.items {
+                collect_sv_any_patterns_from_block_item(item, sv_any_id, interner, patterns);
+            }
+        }
+        ExprKind::Assert { condition, .. } => {
+            detect_sv_any_patterns_recursive(condition, sv_any_id, interner, patterns);
+        }
+        ExprKind::CompoundLit { init, .. } => {
+            for item in init {
+                if let crate::ast::Initializer::Expr(e) = &item.init {
+                    detect_sv_any_patterns_recursive(e, sv_any_id, interner, patterns);
+                }
+            }
+        }
+        // リテラル・識別子など再帰不要
+        ExprKind::Ident(_) | ExprKind::IntLit(_) | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_) | ExprKind::CharLit(_) | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_) | ExprKind::Alignof(_) => {}
+    }
+}
+
+/// SvANY(arg) の arg を抽出（arg が識別子の場合のみ）
+fn extract_sv_any_arg(expr: &Expr, sv_any_id: InternedStr) -> Option<InternedStr> {
+    if let ExprKind::Call { func, args } = &expr.kind {
+        if let ExprKind::Ident(id) = &func.kind {
+            if *id == sv_any_id && args.len() == 1 {
+                if let ExprKind::Ident(arg_id) = &args[0].kind {
+                    return Some(*arg_id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// MUTABLE_PTR(SvANY(arg)) パターンから arg を抽出
+fn extract_sv_any_through_mutable_ptr(
+    expr: &Expr,
+    sv_any_id: InternedStr,
+    interner: &StringInterner,
+) -> Option<InternedStr> {
+    if let ExprKind::Call { func, args } = &expr.kind {
+        if let ExprKind::Ident(id) = &func.kind {
+            let name = interner.get(*id);
+            // MUTABLE_PTR, MUTABLE_HV, MUTABLE_AV, MUTABLE_CV, MUTABLE_SV など
+            if name.starts_with("MUTABLE_") && args.len() == 1 {
+                return extract_sv_any_arg(&args[0], sv_any_id);
+            }
+        }
+    }
+    None
+}
+
+/// ポインタ型からベース型名を抽出
+///
+/// `XPVAV*` から "XPVAV" を返す
+fn extract_pointer_base_type(type_name: &TypeName, interner: &StringInterner) -> Option<String> {
+    // 最初にポインタかどうか確認
+    let is_pointer = type_name.declarator.as_ref()
+        .map(|d| d.derived.iter().any(|dd| matches!(dd, DerivedDecl::Pointer(_))))
+        .unwrap_or(false);
+
+    if !is_pointer {
+        return None;
+    }
+
+    // 型指定子から型名を取得
+    for spec in &type_name.specs.type_specs {
+        match spec {
+            TypeSpec::Struct(struct_spec) => {
+                if let Some(name) = struct_spec.name {
+                    return Some(interner.get(name).to_string());
+                }
+            }
+            TypeSpec::TypedefName(name) => {
+                return Some(interner.get(*name).to_string());
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// BlockItem から SvANY パターンを収集
+fn collect_sv_any_patterns_from_block_item(
+    item: &BlockItem,
+    sv_any_id: InternedStr,
+    interner: &StringInterner,
+    patterns: &mut Vec<SvAnyPattern>,
+) {
+    match item {
+        BlockItem::Stmt(stmt) => {
+            collect_sv_any_patterns_from_stmt(stmt, sv_any_id, interner, patterns);
+        }
+        BlockItem::Decl(decl) => {
+            // 宣言内の初期化式からも検出
+            for init_decl in &decl.declarators {
+                if let Some(crate::ast::Initializer::Expr(expr)) = &init_decl.init {
+                    detect_sv_any_patterns_recursive(expr, sv_any_id, interner, patterns);
+                }
+            }
+        }
+    }
+}
+
+/// 文から SvANY パターンを収集
+fn collect_sv_any_patterns_from_stmt(
+    stmt: &Stmt,
+    sv_any_id: InternedStr,
+    interner: &StringInterner,
+    patterns: &mut Vec<SvAnyPattern>,
+) {
+    match stmt {
+        Stmt::Expr(Some(expr), _) | Stmt::Return(Some(expr), _) => {
+            let found = detect_sv_any_patterns(expr, sv_any_id, interner);
+            patterns.extend(found);
+        }
+        Stmt::If { cond, then_stmt, else_stmt, .. } => {
+            let found = detect_sv_any_patterns(cond, sv_any_id, interner);
+            patterns.extend(found);
+            collect_sv_any_patterns_from_stmt(then_stmt, sv_any_id, interner, patterns);
+            if let Some(else_s) = else_stmt {
+                collect_sv_any_patterns_from_stmt(else_s, sv_any_id, interner, patterns);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            let found = detect_sv_any_patterns(cond, sv_any_id, interner);
+            patterns.extend(found);
+            collect_sv_any_patterns_from_stmt(body, sv_any_id, interner, patterns);
+        }
+        Stmt::DoWhile { body, cond, .. } => {
+            collect_sv_any_patterns_from_stmt(body, sv_any_id, interner, patterns);
+            let found = detect_sv_any_patterns(cond, sv_any_id, interner);
+            patterns.extend(found);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(crate::ast::ForInit::Expr(e)) = init {
+                let found = detect_sv_any_patterns(e, sv_any_id, interner);
+                patterns.extend(found);
+            }
+            if let Some(c) = cond {
+                let found = detect_sv_any_patterns(c, sv_any_id, interner);
+                patterns.extend(found);
+            }
+            if let Some(s) = step {
+                let found = detect_sv_any_patterns(s, sv_any_id, interner);
+                patterns.extend(found);
+            }
+            collect_sv_any_patterns_from_stmt(body, sv_any_id, interner, patterns);
+        }
+        Stmt::Switch { expr, body, .. } => {
+            let found = detect_sv_any_patterns(expr, sv_any_id, interner);
+            patterns.extend(found);
+            collect_sv_any_patterns_from_stmt(body, sv_any_id, interner, patterns);
+        }
+        Stmt::Compound(compound) => {
+            for item in &compound.items {
+                collect_sv_any_patterns_from_block_item(item, sv_any_id, interner, patterns);
+            }
+        }
+        Stmt::Label { stmt: s, .. }
+        | Stmt::Case { stmt: s, .. }
+        | Stmt::Default { stmt: s, .. } => {
+            collect_sv_any_patterns_from_stmt(s, sv_any_id, interner, patterns);
+        }
+        Stmt::Expr(None, _) | Stmt::Return(None, _)
+        | Stmt::Goto(_, _) | Stmt::Continue(_) | Stmt::Break(_) | Stmt::Asm { .. } => {}
+    }
+}
+
 /// マクロのパース結果
 #[derive(Debug, Clone)]
 pub enum ParseResult {
@@ -32,6 +323,37 @@ pub enum ParseResult {
     Statement(Vec<BlockItem>),
     /// パース不能（エラーメッセージ付き）
     Unparseable(Option<String>),
+}
+
+// ============================================================================
+// MacroAst: マクロの AST 表現（パラメータ情報付き）
+// ============================================================================
+
+/// マクロパラメータの AST 表現
+///
+/// 各パラメータは `Expr` として表現され、固有の `ExprId` を持つ。
+/// これにより、パラメータの型制約も `expr_constraints` に統一的に格納できる。
+#[derive(Debug, Clone)]
+pub struct MacroParam {
+    /// パラメータ名
+    pub name: InternedStr,
+    /// パラメータを表す Expr（ExprKind::Ident を持つ）
+    pub expr: Expr,
+}
+
+impl MacroParam {
+    /// 新しい MacroParam を作成
+    pub fn new(name: InternedStr, loc: crate::source::SourceLocation) -> Self {
+        Self {
+            name,
+            expr: Expr::new(ExprKind::Ident(name), loc),
+        }
+    }
+
+    /// パラメータの ExprId を取得
+    pub fn expr_id(&self) -> crate::ast::ExprId {
+        self.expr.id
+    }
 }
 
 /// 推論状態
@@ -76,6 +398,9 @@ pub struct MacroInferInfo {
     /// トークン連結 (##) を含む（推移的）
     pub has_token_pasting: bool,
 
+    /// パラメータリスト（各パラメータは ExprId を持つ）
+    pub params: Vec<MacroParam>,
+
     /// パース結果
     pub parse_result: ParseResult,
 
@@ -101,11 +426,19 @@ impl MacroInferInfo {
             used_by: HashSet::new(),
             is_thx_dependent: false,
             has_token_pasting: false,
+            params: Vec::new(),
             parse_result: ParseResult::Unparseable(None),
             type_env: TypeEnv::new(),
             args_infer_status: InferStatus::Pending,
             return_infer_status: InferStatus::Pending,
         }
+    }
+
+    /// パラメータ名から対応する ExprId を検索
+    pub fn find_param_expr_id(&self, name: InternedStr) -> Option<crate::ast::ExprId> {
+        self.params.iter()
+            .find(|p| p.name == name)
+            .map(|p| p.expr_id())
     }
 
     /// 引数と戻り値の両方が確定しているか
@@ -344,12 +677,19 @@ impl MacroInferContext {
         rust_decl_dict: Option<&RustDeclDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
-        assert_symbols: (InternedStr, InternedStr),
+        no_expand: NoExpandSymbols,
     ) -> (MacroInferInfo, bool, bool) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
         info.has_body = !def.body.is_empty();
         info.is_function = matches!(def.kind, MacroKind::Function { .. });
+
+        // パラメータの Expr を生成（各パラメータに ExprId を割り当て）
+        if let MacroKind::Function { params, .. } = &def.kind {
+            for &param_name in params {
+                info.params.push(MacroParam::new(param_name, crate::source::SourceLocation::default()));
+            }
+        }
 
         // 直接 ## を含むかチェック
         let has_pasting_direct = def.body.iter().any(|t| matches!(t.kind, TokenKind::HashHash));
@@ -369,14 +709,14 @@ impl MacroInferContext {
         info.is_thx_dependent = has_thx_direct;
 
         // マクロ本体を展開（TokenExpander を使用）
-        let (sym_assert, sym_assert_) = assert_symbols;
         let mut expander = TokenExpander::new(macro_table, interner, files);
         if let Some(dict) = rust_decl_dict {
             expander.set_bindings_consts(&dict.consts);
         }
-        // assert マクロを展開しないよう登録
-        expander.add_no_expand(sym_assert);
-        expander.add_no_expand(sym_assert_);
+        // 特定マクロを展開しないよう登録（assert, SvANY など）
+        for sym in no_expand.iter() {
+            expander.add_no_expand(sym);
+        }
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
         // def-use 関係を収集（展開後のトークンから識別子を抽出）
@@ -503,6 +843,111 @@ impl MacroInferContext {
                 (interner.get(name).to_string(), ty.to_display_string(interner))
             })
         })
+    }
+
+    /// SvANY パターンから型制約を追加
+    ///
+    /// `((XPVAV*) SvANY(av))` のようなパターンから、引数 `av` の型が `AV*` であることを推論する。
+    ///
+    /// # Arguments
+    /// * `name` - マクロ名
+    /// * `fields_dict` - SV ファミリーの構造体情報
+    /// * `no_expand` - 展開抑制シンボル（SvANY の ID を含む）
+    /// * `interner` - 文字列インターナー
+    ///
+    /// # Returns
+    /// 検出されたパターン数
+    pub fn apply_sv_any_constraints(
+        &mut self,
+        name: InternedStr,
+        fields_dict: &FieldsDict,
+        no_expand: NoExpandSymbols,
+        interner: &StringInterner,
+    ) -> usize {
+        let sv_any_id = no_expand.sv_any;
+
+        let info = match self.macros.get(&name) {
+            Some(info) => info,
+            None => return 0,
+        };
+
+        // SvANY を使用していなければスキップ
+        if !info.uses.contains(&sv_any_id) {
+            return 0;
+        }
+
+        // パターン検出（式マクロと文マクロの両方に対応）
+        let patterns: Vec<SvAnyPattern> = match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                detect_sv_any_patterns(expr, sv_any_id, interner)
+            }
+            ParseResult::Statement(block_items) => {
+                let mut patterns = Vec::new();
+                for item in block_items {
+                    collect_sv_any_patterns_from_block_item(item, sv_any_id, interner, &mut patterns);
+                }
+                patterns
+            }
+            ParseResult::Unparseable(_) => return 0,
+        };
+
+        // パラメータに対する制約を収集
+        // パラメータの ExprId を使って expr_constraints に追加
+        let mut constraints_to_add = Vec::new();
+        for pattern in &patterns {
+            // パラメータの ExprId を検索
+            let param_expr_id = match info.find_param_expr_id(pattern.arg_ident) {
+                Some(id) => id,
+                None => continue,  // パラメータでなければスキップ
+            };
+
+            // typeName から構造体名を取得
+            let struct_name = match fields_dict.get_struct_for_sv_head_type(&pattern.cast_type) {
+                Some(name) => name,
+                None => continue,
+            };
+
+            // 型制約を準備
+            // 例: av の型は AV* (= struct av*)
+            let struct_name_str = interner.get(struct_name);
+            let type_str = format!("{}*", struct_name_str.to_uppercase());
+            let context = format!(
+                "SvANY pattern: ({}*) SvANY({})",
+                pattern.cast_type,
+                interner.get(pattern.arg_ident)
+            );
+
+            // TypeRepr を直接構築（struct name* として表現）
+            let type_repr = crate::type_repr::TypeRepr::CType {
+                specs: crate::type_repr::CTypeSpecs::Struct {
+                    name: Some(struct_name),
+                    is_union: false,
+                },
+                derived: vec![crate::type_repr::CDerivedType::Pointer {
+                    is_const: false,
+                    is_volatile: false,
+                    is_restrict: false,
+                }],
+                source: crate::type_repr::CTypeSource::Apidoc {
+                    raw: type_str,  // 表示用に "AV*" を保持
+                },
+            };
+
+            constraints_to_add.push((param_expr_id, type_repr, context));
+        }
+
+        let constraint_count = constraints_to_add.len();
+
+        // 制約を追加（expr_constraints を使用）
+        if let Some(info) = self.macros.get_mut(&name) {
+            for (expr_id, type_repr, context) in constraints_to_add {
+                info.type_env.add_expr_constraint(
+                    crate::type_env::TypeConstraint::new(expr_id, type_repr, context),
+                );
+            }
+        }
+
+        constraint_count
     }
 
     /// マクロを解析して MacroInferInfo を作成（従来のAPI - 互換性のため保持）
@@ -772,7 +1217,7 @@ impl MacroInferContext {
         inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
-        assert_symbols: (InternedStr, InternedStr),
+        no_expand: NoExpandSymbols,
     ) {
         // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
         let mut thx_initial = HashSet::new();
@@ -780,7 +1225,7 @@ impl MacroInferContext {
 
         for def in macro_table.iter_target_macros() {
             let (info, has_pasting, has_thx) = self.build_macro_info(
-                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, assert_symbols
+                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, no_expand
             );
             if has_pasting {
                 pasting_initial.insert(def.name);
@@ -1269,5 +1714,259 @@ mod tests {
         ctx.mark_confirmed(bar);
         let candidates = ctx.get_inference_candidates();
         assert_eq!(candidates, vec![foo]);
+    }
+
+    // ============================================================================
+    // SvANY パターン検出テスト
+    // ============================================================================
+
+    use crate::ast::{AbstractDeclarator, DeclSpecs, DerivedDecl, StructSpec, TypeQualifiers};
+    use crate::source::SourceLocation;
+
+    /// テスト用のヘルパー: 識別子式を作成
+    fn make_ident_expr(id: InternedStr) -> Expr {
+        Expr::new(ExprKind::Ident(id), SourceLocation::default())
+    }
+
+    /// テスト用のヘルパー: 関数呼び出し式を作成
+    fn make_call_expr(func: Expr, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            ExprKind::Call {
+                func: Box::new(func),
+                args,
+            },
+            SourceLocation::default(),
+        )
+    }
+
+    /// テスト用のヘルパー: キャスト式を作成
+    fn make_cast_expr(type_name: TypeName, expr: Expr) -> Expr {
+        Expr::new(
+            ExprKind::Cast {
+                type_name: Box::new(type_name),
+                expr: Box::new(expr),
+            },
+            SourceLocation::default(),
+        )
+    }
+
+    /// テスト用のヘルパー: ポインタ型の TypeName を作成
+    fn make_pointer_type(type_name: InternedStr) -> TypeName {
+        TypeName {
+            specs: DeclSpecs {
+                storage: None,
+                type_specs: vec![TypeSpec::TypedefName(type_name)],
+                qualifiers: TypeQualifiers::default(),
+                is_inline: false,
+            },
+            declarator: Some(AbstractDeclarator {
+                derived: vec![DerivedDecl::Pointer(TypeQualifiers::default())],
+            }),
+        }
+    }
+
+    #[test]
+    fn test_extract_sv_any_arg_simple() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let av = interner.intern("av");
+
+        // SvANY(av)
+        let sv_any_call = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(av)]);
+
+        let result = extract_sv_any_arg(&sv_any_call, sv_any);
+        assert_eq!(result, Some(av));
+    }
+
+    #[test]
+    fn test_extract_sv_any_arg_wrong_function() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let other = interner.intern("OtherFunc");
+        let av = interner.intern("av");
+
+        // OtherFunc(av)
+        let call = make_call_expr(make_ident_expr(other), vec![make_ident_expr(av)]);
+
+        let result = extract_sv_any_arg(&call, sv_any);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_pointer_base_type_typedef() {
+        let mut interner = StringInterner::new();
+        let xpvav = interner.intern("XPVAV");
+
+        let type_name = make_pointer_type(xpvav);
+        let result = extract_pointer_base_type(&type_name, &interner);
+        assert_eq!(result, Some("XPVAV".to_string()));
+    }
+
+    #[test]
+    fn test_extract_pointer_base_type_struct() {
+        let mut interner = StringInterner::new();
+        let xpvav = interner.intern("XPVAV");
+
+        let type_name = TypeName {
+            specs: DeclSpecs {
+                storage: None,
+                type_specs: vec![TypeSpec::Struct(StructSpec {
+                    name: Some(xpvav),
+                    members: None,
+                    loc: SourceLocation::default(),
+                })],
+                qualifiers: TypeQualifiers::default(),
+                is_inline: false,
+            },
+            declarator: Some(AbstractDeclarator {
+                derived: vec![DerivedDecl::Pointer(TypeQualifiers::default())],
+            }),
+        };
+
+        let result = extract_pointer_base_type(&type_name, &interner);
+        assert_eq!(result, Some("XPVAV".to_string()));
+    }
+
+    #[test]
+    fn test_extract_pointer_base_type_non_pointer() {
+        let mut interner = StringInterner::new();
+        let xpvav = interner.intern("XPVAV");
+
+        // 非ポインタ型
+        let type_name = TypeName {
+            specs: DeclSpecs {
+                storage: None,
+                type_specs: vec![TypeSpec::TypedefName(xpvav)],
+                qualifiers: TypeQualifiers::default(),
+                is_inline: false,
+            },
+            declarator: None, // ポインタなし
+        };
+
+        let result = extract_pointer_base_type(&type_name, &interner);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_detect_sv_any_patterns_simple_cast() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let av = interner.intern("av");
+        let xpvav = interner.intern("XPVAV");
+
+        // (XPVAV*) SvANY(av)
+        let sv_any_call = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(av)]);
+        let cast_expr = make_cast_expr(make_pointer_type(xpvav), sv_any_call);
+
+        let patterns = detect_sv_any_patterns(&cast_expr, sv_any, &interner);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].cast_type, "XPVAV");
+        assert_eq!(patterns[0].arg_ident, av);
+    }
+
+    #[test]
+    fn test_detect_sv_any_patterns_with_member_access() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let av = interner.intern("av");
+        let xpvav = interner.intern("XPVAV");
+        let xav_alloc = interner.intern("xav_alloc");
+
+        // ((XPVAV*) SvANY(av))->xav_alloc
+        let sv_any_call = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(av)]);
+        let cast_expr = make_cast_expr(make_pointer_type(xpvav), sv_any_call);
+        let ptr_member_expr = Expr::new(
+            ExprKind::PtrMember {
+                expr: Box::new(cast_expr),
+                member: xav_alloc,
+            },
+            SourceLocation::default(),
+        );
+
+        let patterns = detect_sv_any_patterns(&ptr_member_expr, sv_any, &interner);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].cast_type, "XPVAV");
+        assert_eq!(patterns[0].arg_ident, av);
+    }
+
+    #[test]
+    fn test_detect_sv_any_patterns_through_mutable_ptr() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let mutable_ptr = interner.intern("MUTABLE_PTR");
+        let sv = interner.intern("sv");
+        let xpvcv = interner.intern("XPVCV");
+
+        // (XPVCV*) MUTABLE_PTR(SvANY(sv))
+        let sv_any_call = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(sv)]);
+        let mutable_ptr_call = make_call_expr(make_ident_expr(mutable_ptr), vec![sv_any_call]);
+        let cast_expr = make_cast_expr(make_pointer_type(xpvcv), mutable_ptr_call);
+
+        let patterns = detect_sv_any_patterns(&cast_expr, sv_any, &interner);
+
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].cast_type, "XPVCV");
+        assert_eq!(patterns[0].arg_ident, sv);
+    }
+
+    #[test]
+    fn test_detect_sv_any_patterns_nested() {
+        let mut interner = StringInterner::new();
+        let sv_any = interner.intern("SvANY");
+        let av = interner.intern("av");
+        let gv = interner.intern("gv");
+        let xpvav = interner.intern("XPVAV");
+        let xpvgv = interner.intern("XPVGV");
+
+        // 複数のパターンがネストした場合:
+        // cond ? ((XPVAV*) SvANY(av)) : ((XPVGV*) SvANY(gv))
+        let sv_any_av = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(av)]);
+        let cast_av = make_cast_expr(make_pointer_type(xpvav), sv_any_av);
+
+        let sv_any_gv = make_call_expr(make_ident_expr(sv_any), vec![make_ident_expr(gv)]);
+        let cast_gv = make_cast_expr(make_pointer_type(xpvgv), sv_any_gv);
+
+        let cond = make_ident_expr(interner.intern("cond"));
+        let conditional = Expr::new(
+            ExprKind::Conditional {
+                cond: Box::new(cond),
+                then_expr: Box::new(cast_av),
+                else_expr: Box::new(cast_gv),
+            },
+            SourceLocation::default(),
+        );
+
+        let patterns = detect_sv_any_patterns(&conditional, sv_any, &interner);
+
+        assert_eq!(patterns.len(), 2);
+
+        // 順序は検出順序に依存するため、どちらかが含まれていることを確認
+        let types: Vec<_> = patterns.iter().map(|p| p.cast_type.as_str()).collect();
+        assert!(types.contains(&"XPVAV"));
+        assert!(types.contains(&"XPVGV"));
+    }
+
+    #[test]
+    fn test_no_expand_symbols_new() {
+        let mut interner = StringInterner::new();
+        let symbols = NoExpandSymbols::new(&mut interner);
+
+        assert_eq!(interner.get(symbols.assert), "assert");
+        assert_eq!(interner.get(symbols.assert_), "assert_");
+        assert_eq!(interner.get(symbols.sv_any), "SvANY");
+    }
+
+    #[test]
+    fn test_no_expand_symbols_iter() {
+        let mut interner = StringInterner::new();
+        let symbols = NoExpandSymbols::new(&mut interner);
+
+        let syms: Vec<_> = symbols.iter().collect();
+        assert_eq!(syms.len(), 3);
+        assert!(syms.contains(&symbols.assert));
+        assert!(syms.contains(&symbols.assert_));
+        assert!(syms.contains(&symbols.sv_any));
     }
 }
