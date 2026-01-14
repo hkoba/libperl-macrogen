@@ -31,6 +31,7 @@ pub mod token_expander;
 pub mod token_source;
 pub mod type_env;
 pub mod type_registry;
+pub mod type_repr;
 pub mod unified_type;
 
 // 主要な型を再エクスポート
@@ -60,6 +61,10 @@ pub use token_expander::TokenExpander;
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 pub use type_env::{ConstraintSource, ParamLink, TypeConstraint, TypeEnv};
 pub use type_registry::{TypeEquality, TypeRegistry, TypeRegistryStats};
+pub use type_repr::{
+    CDerivedType, CPrimitiveKind, CTypeSource, CTypeSpecs, InferredType,
+    IntSize as TypeReprIntSize, RustPrimitiveKind, RustTypeRepr, RustTypeSource, TypeRepr,
+};
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
 
 // 廃止予定: macrogen
