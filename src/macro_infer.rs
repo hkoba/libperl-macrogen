@@ -20,6 +20,9 @@ use crate::token_expander::TokenExpander;
 #[allow(deprecated)]
 use crate::type_env::{ConstraintSource, TypeConstraint, TypeEnv};
 
+// use std::io;
+// use crate::SexpPrinter;
+
 /// マクロのパース結果
 #[derive(Debug, Clone)]
 pub enum ParseResult {
@@ -431,6 +434,16 @@ impl MacroInferContext {
                 rust_decl_dict,
                 inline_fn_dict,
             );
+
+            // println!("expr macro {}: {:?}", interner.get(name), expr);
+            // {
+            //     print!("expr macro {}: ", interner.get(name));
+            //     let stdout = io::stdout();
+            //     let mut handler = stdout.lock();
+            //     let mut printer = SexpPrinter::new(&mut handler, interner);
+            //     let _ = printer.print_expr(expr);
+            // }
+            // println!("");
 
             // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
             analyzer.set_macro_return_types(return_types_cache);

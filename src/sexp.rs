@@ -424,7 +424,7 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
     }
 
     /// 式を出力
-    fn print_expr(&mut self, expr: &Expr) -> Result<()> {
+    pub fn print_expr(&mut self, expr: &Expr) -> Result<()> {
         match &expr.kind {
             ExprKind::Ident(id) => {
                 self.write_open("ident")?;
