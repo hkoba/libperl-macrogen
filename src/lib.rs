@@ -9,18 +9,13 @@ pub mod error;
 pub mod fields_dict;
 pub mod inline_fn;
 pub mod intern;
-// pub mod iterative_infer;  // 廃止予定
 pub mod lexer;
-// pub mod macro_analysis;   // 廃止予定
-// pub mod macro_analyzer2;  // 廃止予定
 pub mod macro_def;
 pub mod macro_infer;
-// pub mod macrogen;         // 廃止予定（廃止モジュールに依存）
 pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
 pub mod preprocessor;
-// pub mod rust_codegen;     // 廃止予定
 pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
@@ -41,10 +36,6 @@ pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Re
 pub use fields_dict::FieldsDict;
 pub use inline_fn::InlineFnDict;
 pub use intern::{InternedStr, StringInterner};
-// 廃止予定: iterative_infer
-// 廃止予定: macro_analysis
-// 廃止予定: macro_analyzer2
-// 廃止予定: rust_codegen
 pub use rust_decl::RustDeclDict;
 pub use lexer::{IdentResolver, Interning, Lexer, LookupOnly, MutableLexer, ReadOnlyLexer};
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
@@ -68,8 +59,6 @@ pub use type_repr::{
     IntSize as TypeReprIntSize, RustPrimitiveKind, RustTypeRepr, RustTypeSource, TypeRepr,
 };
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
-
-// 廃止予定: macrogen
 
 #[cfg(test)]
 mod tests {
