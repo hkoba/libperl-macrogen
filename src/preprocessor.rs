@@ -54,6 +54,99 @@ impl<A: MacroDefCallback + 'static, B: MacroDefCallback + 'static> MacroDefCallb
     }
 }
 
+/// マクロ呼び出し時のコールバックトレイト
+///
+/// Preprocessor で特定のマクロが展開されたときに呼び出される。
+/// `set_macro_called_callback` でマクロ名を指定して登録する。
+pub trait MacroCalledCallback {
+    /// マクロが呼び出され、展開された後に呼ばれる
+    /// - args: 引数トークン列（関数形式マクロの場合）
+    ///         オブジェクトマクロの場合は None
+    /// - interner: トークンを文字列化するために使用
+    fn on_macro_called(&mut self, args: Option<&[Vec<Token>]>, interner: &StringInterner);
+
+    /// ダウンキャスト用
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+/// 特定マクロの呼び出しを監視するシンプルな実装
+///
+/// フラグベースで呼び出しを検出し、引数も記録する。
+pub struct MacroCallWatcher {
+    /// 呼び出しフラグ
+    called: std::cell::Cell<bool>,
+    /// 最後に呼び出された引数（トークン列を文字列化）
+    last_args: std::cell::RefCell<Option<Vec<String>>>,
+}
+
+impl MacroCallWatcher {
+    /// 新しい MacroCallWatcher を作成
+    pub fn new() -> Self {
+        Self {
+            called: std::cell::Cell::new(false),
+            last_args: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// フラグをチェックしてリセット
+    pub fn take_called(&self) -> bool {
+        self.called.replace(false)
+    }
+
+    /// 最後の引数を取得してクリア
+    pub fn take_args(&self) -> Option<Vec<String>> {
+        self.last_args.borrow_mut().take()
+    }
+
+    /// フラグと引数をクリア
+    pub fn clear(&self) {
+        self.called.set(false);
+        *self.last_args.borrow_mut() = None;
+    }
+
+    /// 呼び出されたかどうか（リセットなし）
+    pub fn was_called(&self) -> bool {
+        self.called.get()
+    }
+
+    /// トークン列を文字列に変換
+    fn tokens_to_string(tokens: &[Token], interner: &StringInterner) -> String {
+        tokens
+            .iter()
+            .map(|t| t.kind.format(interner))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+impl Default for MacroCallWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MacroCalledCallback for MacroCallWatcher {
+    fn on_macro_called(&mut self, args: Option<&[Vec<Token>]>, interner: &StringInterner) {
+        self.called.set(true);
+        if let Some(args) = args {
+            let strs: Vec<String> = args
+                .iter()
+                .map(|tokens| Self::tokens_to_string(tokens, interner))
+                .collect();
+            *self.last_args.borrow_mut() = Some(strs);
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// インクルードパスの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeKind {
@@ -336,6 +429,8 @@ pub struct Preprocessor {
     no_expand_registry: NoExpandRegistry,
     /// マクロ定義時のコールバック
     macro_def_callback: Option<Box<dyn MacroDefCallback>>,
+    /// マクロ呼び出し時のコールバック（マクロ名ごとに登録）
+    macro_called_callbacks: HashMap<InternedStr, Box<dyn MacroCalledCallback>>,
 }
 
 impl Preprocessor {
@@ -355,6 +450,7 @@ impl Preprocessor {
             defining_builtin: false,
             no_expand_registry: NoExpandRegistry::new(),
             macro_def_callback: None,
+            macro_called_callbacks: HashMap::new(),
         };
 
         // 事前定義マクロを登録
@@ -371,6 +467,41 @@ impl Preprocessor {
     /// マクロ定義コールバックを取得（所有権を移動）
     pub fn take_macro_def_callback(&mut self) -> Option<Box<dyn MacroDefCallback>> {
         self.macro_def_callback.take()
+    }
+
+    /// 特定マクロの呼び出しコールバックを設定
+    ///
+    /// 指定したマクロが展開されたときにコールバックが呼ばれる。
+    pub fn set_macro_called_callback(
+        &mut self,
+        macro_name: InternedStr,
+        callback: Box<dyn MacroCalledCallback>,
+    ) {
+        self.macro_called_callbacks.insert(macro_name, callback);
+    }
+
+    /// マクロ呼び出しコールバックを取得（所有権移動）
+    pub fn take_macro_called_callback(
+        &mut self,
+        macro_name: InternedStr,
+    ) -> Option<Box<dyn MacroCalledCallback>> {
+        self.macro_called_callbacks.remove(&macro_name)
+    }
+
+    /// マクロ呼び出しコールバックへの参照を取得
+    pub fn get_macro_called_callback(
+        &self,
+        macro_name: InternedStr,
+    ) -> Option<&Box<dyn MacroCalledCallback>> {
+        self.macro_called_callbacks.get(&macro_name)
+    }
+
+    /// マクロ呼び出しコールバックへの可変参照を取得
+    pub fn get_macro_called_callback_mut(
+        &mut self,
+        macro_name: InternedStr,
+    ) -> Option<&mut Box<dyn MacroCalledCallback>> {
+        self.macro_called_callbacks.get_mut(&macro_name)
     }
 
     /// 事前定義マクロを登録
@@ -2287,6 +2418,12 @@ impl Preprocessor {
                 let expanded = self.expand_tokens(&def.body, &empty, &empty)?;
                 // 全トークンに展開禁止情報と呼び出し位置を適用
                 let marked = self.mark_expanded_with_registry(expanded, trigger_token_id, id, &call_loc);
+                // コールバック呼び出し（展開後）
+                // 借用の問題を避けるため、一時的にコールバックを取り出す
+                if let Some(mut cb) = self.macro_called_callbacks.remove(&id) {
+                    cb.on_macro_called(None, &self.interner);
+                    self.macro_called_callbacks.insert(id, cb);
+                }
                 // マーカーで囲む（emit_markers が有効な場合のみ）
                 let wrapped = self.wrap_with_markers(
                     marked,
@@ -2375,6 +2512,12 @@ impl Preprocessor {
                 let expanded = self.expand_tokens(&def.body, &arg_map, &prescanned_args)?;
                 // 全トークンに展開禁止情報と呼び出し位置を適用
                 let marked = self.mark_expanded_with_registry(expanded, trigger_token_id, id, &call_loc);
+                // コールバック呼び出し（展開後、wrap_with_markers が args を move する前）
+                // 借用の問題を避けるため、一時的にコールバックを取り出す
+                if let Some(mut cb) = self.macro_called_callbacks.remove(&id) {
+                    cb.on_macro_called(Some(&args), &self.interner);
+                    self.macro_called_callbacks.insert(id, cb);
+                }
                 // マーカーで囲む（emit_markers が有効な場合のみ）
                 let wrapped = self.wrap_with_markers(
                     marked,
