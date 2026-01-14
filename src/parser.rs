@@ -126,6 +126,24 @@ impl<'a> Parser<'a, Preprocessor> {
             }
         }
     }
+
+    /// ストリーミング形式でパース（Preprocessor アクセス付き）
+    ///
+    /// `parse_each` と同様だが、コールバックに Preprocessor への可変参照も渡す。
+    /// マクロ呼び出しコールバック（MacroCallWatcher など）にアクセスする場合に使用。
+    pub fn parse_each_with_pp<F>(&mut self, mut callback: F)
+    where
+        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &std::path::Path, &mut Preprocessor) -> std::ops::ControlFlow<()>,
+    {
+        while !self.is_eof() {
+            let loc = self.current.loc.clone();
+            let result = self.parse_external_decl();
+            let path = self.source.files().get_path(loc.file_id).to_path_buf();
+            if callback(result, &loc, &path, self.source).is_break() {
+                break;
+            }
+        }
+    }
 }
 
 /// 汎用のトークンソースに対するパーサー実装

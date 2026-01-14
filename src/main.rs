@@ -11,9 +11,9 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
     get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
-    BlockItem, CompileError, ExternalDecl, FieldsDict, FileId, InlineFnDict, MacroInferContext,
-    PPConfig, ParseResult, Parser, Preprocessor, RustDeclDict, SexpPrinter,
-    SourceLocation, TokenKind, TypedSexpPrinter,
+    BlockItem, CompileError, Declaration, ExternalDecl, FieldsDict, FileId, InlineFnDict,
+    MacroCallWatcher, MacroInferContext, PPConfig, ParseResult, Parser, Preprocessor,
+    RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypeSpec, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -331,6 +331,10 @@ fn run_infer_macro_types(
     // ApidocCollector を Preprocessor に設定
     pp.set_macro_def_callback(Box::new(ApidocCollector::new()));
 
+    // _SV_HEAD マクロ呼び出しを監視
+    let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
+    pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
+
     // パーサー作成
     let mut parser = match Parser::new(pp) {
         Ok(p) => p,
@@ -340,9 +344,11 @@ fn run_infer_macro_types(
     // inline 関数辞書を作成
     let mut inline_fn_dict = InlineFnDict::new();
 
-    // parse_each でフィールド辞書と inline 関数を収集（同時にマクロ定義→コールバック呼び出し）
-    parser.parse_each(|result, _loc, _path, interner| {
+    // parse_each_with_pp でフィールド辞書と inline 関数を収集
+    // 同時に _SV_HEAD マクロ呼び出しを検出して SV ファミリーを動的に構築
+    parser.parse_each_with_pp(|result, _loc, _path, pp| {
         if let Ok(ref decl) = result {
+            let interner = pp.interner();
             fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
             // inline 関数を収集
@@ -351,8 +357,24 @@ fn run_infer_macro_types(
                     inline_fn_dict.collect_from_function_def(func_def);
                 }
             }
+
+            // 構造体定義の場合、_SV_HEAD フラグをチェック
+            if decl.is_target() {
+                if let Some(struct_names) = extract_struct_names(decl) {
+                    // _SV_HEAD が呼ばれていたら SV ファミリーに追加
+                    if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
+                        if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                            if watcher.take_called() {
+                                for name in struct_names {
+                                    fields_dict.add_sv_family_member(name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        std::ops::ControlFlow::Continue(())
+        ControlFlow::Continue(())
     });
 
     // パーサーから typedef 辞書を取得
@@ -668,6 +690,39 @@ fn show_source_context(pp: &Preprocessor, loc: &SourceLocation) {
 /// エラーをファイル名付きでフォーマット
 fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
     e.format_with_files(pp.files())
+}
+
+/// 外部宣言から構造体名を抽出
+///
+/// 宣言に含まれる構造体・共用体の名前を返す。
+/// メンバーリストを持つ定義のみを対象とする（前方宣言は除外）。
+fn extract_struct_names(decl: &ExternalDecl) -> Option<Vec<libperl_macrogen::InternedStr>> {
+    let declaration = match decl {
+        ExternalDecl::Declaration(d) => d,
+        _ => return None,
+    };
+
+    let mut names = Vec::new();
+
+    for type_spec in &declaration.specs.type_specs {
+        match type_spec {
+            TypeSpec::Struct(spec) | TypeSpec::Union(spec) => {
+                // メンバーリストを持つ定義のみ（前方宣言は除外）
+                if spec.members.is_some() {
+                    if let Some(name) = spec.name {
+                        names.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
 }
 
 /// プリプロセス結果を出力

@@ -221,16 +221,32 @@ println!("SV family members: {:?}", sv_family_members);
 - `get_macro_called_callback` の戻り値を `Option<&Box<dyn MacroCalledCallback>>` に変更
   （ライフタイムの問題を回避）
 
-### Phase 2: fields_dict での使用
+### Phase 2: fields_dict での使用 ✅ 完了
 
-1. `_SV_HEAD` 監視用の `MacroCallWatcher` を登録
-2. 構造体パース時にフラグをチェック
-3. `SV_FAMILY_MEMBERS` ハードコードを動的検出に置き換え
+1. ✅ `_SV_HEAD` 監視用の `MacroCallWatcher` を登録
+2. ✅ 構造体パース時にフラグをチェック
+3. ✅ `SV_FAMILY_MEMBERS` ハードコードを動的検出に置き換え
 
-### Phase 3: テストと検証
+**実装の詳細**:
+- `FieldsDict` に `sv_family_members: HashSet<InternedStr>` フィールドを追加
+- `add_sv_family_member()` メソッドを追加
+- `is_sv_family()` を動的検出のみを使用するよう変更（フォールバックなし）
+  - SV ファミリー検出失敗は重大な問題のため、フォールバックで隠蔽しない
+- `Parser` に `parse_each_with_pp()` メソッドを追加（Preprocessor へのアクセス付き）
+- `run_infer_macro_types()` で `_SV_HEAD` 検出ロジックを実装
 
-1. 単体テスト追加
-2. 実際の Perl ヘッダーでの動作確認
+### Phase 3: テストと検証 ✅ 完了
+
+1. ✅ 単体テスト追加
+   - `test_macro_call_watcher_basic` - 基本機能テスト
+   - `test_macro_call_watcher_object_macro` - オブジェクトマクロ検出
+   - `test_macro_call_watcher_function_macro` - 関数マクロ検出と引数取得
+   - `test_macro_call_watcher_clear` - clear() メソッド
+   - `test_macro_call_watcher_take_called` - take_called() メソッド
+   - `test_macro_call_watcher_multiple_macros` - 複数マクロ監視
+   - `test_macro_call_watcher_sv_head_pattern` - _SV_HEAD パターンシミュレーション
+2. ✅ 実際の Perl ヘッダーでの動作確認
+   - 検出された SV ファミリー: sv, gv, cv, av, hv, io, p5rx, invlist, object
 
 ## 変更対象ファイル
 

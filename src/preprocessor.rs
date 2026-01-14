@@ -110,6 +110,11 @@ impl MacroCallWatcher {
         self.called.get()
     }
 
+    /// 最後の引数を取得（リセットなし）
+    pub fn last_args(&self) -> Option<Vec<String>> {
+        self.last_args.borrow().clone()
+    }
+
     /// トークン列を文字列に変換
     fn tokens_to_string(tokens: &[Token], interner: &StringInterner) -> String {
         tokens
@@ -3360,5 +3365,244 @@ mod tests {
             end_marker_id.unwrap(),
             "MacroBegin.marker_id should match MacroEnd.begin_marker_id"
         );
+    }
+
+    // MacroCallWatcher tests
+
+    #[test]
+    fn test_macro_call_watcher_basic() {
+        // MacroCallWatcher の基本機能テスト
+        let watcher = MacroCallWatcher::new();
+
+        // 初期状態では called は false
+        assert!(!watcher.was_called());
+        assert!(watcher.last_args().is_none());
+    }
+
+    #[test]
+    fn test_macro_call_watcher_object_macro() {
+        // オブジェクトマクロの呼び出し検出
+        let file = create_temp_file("#define TEST_MACRO 42\nint x = TEST_MACRO;");
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        // コールバックを登録
+        let macro_name = pp.interner_mut().intern("TEST_MACRO");
+        pp.set_macro_called_callback(macro_name, Box::new(MacroCallWatcher::new()));
+
+        // トークンを収集（マクロが展開される）
+        let _tokens = pp.collect_tokens().unwrap();
+
+        // コールバックが呼ばれたことを確認
+        if let Some(cb) = pp.get_macro_called_callback(macro_name) {
+            if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                assert!(watcher.was_called(), "TEST_MACRO should have been called");
+                // オブジェクトマクロなので引数は None
+                assert!(watcher.last_args().is_none());
+            } else {
+                panic!("Failed to downcast to MacroCallWatcher");
+            }
+        } else {
+            panic!("Callback not found");
+        }
+    }
+
+    #[test]
+    fn test_macro_call_watcher_function_macro() {
+        // 関数マクロの呼び出し検出と引数取得
+        let file = create_temp_file("#define ADD(a, b) a + b\nint x = ADD(10, 20);");
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        // コールバックを登録
+        let macro_name = pp.interner_mut().intern("ADD");
+        pp.set_macro_called_callback(macro_name, Box::new(MacroCallWatcher::new()));
+
+        // トークンを収集（マクロが展開される）
+        let _tokens = pp.collect_tokens().unwrap();
+
+        // コールバックが呼ばれたことを確認
+        if let Some(cb) = pp.get_macro_called_callback(macro_name) {
+            if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                assert!(watcher.was_called(), "ADD should have been called");
+                // 関数マクロなので引数がある
+                let args = watcher.last_args();
+                assert!(args.is_some(), "Function macro should have arguments");
+                let args = args.unwrap();
+                assert_eq!(args.len(), 2, "ADD has 2 arguments");
+                assert_eq!(args[0], "10");
+                assert_eq!(args[1], "20");
+            } else {
+                panic!("Failed to downcast to MacroCallWatcher");
+            }
+        } else {
+            panic!("Callback not found");
+        }
+    }
+
+    #[test]
+    fn test_macro_call_watcher_clear() {
+        // clear() メソッドのテスト
+        let file = create_temp_file("#define FOO(x) x\nint a = FOO(1);\nint b = FOO(2);");
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        // コールバックを登録
+        let macro_name = pp.interner_mut().intern("FOO");
+        pp.set_macro_called_callback(macro_name, Box::new(MacroCallWatcher::new()));
+
+        // 最初のトークンを取得（FOO(1) が展開される）
+        let mut count = 0;
+        while count < 5 {
+            // int a = FOO(1) の 5 トークン程度
+            if pp.next_token().unwrap().kind == TokenKind::Eof {
+                break;
+            }
+            count += 1;
+        }
+
+        // フラグが立っていることを確認
+        {
+            let cb = pp.get_macro_called_callback(macro_name).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(watcher.was_called());
+            let args = watcher.last_args().unwrap();
+            assert_eq!(args[0], "1");
+        }
+
+        // clear() を呼ぶ
+        {
+            let cb = pp.get_macro_called_callback_mut(macro_name).unwrap();
+            let watcher = cb.as_any_mut().downcast_mut::<MacroCallWatcher>().unwrap();
+            watcher.clear();
+        }
+
+        // フラグがリセットされていることを確認
+        {
+            let cb = pp.get_macro_called_callback(macro_name).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(!watcher.was_called());
+            assert!(watcher.last_args().is_none());
+        }
+    }
+
+    #[test]
+    fn test_macro_call_watcher_take_called() {
+        // take_called() メソッドのテスト（フラグを取得してリセット）
+        let file = create_temp_file("#define BAR 99\nint x = BAR;");
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        let macro_name = pp.interner_mut().intern("BAR");
+        pp.set_macro_called_callback(macro_name, Box::new(MacroCallWatcher::new()));
+
+        let _tokens = pp.collect_tokens().unwrap();
+
+        // take_called() は true を返し、フラグをリセットする
+        {
+            let cb = pp.get_macro_called_callback(macro_name).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(watcher.take_called(), "First take_called should return true");
+            assert!(!watcher.take_called(), "Second take_called should return false");
+        }
+    }
+
+    #[test]
+    fn test_macro_call_watcher_multiple_macros() {
+        // 複数のマクロを監視
+        let file = create_temp_file(
+            "#define A(x) x\n#define B(x) x\n#define C(x) x\nint a = A(1); int b = B(2);"
+        );
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        let macro_a = pp.interner_mut().intern("A");
+        let macro_b = pp.interner_mut().intern("B");
+        let macro_c = pp.interner_mut().intern("C");
+
+        pp.set_macro_called_callback(macro_a, Box::new(MacroCallWatcher::new()));
+        pp.set_macro_called_callback(macro_b, Box::new(MacroCallWatcher::new()));
+        pp.set_macro_called_callback(macro_c, Box::new(MacroCallWatcher::new()));
+
+        let _tokens = pp.collect_tokens().unwrap();
+
+        // A と B は呼ばれた、C は呼ばれていない
+        {
+            let cb = pp.get_macro_called_callback(macro_a).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(watcher.was_called(), "A should have been called");
+        }
+        {
+            let cb = pp.get_macro_called_callback(macro_b).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(watcher.was_called(), "B should have been called");
+        }
+        {
+            let cb = pp.get_macro_called_callback(macro_c).unwrap();
+            let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+            assert!(!watcher.was_called(), "C should not have been called");
+        }
+    }
+
+    #[test]
+    fn test_macro_call_watcher_sv_head_pattern() {
+        // _SV_HEAD パターンのシミュレーション
+        // 実際の Perl ヘッダーでは _SV_HEAD(SV) のように使われる
+        let file = create_temp_file(
+            "#define _SV_HEAD(type) void *sv_any; type *sv_type\n\
+             struct sv { _SV_HEAD(SV); };\n\
+             struct av { _SV_HEAD(AV); };\n\
+             struct other { int x; };"
+        );
+        let mut pp = Preprocessor::new(PPConfig::default());
+        pp.process_file(file.path()).unwrap();
+
+        let sv_head = pp.interner_mut().intern("_SV_HEAD");
+        pp.set_macro_called_callback(sv_head, Box::new(MacroCallWatcher::new()));
+
+        // トークンを一つずつ読み進める
+        // 構造体ごとにフラグをチェック
+        let mut sv_family_members = Vec::new();
+        let mut current_struct: Option<String> = None;
+
+        loop {
+            let token = pp.next_token().unwrap();
+            if token.kind == TokenKind::Eof {
+                break;
+            }
+
+            // struct キーワードを検出
+            if token.kind == TokenKind::KwStruct {
+                // 新しい構造体の開始時にフラグをクリア
+                if let Some(cb) = pp.get_macro_called_callback_mut(sv_head) {
+                    let watcher = cb.as_any_mut().downcast_mut::<MacroCallWatcher>().unwrap();
+                    watcher.clear();
+                }
+
+                let name_token = pp.next_token().unwrap();
+                if let TokenKind::Ident(id) = name_token.kind {
+                    current_struct = Some(pp.interner().get(id).to_string());
+                }
+            }
+
+            // 構造体の終わり（セミコロン）を検出
+            if token.kind == TokenKind::Semi {
+                if let Some(ref struct_name) = current_struct {
+                    // _SV_HEAD が呼ばれたかチェック
+                    if let Some(cb) = pp.get_macro_called_callback(sv_head) {
+                        let watcher = cb.as_any().downcast_ref::<MacroCallWatcher>().unwrap();
+                        if watcher.was_called() {
+                            sv_family_members.push(struct_name.clone());
+                        }
+                    }
+                }
+                current_struct = None;
+            }
+        }
+
+        // sv と av は _SV_HEAD を使用している、other は使用していない
+        assert!(sv_family_members.contains(&"sv".to_string()), "sv should be SV family");
+        assert!(sv_family_members.contains(&"av".to_string()), "av should be SV family");
+        assert!(!sv_family_members.contains(&"other".to_string()), "other should not be SV family");
     }
 }

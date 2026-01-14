@@ -27,6 +27,9 @@ pub struct FieldsDict {
     typedef_to_struct: HashMap<InternedStr, InternedStr>,
     /// 一致型キャッシュ: フィールド名 -> 一致型（全バリアントで型が同じ場合のみ Some）
     consistent_type_cache: HashMap<InternedStr, Option<String>>,
+    /// SV ファミリーメンバー（_SV_HEAD マクロを使用する構造体）
+    /// 動的に検出される
+    sv_family_members: HashSet<InternedStr>,
 }
 
 impl FieldsDict {
@@ -388,11 +391,17 @@ impl FieldsDict {
 
     // ==================== Polymorphic Field Detection ====================
 
-    /// SV ファミリーのメンバー構造体名
-    /// Perl の _SV_HEAD マクロにより同一レイアウトを共有する構造体群
-    const SV_FAMILY_MEMBERS: &'static [&'static str] = &[
-        "sv", "av", "hv", "gv", "cv", "io", "p5rx", "invlist", "STRUCT_SV",
-    ];
+    /// SV ファミリーメンバーを追加（動的検出用）
+    ///
+    /// _SV_HEAD マクロを使用する構造体を登録する。
+    pub fn add_sv_family_member(&mut self, struct_name: InternedStr) {
+        self.sv_family_members.insert(struct_name);
+    }
+
+    /// 動的に検出された SV ファミリーメンバーの数を取得
+    pub fn sv_family_members_count(&self) -> usize {
+        self.sv_family_members.len()
+    }
 
     /// SV_HEAD マクロで定義される共通フィールド
     /// これらのフィールドは SV ファミリー全体で共有される
@@ -414,16 +423,15 @@ impl FieldsDict {
     }
 
     /// 構造体セットが SV ファミリーか判定
-    /// すべての構造体が SV_FAMILY_MEMBERS に含まれていれば true
-    pub fn is_sv_family(&self, structs: &HashSet<InternedStr>, interner: &StringInterner) -> bool {
-        if structs.is_empty() {
+    ///
+    /// 動的検出された sv_family_members を使用する。
+    /// SV ファミリーの検出が失敗した場合（sv_family_members が空）は常に false を返す。
+    pub fn is_sv_family(&self, structs: &HashSet<InternedStr>, _interner: &StringInterner) -> bool {
+        if structs.is_empty() || self.sv_family_members.is_empty() {
             return false;
         }
 
-        structs.iter().all(|s| {
-            let name = interner.get(*s);
-            Self::SV_FAMILY_MEMBERS.contains(&name)
-        })
+        structs.iter().all(|s| self.sv_family_members.contains(s))
     }
 
     /// SV ファミリーの基底型 ("sv") の InternedStr を取得
