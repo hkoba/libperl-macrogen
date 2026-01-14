@@ -17,6 +17,7 @@ use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
 use crate::token::TokenKind;
 use crate::token_expander::TokenExpander;
+#[allow(deprecated)]
 use crate::type_env::{ConstraintSource, TypeConstraint, TypeEnv};
 
 /// マクロのパース結果
@@ -139,7 +140,7 @@ impl MacroInferInfo {
     ///
     /// 1. return_constraints があればそれを使用
     /// 2. 式マクロの場合、ルート式の型制約を使用
-    pub fn get_return_type(&self) -> Option<&str> {
+    pub fn get_return_type(&self) -> Option<&crate::type_repr::TypeRepr> {
         // まず return_constraints を確認
         if let Some(ty) = self.type_env.get_return_type() {
             return Some(ty);
@@ -445,7 +446,8 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        info.type_env.add_return_constraint(TypeConstraint::new(
+                        #[allow(deprecated)]
+                        info.type_env.add_return_constraint(TypeConstraint::from_legacy(
                             expr.id,
                             return_type,
                             ConstraintSource::Apidoc,
@@ -485,7 +487,7 @@ impl MacroInferContext {
     pub fn get_macro_return_type(&self, name: InternedStr, interner: &StringInterner) -> Option<(String, String)> {
         self.macros.get(&name).and_then(|info| {
             info.get_return_type().map(|ty| {
-                (interner.get(name).to_string(), ty.to_string())
+                (interner.get(name).to_string(), ty.to_display_string(interner))
             })
         })
     }
@@ -558,7 +560,8 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(def.name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        info.type_env.add_return_constraint(TypeConstraint::new(
+                        #[allow(deprecated)]
+                        info.type_env.add_return_constraint(TypeConstraint::from_legacy(
                             expr.id,
                             return_type,
                             ConstraintSource::Apidoc,

@@ -549,7 +549,7 @@ fn run_infer_macro_types(
         if constraint_count > 0 {
             for (expr_id, constraints) in &info.type_env.expr_constraints {
                 for c in constraints {
-                    println!("  expr#{}: {} ({})", expr_id.0, c.ty, c.context);
+                    println!("  expr#{}: {} ({})", expr_id.0, c.ty.to_display_string(interner), c.context);
                 }
             }
         }

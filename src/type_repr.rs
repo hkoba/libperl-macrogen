@@ -654,6 +654,104 @@ impl RustTypeRepr {
 }
 
 impl TypeRepr {
+    /// 出所の表示用文字列を取得
+    pub fn source_display(&self) -> &'static str {
+        match self {
+            TypeRepr::CType { source, .. } => match source {
+                CTypeSource::Header => "c-header",
+                CTypeSource::Apidoc { .. } => "apidoc",
+                CTypeSource::InlineFn { .. } => "inline-fn",
+            },
+            TypeRepr::RustType { .. } => "rust-bindings",
+            TypeRepr::Inferred(_) => "inferred",
+        }
+    }
+
+    /// 後方互換: 旧 ConstraintSource と型文字列から TypeRepr を作成
+    ///
+    /// 段階的移行用。新規コードでは使用しないこと。
+    #[deprecated(note = "Use structured TypeRepr constructors instead")]
+    pub fn from_legacy_string(ty: &str, source_kind: &str) -> Self {
+        match source_kind {
+            "c-header" => {
+                // 簡易パース（Header 由来）
+                let interner = crate::intern::StringInterner::new();
+                let (specs, derived) = Self::parse_c_type_string(ty, &interner);
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Header,
+                }
+            }
+            "rust-bindings" => TypeRepr::RustType {
+                repr: RustTypeRepr::from_type_string(ty),
+                source: RustTypeSource::FnParam {
+                    func_name: String::new(),
+                    param_index: 0,
+                },
+            },
+            "apidoc" => {
+                let interner = crate::intern::StringInterner::new();
+                let (specs, derived) = Self::parse_c_type_string(ty, &interner);
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Apidoc { raw: ty.to_string() },
+                }
+            }
+            "inline-fn" => {
+                let mut interner = crate::intern::StringInterner::new();
+                let (specs, derived) = Self::parse_c_type_string(ty, &interner);
+                // Use an empty string as placeholder for legacy conversions
+                let placeholder = interner.intern("<unknown>");
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::InlineFn {
+                        func_name: placeholder,
+                    },
+                }
+            }
+            "inferred" | _ => {
+                // 推論による型は文字列から推定
+                Self::inferred_from_string(ty)
+            }
+        }
+    }
+
+    /// 推論結果を表す TypeRepr を文字列から作成（後方互換用）
+    fn inferred_from_string(ty: &str) -> Self {
+        // 一般的なパターンを検出
+        match ty {
+            "int" => TypeRepr::Inferred(InferredType::IntLiteral),
+            "unsigned int" => TypeRepr::Inferred(InferredType::UIntLiteral),
+            "double" => TypeRepr::Inferred(InferredType::FloatLiteral),
+            "char" => TypeRepr::Inferred(InferredType::CharLiteral),
+            "void" => TypeRepr::Inferred(InferredType::Assert),
+            "unsigned long" => TypeRepr::Inferred(InferredType::Sizeof),
+            _ if ty.ends_with(" *") || ty.ends_with("*") => {
+                // ポインタ型
+                let interner = crate::intern::StringInterner::new();
+                let (specs, derived) = Self::parse_c_type_string(ty, &interner);
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Header,
+                }
+            }
+            _ => {
+                // その他は C 型として扱う
+                let interner = crate::intern::StringInterner::new();
+                let (specs, derived) = Self::parse_c_type_string(ty, &interner);
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Header,
+                }
+            }
+        }
+    }
+
     /// Apidoc の型文字列から TypeRepr を作成
     pub fn from_apidoc_string(s: &str, interner: &crate::intern::StringInterner) -> Self {
         // C 型文字列をパース

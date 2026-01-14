@@ -735,7 +735,7 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
             if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
                 // 複数制約がある場合は最初のものを使用
                 if let Some(constraint) = constraints.first() {
-                    return constraint.ty.clone();
+                    return constraint.ty.to_display_string(self.interner);
                 }
             }
         }

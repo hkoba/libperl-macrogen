@@ -8,10 +8,14 @@ use std::collections::HashMap;
 
 use crate::ast::ExprId;
 use crate::intern::InternedStr;
+use crate::type_repr::TypeRepr;
 
 /// 型制約の出所を区別するための列挙型
 ///
 /// 注意: unified_type::TypeSource とは異なる（こちらは制約の出所分類用）
+///
+/// 非推奨: TypeRepr に統合されました。段階的移行のために残されています。
+#[deprecated(note = "Use TypeRepr variants instead which include source information")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConstraintSource {
     /// C ヘッダーのパース結果から取得
@@ -26,6 +30,7 @@ pub enum ConstraintSource {
     Inferred,
 }
 
+#[allow(deprecated)]
 impl std::fmt::Display for ConstraintSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -41,27 +46,58 @@ impl std::fmt::Display for ConstraintSource {
 /// 型制約
 ///
 /// 簡約せずにそのまま保持し、デバッグ・観察可能にする。
+/// 出所情報は TypeRepr 内に含まれる。
 #[derive(Debug, Clone)]
 pub struct TypeConstraint {
     /// 対象となる式の ID
     pub expr_id: ExprId,
-    /// 型文字列（C 形式または Rust 形式）
-    pub ty: String,
-    /// 型制約の出所
-    pub source: ConstraintSource,
+    /// 構造化された型表現（出所情報を含む）
+    pub ty: TypeRepr,
     /// デバッグ用コンテキスト（どこで取得したか）
     pub context: String,
 }
 
 impl TypeConstraint {
     /// 新しい型制約を作成
-    pub fn new(expr_id: ExprId, ty: impl Into<String>, source: ConstraintSource, context: impl Into<String>) -> Self {
+    pub fn new(expr_id: ExprId, ty: TypeRepr, context: impl Into<String>) -> Self {
         Self {
             expr_id,
-            ty: ty.into(),
-            source,
+            ty,
             context: context.into(),
         }
+    }
+
+    /// 後方互換: 旧シグネチャで型制約を作成
+    ///
+    /// 段階的移行用。新規コードでは `new()` を使用すること。
+    #[deprecated(note = "Use new() with TypeRepr instead")]
+    #[allow(deprecated)]
+    pub fn from_legacy(
+        expr_id: ExprId,
+        ty: impl Into<String>,
+        source: ConstraintSource,
+        context: impl Into<String>,
+    ) -> Self {
+        let ty_str = ty.into();
+        let source_str = match source {
+            ConstraintSource::CHeader => "c-header",
+            ConstraintSource::RustBindings => "rust-bindings",
+            ConstraintSource::Apidoc => "apidoc",
+            ConstraintSource::InlineFn => "inline-fn",
+            ConstraintSource::Inferred => "inferred",
+        };
+        #[allow(deprecated)]
+        let type_repr = TypeRepr::from_legacy_string(&ty_str, source_str);
+        Self {
+            expr_id,
+            ty: type_repr,
+            context: context.into(),
+        }
+    }
+
+    /// 出所の表示用文字列を取得
+    pub fn source_display(&self) -> &'static str {
+        self.ty.source_display()
     }
 }
 
@@ -170,8 +206,8 @@ impl TypeEnv {
     }
 
     /// 戻り値の型を取得（最初の制約から）
-    pub fn get_return_type(&self) -> Option<&str> {
-        self.return_constraints.first().map(|c| c.ty.as_str())
+    pub fn get_return_type(&self) -> Option<&TypeRepr> {
+        self.return_constraints.first().map(|c| &c.ty)
     }
 
     /// 全制約の総数
@@ -220,6 +256,30 @@ impl TypeEnv {
 mod tests {
     use super::*;
     use crate::intern::StringInterner;
+    use crate::type_repr::{CTypeSource, CTypeSpecs, InferredType, IntSize, RustTypeRepr, RustTypeSource};
+
+    /// テスト用: C ヘッダー由来の int 型を作成
+    fn c_int_type() -> TypeRepr {
+        TypeRepr::CType {
+            specs: CTypeSpecs::Int { signed: true, size: IntSize::Int },
+            derived: vec![],
+            source: CTypeSource::Header,
+        }
+    }
+
+    /// テスト用: Rust bindings 由来の c_int 型を作成
+    fn rust_c_int_type() -> TypeRepr {
+        TypeRepr::RustType {
+            repr: RustTypeRepr::from_type_string("c_int"),
+            source: RustTypeSource::FnParam { func_name: "test".to_string(), param_index: 0 },
+        }
+    }
+
+    /// テスト用: Apidoc 由来の SV * 型を作成
+    fn apidoc_sv_ptr_type() -> TypeRepr {
+        let interner = StringInterner::new();
+        TypeRepr::from_apidoc_string("SV *", &interner)
+    }
 
     #[test]
     fn test_type_env_new() {
@@ -235,8 +295,7 @@ mod tests {
 
         let constraint = TypeConstraint::new(
             expr_id,
-            "int",
-            ConstraintSource::CHeader,
+            c_int_type(),
             "test context",
         );
 
@@ -255,21 +314,19 @@ mod tests {
         // 同じ式に複数の制約
         env.add_constraint(TypeConstraint::new(
             expr_id,
-            "int",
-            ConstraintSource::CHeader,
+            c_int_type(),
             "from C header",
         ));
         env.add_constraint(TypeConstraint::new(
             expr_id,
-            "c_int",
-            ConstraintSource::RustBindings,
+            rust_c_int_type(),
             "from bindings",
         ));
 
         let constraints = env.get_expr_constraints(expr_id).unwrap();
         assert_eq!(constraints.len(), 2);
-        assert_eq!(constraints[0].ty, "int");
-        assert_eq!(constraints[1].ty, "c_int");
+        assert_eq!(constraints[0].source_display(), "c-header");
+        assert_eq!(constraints[1].source_display(), "rust-bindings");
     }
 
     #[test]
@@ -296,15 +353,17 @@ mod tests {
 
         env1.add_constraint(TypeConstraint::new(
             expr1,
-            "int",
-            ConstraintSource::CHeader,
+            c_int_type(),
             "env1",
         ));
 
         env2.add_constraint(TypeConstraint::new(
             expr2,
-            "char",
-            ConstraintSource::Apidoc,
+            TypeRepr::CType {
+                specs: CTypeSpecs::Char { signed: None },
+                derived: vec![],
+                source: CTypeSource::Apidoc { raw: "char".to_string() },
+            },
             "env2",
         ));
 
@@ -316,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_constraint_source_display() {
         assert_eq!(format!("{}", ConstraintSource::CHeader), "c-header");
         assert_eq!(format!("{}", ConstraintSource::RustBindings), "rust-bindings");
@@ -330,12 +390,25 @@ mod tests {
 
         env.add_return_constraint(TypeConstraint::new(
             expr_id,
-            "SV *",
-            ConstraintSource::Apidoc,
+            apidoc_sv_ptr_type(),
             "return type from apidoc",
         ));
 
         assert_eq!(env.return_constraint_count(), 1);
-        assert_eq!(env.return_constraints[0].ty, "SV *");
+        assert_eq!(env.return_constraints[0].source_display(), "apidoc");
+    }
+
+    #[test]
+    fn test_type_repr_source_display() {
+        // CType sources
+        assert_eq!(c_int_type().source_display(), "c-header");
+        assert_eq!(apidoc_sv_ptr_type().source_display(), "apidoc");
+
+        // RustType
+        assert_eq!(rust_c_int_type().source_display(), "rust-bindings");
+
+        // Inferred
+        let inferred = TypeRepr::Inferred(InferredType::IntLiteral);
+        assert_eq!(inferred.source_display(), "inferred");
     }
 }

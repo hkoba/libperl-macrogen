@@ -12,6 +12,7 @@ use crate::intern::{InternedStr, StringInterner};
 use crate::parser::parse_type_from_string;
 use crate::rust_decl::RustDeclDict;
 use crate::source::{FileRegistry, SourceLocation};
+#[allow(deprecated)]
 use crate::type_env::{ConstraintSource, TypeEnv, TypeConstraint as TypeEnvConstraint};
 use crate::unified_type::{IntSize, UnifiedType};
 
@@ -1293,7 +1294,7 @@ impl<'a> SemanticAnalyzer<'a> {
     fn get_expr_type_str(&self, expr_id: ExprId, type_env: &TypeEnv) -> String {
         if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
             if let Some(c) = constraints.first() {
-                return c.ty.clone();
+                return c.ty.to_display_string(self.interner);
             }
         }
         "<unknown>".to_string()
@@ -1416,27 +1417,27 @@ impl<'a> SemanticAnalyzer<'a> {
         match &expr.kind {
             // リテラル
             ExprKind::IntLit(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "int", ConstraintSource::Inferred, "integer literal"
                 ));
             }
             ExprKind::UIntLit(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "unsigned int", ConstraintSource::Inferred, "unsigned integer literal"
                 ));
             }
             ExprKind::FloatLit(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "double", ConstraintSource::Inferred, "float literal"
                 ));
             }
             ExprKind::CharLit(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "int", ConstraintSource::Inferred, "char literal"
                 ));
             }
             ExprKind::StringLit(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "char*", ConstraintSource::Inferred, "string literal"
                 ));
             }
@@ -1448,25 +1449,25 @@ impl<'a> SemanticAnalyzer<'a> {
                 // シンボルテーブルから型を取得
                 if let Some(sym) = self.lookup_symbol(*name) {
                     let ty_str = sym.ty.display(self.interner);
-                    type_env.add_constraint(TypeEnvConstraint::new(
+                    type_env.add_constraint(TypeEnvConstraint::from_legacy(
                         expr.id, &ty_str, ConstraintSource::Inferred, "symbol lookup"
                     ));
                 // RustDeclDict から定数の型を取得
                 } else if let Some(rust_decl_dict) = self.rust_decl_dict {
                     if let Some(rust_const) = rust_decl_dict.lookup_const(name_str) {
-                        type_env.add_constraint(TypeEnvConstraint::new(
+                        type_env.add_constraint(TypeEnvConstraint::from_legacy(
                             expr.id, &rust_const.ty, ConstraintSource::RustBindings, "bindings constant"
                         ));
                     } else if name_str == "my_perl" {
                         // THX 由来の my_perl はデフォルトで *mut PerlInterpreter
-                        type_env.add_constraint(TypeEnvConstraint::new(
+                        type_env.add_constraint(TypeEnvConstraint::from_legacy(
                             expr.id, "*mut PerlInterpreter", ConstraintSource::Inferred,
                             "THX default type"
                         ));
                     }
                 } else if name_str == "my_perl" {
                     // THX 由来の my_perl はデフォルトで *mut PerlInterpreter
-                    type_env.add_constraint(TypeEnvConstraint::new(
+                    type_env.add_constraint(TypeEnvConstraint::from_legacy(
                         expr.id, "*mut PerlInterpreter", ConstraintSource::Inferred,
                         "THX default type"
                     ));
@@ -1496,7 +1497,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(rhs, type_env);
                 // 親式の型を計算
                 let result_ty = self.compute_binary_type_str(op, lhs.id, rhs.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &result_ty, ConstraintSource::Inferred, "binary expression"
                 ));
             }
@@ -1507,7 +1508,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(then_expr, type_env);
                 self.collect_expr_constraints(else_expr, type_env);
                 let result_ty = self.compute_conditional_type_str(then_expr.id, else_expr.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &result_ty, ConstraintSource::Inferred, "conditional expression"
                 ));
             }
@@ -1517,7 +1518,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(inner, type_env);
                 let ty = self.resolve_type_name(type_name);
                 let ty_str = ty.display(self.interner);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &ty_str, ConstraintSource::Inferred, "cast expression"
                 ));
             }
@@ -1535,7 +1536,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     "<unknown>".to_string()
                 };
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &elem_ty, ConstraintSource::Inferred, "array subscript"
                 ));
             }
@@ -1550,7 +1551,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 let member_ty = self.lookup_field_type_by_name(&base_ty, *member)
                     .unwrap_or_else(|| "<unknown>".to_string());
 
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &member_ty, ConstraintSource::Inferred,
                     format!("{}.{}", base_ty, member_name)
                 ));
@@ -1576,7 +1577,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     "<unknown>".to_string()
                 };
 
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &member_ty, ConstraintSource::Inferred,
                     format!("{}->{}", base_ty, member_name)
                 ));
@@ -1588,7 +1589,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(rhs, type_env);
                 // 代入式の型は左辺の型
                 let lhs_ty = self.get_expr_type_str(lhs.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &lhs_ty, ConstraintSource::Inferred, "assignment expression"
                 ));
             }
@@ -1599,7 +1600,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(rhs, type_env);
                 // コンマ式の型は右辺の型
                 let rhs_ty = self.get_expr_type_str(rhs.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &rhs_ty, ConstraintSource::Inferred, "comma expression"
                 ));
             }
@@ -1609,7 +1610,7 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
                 self.collect_expr_constraints(inner, type_env);
                 let inner_ty = self.get_expr_type_str(inner.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &inner_ty, ConstraintSource::Inferred, "increment/decrement"
                 ));
             }
@@ -1619,7 +1620,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(inner, type_env);
                 let inner_ty = self.get_expr_type_str(inner.id, type_env);
                 let ptr_ty = format!("{}*", inner_ty);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &ptr_ty, ConstraintSource::Inferred, "address-of"
                 ));
             }
@@ -1633,7 +1634,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     "<unknown>".to_string()
                 };
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &deref_ty, ConstraintSource::Inferred, "dereference"
                 ));
             }
@@ -1642,7 +1643,7 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::UnaryPlus(inner) | ExprKind::UnaryMinus(inner) => {
                 self.collect_expr_constraints(inner, type_env);
                 let inner_ty = self.get_expr_type_str(inner.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &inner_ty, ConstraintSource::Inferred, "unary plus/minus"
                 ));
             }
@@ -1651,7 +1652,7 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::BitNot(inner) => {
                 self.collect_expr_constraints(inner, type_env);
                 let inner_ty = self.get_expr_type_str(inner.id, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &inner_ty, ConstraintSource::Inferred, "bitwise not"
                 ));
             }
@@ -1659,7 +1660,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // 論理否定
             ExprKind::LogNot(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "int", ConstraintSource::Inferred, "logical not"
                 ));
             }
@@ -1667,21 +1668,21 @@ impl<'a> SemanticAnalyzer<'a> {
             // sizeof（式）
             ExprKind::Sizeof(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "unsigned long", ConstraintSource::Inferred, "sizeof expression"
                 ));
             }
 
             // sizeof（型）
             ExprKind::SizeofType(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "unsigned long", ConstraintSource::Inferred, "sizeof type"
                 ));
             }
 
             // alignof
             ExprKind::Alignof(_) => {
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "unsigned long", ConstraintSource::Inferred, "alignof"
                 ));
             }
@@ -1690,7 +1691,7 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::CompoundLit { type_name, .. } => {
                 let ty = self.resolve_type_name(type_name);
                 let ty_str = ty.display(self.interner);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, &ty_str, ConstraintSource::Inferred, "compound literal"
                 ));
             }
@@ -1701,11 +1702,11 @@ impl<'a> SemanticAnalyzer<'a> {
                 // 最後の式の型を取得
                 if let Some(last_expr_id) = self.get_last_expr_id(compound) {
                     let last_ty = self.get_expr_type_str(last_expr_id, type_env);
-                    type_env.add_constraint(TypeEnvConstraint::new(
+                    type_env.add_constraint(TypeEnvConstraint::from_legacy(
                         expr.id, &last_ty, ConstraintSource::Inferred, "statement expression"
                     ));
                 } else {
-                    type_env.add_constraint(TypeEnvConstraint::new(
+                    type_env.add_constraint(TypeEnvConstraint::from_legacy(
                         expr.id, "void", ConstraintSource::Inferred, "statement expression (empty)"
                     ));
                 }
@@ -1714,7 +1715,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // アサーション式
             ExprKind::Assert { condition, .. } => {
                 self.collect_expr_constraints(condition, type_env);
-                type_env.add_constraint(TypeEnvConstraint::new(
+                type_env.add_constraint(TypeEnvConstraint::from_legacy(
                     expr.id, "void", ConstraintSource::Inferred, "assertion"
                 ));
             }
@@ -1788,7 +1789,7 @@ impl<'a> SemanticAnalyzer<'a> {
             if let Some(rust_fn) = rust_decl_dict.fns.get(func_name_str) {
                 for (i, arg) in args.iter().enumerate() {
                     if let Some(param) = rust_fn.params.get(i) {
-                        let constraint = TypeEnvConstraint::new(
+                        let constraint = TypeEnvConstraint::from_legacy(
                             arg.id,
                             &param.ty,
                             ConstraintSource::RustBindings,
@@ -1800,7 +1801,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 戻り値型も制約として追加
                 if let Some(ref ret_ty) = rust_fn.ret_ty {
-                    let return_constraint = TypeEnvConstraint::new(
+                    let return_constraint = TypeEnvConstraint::from_legacy(
                         call_expr_id,
                         ret_ty,
                         ConstraintSource::RustBindings,
@@ -1817,7 +1818,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 // 引数の型
                 for (i, arg) in args.iter().enumerate() {
                     if let Some(apidoc_arg) = entry.args.get(i) {
-                        let constraint = TypeEnvConstraint::new(
+                        let constraint = TypeEnvConstraint::from_legacy(
                             arg.id,
                             &apidoc_arg.ty,
                             ConstraintSource::Apidoc,
@@ -1829,7 +1830,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // 戻り値型
                 if let Some(ref return_type) = entry.return_type {
-                    let return_constraint = TypeEnvConstraint::new(
+                    let return_constraint = TypeEnvConstraint::from_legacy(
                         call_expr_id,
                         return_type,
                         ConstraintSource::Apidoc,
@@ -1846,7 +1847,7 @@ impl<'a> SemanticAnalyzer<'a> {
             for (i, arg) in args.iter().enumerate() {
                 if let Some(ty) = self.lookup_inline_fn_param_type(func_name, i) {
                     let ty_str = ty.display(self.interner);
-                    let constraint = TypeEnvConstraint::new(
+                    let constraint = TypeEnvConstraint::from_legacy(
                         arg.id,
                         &ty_str,
                         ConstraintSource::InlineFn,
@@ -1859,7 +1860,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // 戻り値型
             if let Some(ty) = self.lookup_inline_fn_return_type(func_name) {
                 let ty_str = ty.display(self.interner);
-                let return_constraint = TypeEnvConstraint::new(
+                let return_constraint = TypeEnvConstraint::from_legacy(
                     call_expr_id,
                     &ty_str,
                     ConstraintSource::InlineFn,
@@ -1871,7 +1872,7 @@ impl<'a> SemanticAnalyzer<'a> {
 
         // 確定済みマクロの戻り値型を参照
         if let Some(return_type) = self.get_macro_return_type(func_name_str) {
-            let return_constraint = TypeEnvConstraint::new(
+            let return_constraint = TypeEnvConstraint::from_legacy(
                 call_expr_id,
                 return_type,
                 ConstraintSource::Inferred,
