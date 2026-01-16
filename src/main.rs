@@ -60,9 +60,21 @@ struct Cli {
     #[arg(long = "typed-sexp")]
     typed_sexp: bool,
 
+    /// S-expression出力（マクロ型推論を行わない）
+    #[arg(long = "sexp")]
+    sexp: bool,
+
     /// 構造体フィールド辞書をダンプ
     #[arg(long = "dump-fields-dict")]
     dump_fields_dict: bool,
+
+    /// ApidocファイルをJSONに変換して出力（入力ファイルはapidoc）
+    #[arg(long = "apidoc-to-json")]
+    apidoc_to_json: bool,
+
+    /// コンパクトなJSON出力（--apidoc-to-json用）
+    #[arg(long = "compact")]
+    compact: bool,
 
     /// ターゲットディレクトリ（デフォルト: /usr/lib64/perl5/CORE）
     #[arg(long = "target-dir")]
@@ -80,7 +92,7 @@ struct Cli {
     // #[arg(long = "gen-rust-fns")]
     // gen_rust_fns: bool,
 
-    /// Rustバインディングファイル（--infer-macro-types用）
+    /// Rustバインディングファイル（マクロ型推論用）
     #[arg(long = "bindings")]
     bindings: Option<PathBuf>,
 
@@ -103,10 +115,6 @@ struct Cli {
     /// 生成コードにマクロ定義位置コメントを追加
     #[arg(long = "macro-comments")]
     macro_comments: bool,
-
-    /// マクロ型推論（ExprId + TypeEnv ベース）
-    #[arg(long = "infer-macro-types")]
-    infer_macro_types: bool,
 }
 
 fn main() {
@@ -122,6 +130,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --parse-rust-bindings: Rustファイルのみ処理（プリプロセッサ不要）
     if let Some(ref rust_file) = cli.parse_rust_bindings {
         return run_parse_rust_bindings(rust_file);
+    }
+
+    // --apidoc-to-json: ApidocファイルをJSONに変換（プリプロセッサ不要）
+    if cli.apidoc_to_json {
+        let input = cli.input.ok_or("Input file (apidoc) is required for --apidoc-to-json")?;
+        return run_apidoc_to_json(&input, cli.output.as_ref(), cli.compact);
     }
 
     // 入力ファイルが必要
@@ -181,17 +195,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
         run_dump_fields_dict(&mut pp, cli.target_dir.as_ref())?;
-    // 廃止予定: --analyze-macros
-    // } else if cli.analyze_macros {
-    //     run_analyze_macros(&mut pp, cli.target_dir.as_ref())?;
-    } else if cli.infer_macro_types {
-        // --infer-macro-types: マクロ型推論
-        run_infer_macro_types(&mut pp, cli.apidoc.as_ref(), cli.bindings.as_ref())?;
-    // 廃止予定: --debug-macro-gen
-    // } else if cli.debug_macro_gen {
-    //     run_debug_macro_gen(&mut pp)?;
-    } else {
-        // 通常: パースしてS-expression出力
+    } else if cli.sexp {
+        // --sexp: S-expression出力（マクロ型推論なし）
         let mut parser = match Parser::new(&mut pp) {
             Ok(p) => p,
             Err(e) => return Err(format_error(&e, &pp).into()),
@@ -215,6 +220,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             printer.print_translation_unit(&tu)?;
             handle.flush()?;
         }
+    } else {
+        // デフォルト: マクロ型推論
+        run_infer_macro_types(&mut pp, cli.apidoc.as_ref(), cli.bindings.as_ref())?;
     }
 
     Ok(())
@@ -664,6 +672,44 @@ fn run_parse_rust_bindings(rust_file: &PathBuf) -> Result<(), Box<dyn std::error
 
     // ダンプ
     println!("{}", dict.dump());
+
+    Ok(())
+}
+
+/// ApidocファイルをJSONに変換
+fn run_apidoc_to_json(
+    input: &PathBuf,
+    output: Option<&PathBuf>,
+    compact: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // embed.fnc をパース
+    let dict = ApidocDict::parse_embed_fnc(input)?;
+
+    // 統計情報を表示
+    let stats = dict.stats();
+    eprintln!("Loaded {} entries from {:?}", stats.total, input);
+    eprintln!("  Functions: {}", stats.function_count);
+    eprintln!("  Macros: {}", stats.macro_count);
+    eprintln!("  Inline: {}", stats.inline_count);
+    eprintln!("  Public API: {}", stats.api_count);
+
+    // JSONにシリアライズ
+    let json = if compact {
+        serde_json::to_string(&dict)?
+    } else {
+        serde_json::to_string_pretty(&dict)?
+    };
+
+    // 出力
+    if let Some(output_path) = output {
+        let file = File::create(output_path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "{}", json)?;
+        writer.flush()?;
+        eprintln!("Written to {:?}", output_path);
+    } else {
+        println!("{}", json);
+    }
 
     Ok(())
 }
