@@ -404,6 +404,26 @@ fn run_infer_macro_types(
     // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
     fields_dict.build_consistent_type_cache();
 
+    // sv_u ユニオンフィールドの型を登録
+    // SV ファミリー構造体に共通の sv_u union のフィールド型
+    {
+        let interner = pp.interner_mut();
+        let sv_u_fields = [
+            ("svu_pv", "char*"),
+            ("svu_iv", "IV"),
+            ("svu_uv", "UV"),
+            ("svu_rv", "SV*"),
+            ("svu_array", "SV**"),
+            ("svu_hash", "HE**"),
+            ("svu_gp", "GP*"),
+            ("svu_fp", "PerlIO*"),
+        ];
+        for (field, c_type) in sv_u_fields {
+            let field_id = interner.intern(field);
+            fields_dict.register_sv_u_field(field_id, c_type.to_string());
+        }
+    }
+
     // Apidoc をロード（ファイルから + コメントから）
     let mut apidoc = if let Some(path) = apidoc_path {
         ApidocDict::load_auto(path)?

@@ -1606,9 +1606,18 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 let base_ty = self.get_expr_type_str(base.id, type_env);
                 let member_name = self.interner.get(*member);
-                // 直接アクセスの場合、base_ty は構造体名そのもの
-                let member_ty_str = self.lookup_field_type_by_name(&base_ty, *member)
-                    .unwrap_or_else(|| "<unknown>".to_string());
+
+                // sv_u フィールドアクセスの特殊処理
+                // base が ->sv_u パターンの場合、sv_u 辞書から型を解決
+                let member_ty_str = if self.is_sv_u_access(base) {
+                    self.lookup_sv_u_field_type(*member)
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                } else {
+                    // 直接アクセスの場合、base_ty は構造体名そのもの
+                    self.lookup_field_type_by_name(&base_ty, *member)
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                };
+
                 let field_type = if member_ty_str != "<unknown>" {
                     Some(Box::new(TypeRepr::from_apidoc_string(&member_ty_str, self.interner)))
                 } else {
@@ -1901,6 +1910,28 @@ impl<'a> SemanticAnalyzer<'a> {
         let fields_dict = self.fields_dict?;
         let field_type = fields_dict.get_field_type_by_name(struct_name, field_name, self.interner)?;
         Some(field_type.rust_type.clone())
+    }
+
+    /// base が ->sv_u アクセスかどうかを判定
+    ///
+    /// `sv->sv_u.svu_pv` のような式で、`.svu_pv` の base が `sv->sv_u` かどうかを判定する。
+    fn is_sv_u_access(&self, base: &Expr) -> bool {
+        if let ExprKind::PtrMember { member, .. } = &base.kind {
+            let sv_u_id = self.interner.lookup("sv_u");
+            sv_u_id.map_or(false, |id| *member == id)
+        } else {
+            false
+        }
+    }
+
+    /// sv_u ユニオンフィールドの型を取得
+    ///
+    /// sv_u union のフィールド名から対応する C 型を返す。
+    /// 例: svu_pv → "char*", svu_hash → "HE**"
+    fn lookup_sv_u_field_type(&self, field: InternedStr) -> Option<String> {
+        self.fields_dict?
+            .get_sv_u_field_type(field)
+            .map(|s| s.to_string())
     }
 
     /// 関数呼び出しから型制約を収集

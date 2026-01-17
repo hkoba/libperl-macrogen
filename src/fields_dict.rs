@@ -34,6 +34,10 @@ pub struct FieldsDict {
     /// 例: "XPVAV" → av, "XPVCV" → cv
     /// SvANY キャストパターンによる型推論に使用
     sv_head_type_to_struct: HashMap<String, InternedStr>,
+    /// sv_u ユニオンフィールドの型マッピング
+    /// key: フィールド名 (例: svu_pv, svu_hash)
+    /// value: フィールドの C 型文字列 (例: "char*", "HE**")
+    sv_u_field_types: HashMap<InternedStr, String>,
 }
 
 impl FieldsDict {
@@ -384,6 +388,29 @@ impl FieldsDict {
     /// typeName → 構造体名マッピングをイテレート
     pub fn sv_head_type_to_struct_iter(&self) -> impl Iterator<Item = (&String, &InternedStr)> {
         self.sv_head_type_to_struct.iter()
+    }
+
+    // ==================== sv_u Union Field Types ====================
+
+    /// sv_u ユニオンフィールドの型を登録
+    ///
+    /// SV ファミリー構造体に共通の sv_u union のフィールド型を登録する。
+    /// 例: svu_pv → "char*", svu_hash → "HE**"
+    pub fn register_sv_u_field(&mut self, field_name: InternedStr, c_type: String) {
+        self.sv_u_field_types.insert(field_name, c_type);
+    }
+
+    /// sv_u ユニオンフィールドの型を取得
+    ///
+    /// フィールド名から対応する C 型を返す。
+    /// 登録されていないフィールドの場合は None。
+    pub fn get_sv_u_field_type(&self, field_name: InternedStr) -> Option<&str> {
+        self.sv_u_field_types.get(&field_name).map(|s| s.as_str())
+    }
+
+    /// sv_u フィールド型の登録数を取得
+    pub fn sv_u_field_types_count(&self) -> usize {
+        self.sv_u_field_types.len()
     }
 
     // ==================== Consistent Type Cache ====================
