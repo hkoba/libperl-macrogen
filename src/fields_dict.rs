@@ -273,27 +273,6 @@ impl FieldsDict {
         result
     }
 
-    /// フィールド名と構造体名を手動で登録
-    pub fn add_field(&mut self, field_name: InternedStr, struct_name: InternedStr) {
-        self.field_to_structs
-            .entry(field_name)
-            .or_insert_with(HashSet::new)
-            .insert(struct_name);
-    }
-
-    /// フィールドを一意な構造体型で上書き登録
-    /// 既存の登録をすべて破棄し、指定した型のみを設定する
-    pub fn set_unique_field_type(&mut self, field_name: InternedStr, struct_name: InternedStr) {
-        let mut set = HashSet::new();
-        set.insert(struct_name);
-        self.field_to_structs.insert(field_name, set);
-    }
-
-    /// フィールド名から構造体名を検索
-    pub fn lookup(&self, field_name: InternedStr) -> Option<&HashSet<InternedStr>> {
-        self.field_to_structs.get(&field_name)
-    }
-
     /// 一意に構造体を特定できるフィールド名から構造体名を取得
     pub fn lookup_unique(&self, field_name: InternedStr) -> Option<InternedStr> {
         self.field_to_structs.get(&field_name).and_then(|structs| {
@@ -303,15 +282,6 @@ impl FieldsDict {
                 None
             }
         })
-    }
-
-    /// (構造体名, フィールド名) からフィールド型を検索
-    pub fn get_field_type(
-        &self,
-        struct_name: InternedStr,
-        field_name: InternedStr,
-    ) -> Option<&FieldType> {
-        self.field_types.get(&(struct_name, field_name))
     }
 
     /// フィールド名から一意にフィールド型を特定（構造体が1つしかない場合）
@@ -349,11 +319,6 @@ impl FieldsDict {
         None
     }
 
-    /// typedef 名を登録
-    pub fn register_typedef(&mut self, typedef_name: InternedStr, struct_name: InternedStr) {
-        self.typedef_to_struct.insert(typedef_name, struct_name);
-    }
-
     /// typedef 名から構造体名を解決（InternedStr ベース）
     pub fn resolve_typedef(&self, typedef_name: InternedStr) -> Option<InternedStr> {
         self.typedef_to_struct.get(&typedef_name).copied()
@@ -374,33 +339,12 @@ impl FieldsDict {
         self.typedef_to_struct.len()
     }
 
-    /// フィールド型をオーバーライド設定
-    /// 自動収集できない場合や、特殊なマッピングが必要な場合に使用
-    pub fn set_field_type_override(
-        &mut self,
-        struct_name: InternedStr,
-        field_name: InternedStr,
-        rust_type: String,
-    ) {
-        self.field_types.insert(
-            (struct_name, field_name),
-            FieldType { rust_type },
-        );
-    }
-
     /// 収集されたフィールド型の数を取得
     pub fn field_types_count(&self) -> usize {
         self.field_types.len()
     }
 
-    // ==================== Polymorphic Field Detection ====================
-
-    /// SV ファミリーメンバーを追加（動的検出用）
-    ///
-    /// _SV_HEAD マクロを使用する構造体を登録する。
-    pub fn add_sv_family_member(&mut self, struct_name: InternedStr) {
-        self.sv_family_members.insert(struct_name);
-    }
+    // ==================== SV Family Detection ====================
 
     /// SV ファミリーメンバーと typeName を同時に登録
     ///
@@ -440,70 +384,6 @@ impl FieldsDict {
     /// typeName → 構造体名マッピングをイテレート
     pub fn sv_head_type_to_struct_iter(&self) -> impl Iterator<Item = (&String, &InternedStr)> {
         self.sv_head_type_to_struct.iter()
-    }
-
-    /// SV_HEAD マクロで定義される共通フィールド
-    /// これらのフィールドは SV ファミリー全体で共有される
-    const SV_HEAD_FIELDS: &'static [&'static str] = &[
-        "sv_any", "sv_refcnt", "sv_flags", "sv_u",
-    ];
-
-    /// フィールドが複数構造体に共有されているか (polymorphic か)
-    pub fn is_polymorphic_field(&self, field_name: InternedStr) -> bool {
-        self.field_to_structs
-            .get(&field_name)
-            .map(|structs| structs.len() > 1)
-            .unwrap_or(false)
-    }
-
-    /// フィールドを持つ全構造体を取得
-    pub fn get_structs_with_field(&self, field_name: InternedStr) -> Option<&HashSet<InternedStr>> {
-        self.field_to_structs.get(&field_name)
-    }
-
-    /// 構造体セットが SV ファミリーか判定
-    ///
-    /// 動的検出された sv_family_members を使用する。
-    /// SV ファミリーの検出が失敗した場合（sv_family_members が空）は常に false を返す。
-    pub fn is_sv_family(&self, structs: &HashSet<InternedStr>, _interner: &StringInterner) -> bool {
-        if structs.is_empty() || self.sv_family_members.is_empty() {
-            return false;
-        }
-
-        structs.iter().all(|s| self.sv_family_members.contains(s))
-    }
-
-    /// SV ファミリーの基底型 ("sv") の InternedStr を取得
-    /// interner に "sv" が登録されていない場合は None
-    pub fn get_sv_family_base_type(&self, interner: &StringInterner) -> Option<InternedStr> {
-        interner.lookup("sv")
-    }
-
-    /// フィールドが SV ファミリーの共有フィールドかどうか判定
-    ///
-    /// 以下のいずれかを満たす場合に true:
-    /// 1. フィールドが SV_HEAD_FIELDS に含まれ、"sv" 構造体に属している
-    /// 2. フィールドが複数の SV ファミリー構造体に属している
-    pub fn is_sv_family_field(&self, field_name: InternedStr, interner: &StringInterner) -> bool {
-        let field_str = interner.get(field_name);
-
-        // SV_HEAD フィールドは常に SV ファミリー共有
-        if Self::SV_HEAD_FIELDS.contains(&field_str) {
-            // "sv" 構造体に属しているか確認
-            if let Some(structs) = self.field_to_structs.get(&field_name) {
-                return structs.iter().any(|s| {
-                    let name = interner.get(*s);
-                    name == "sv"
-                });
-            }
-        }
-
-        // 複数の SV ファミリー構造体に属している場合
-        if let Some(structs) = self.field_to_structs.get(&field_name) {
-            structs.len() > 1 && self.is_sv_family(structs, interner)
-        } else {
-            false
-        }
     }
 
     // ==================== Consistent Type Cache ====================

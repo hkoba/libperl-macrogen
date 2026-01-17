@@ -401,19 +401,6 @@ fn run_infer_macro_types(
         .downcast::<ApidocCollector>()
         .expect("callback type mismatch");
 
-    // sv_any, sv_refcnt, sv_flags を一意にsvとして登録
-    {
-        let interner = pp.interner_mut();
-        let sv = interner.intern("sv");
-        let sv_any = interner.intern("sv_any");
-        let sv_refcnt = interner.intern("sv_refcnt");
-        let sv_flags = interner.intern("sv_flags");
-
-        fields_dict.set_unique_field_type(sv_any, sv);
-        fields_dict.set_unique_field_type(sv_refcnt, sv);
-        fields_dict.set_unique_field_type(sv_flags, sv);
-    }
-
     // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
     fields_dict.build_consistent_type_cache();
 
