@@ -461,6 +461,17 @@ fn run_infer_macro_types(
         );
     }
 
+    // sv_u フィールドパターンから追加の型制約を適用
+    // 例: hv->sv_u.svu_hash → hv: HV*
+    let mut sv_u_field_constraint_count = 0;
+    let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
+    for name in macro_names {
+        sv_u_field_constraint_count += infer_ctx.apply_sv_u_field_constraints(
+            name,
+            interner,
+        );
+    }
+
     // パース結果の統計を収集
     let mut expr_count = 0;
     let mut stmt_count = 0;
@@ -498,6 +509,8 @@ fn run_infer_macro_types(
     eprintln!("THX-dependent macros: {}", thx_count);
     // SvANY パターンから推論された型制約数
     eprintln!("SvANY pattern constraints: {}", sv_any_constraint_count);
+    // sv_u フィールドパターンから推論された型制約数
+    eprintln!("sv_u field pattern constraints: {}", sv_u_field_constraint_count);
     eprintln!();
 
     // 各マクロの詳細を出力（辞書順）
