@@ -588,6 +588,51 @@ impl ApidocDict {
             Self::parse_embed_fnc(path_ref)
         }
     }
+
+    /// 指定バージョン用の JSON ファイルパスを検索
+    ///
+    /// apidoc/v{major}.{minor}.json が存在すれば Some(path)、なければ None
+    /// フォールバックは行わない（完全一致のみ）
+    pub fn find_json_for_version<P: AsRef<Path>>(
+        apidoc_dir: P,
+        major: u32,
+        minor: u32,
+    ) -> Option<std::path::PathBuf> {
+        let filename = format!("v{}.{}.json", major, minor);
+        let path = apidoc_dir.as_ref().join(&filename);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Perl バージョンに基づいて apidoc を自動ロード
+    ///
+    /// apidoc_dir: apidoc/ ディレクトリのパス
+    /// 成功時: 対応する JSON からロードした ApidocDict
+    /// 失敗時: io::Error（ファイルが見つからない場合など）
+    pub fn load_for_perl_version<P: AsRef<Path>>(
+        apidoc_dir: P,
+        major: u32,
+        minor: u32,
+    ) -> io::Result<Self> {
+        let path = Self::find_json_for_version(&apidoc_dir, major, minor).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{}/v{}.{}.json not found for Perl {}.{}.\n\
+                     Please specify --apidoc explicitly or add the JSON file.",
+                    apidoc_dir.as_ref().display(),
+                    major,
+                    minor,
+                    major,
+                    minor
+                ),
+            )
+        })?;
+        Self::load_json(&path)
+    }
 }
 
 /// 統計情報

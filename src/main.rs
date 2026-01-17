@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    get_default_target_dir, get_perl_config, ApidocCollector, ApidocDict,
+    get_default_target_dir, get_perl_config, get_perl_version, ApidocCollector, ApidocDict,
     BlockItem, CompileError, Declaration, ExternalDecl, FieldsDict, FileId, InlineFnDict,
     MacroCallWatcher, MacroInferContext, NoExpandSymbols, PPConfig, ParseResult, Parser, Preprocessor,
     RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypeSpec, TypedSexpPrinter,
@@ -222,10 +222,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // デフォルト: マクロ型推論
-        run_infer_macro_types(&mut pp, cli.apidoc.as_ref(), cli.bindings.as_ref())?;
+        // apidoc パスを解決
+        let apidoc_path = resolve_apidoc_path(cli.apidoc.as_ref(), cli.auto)?;
+        run_infer_macro_types(&mut pp, apidoc_path.as_ref(), cli.bindings.as_ref())?;
     }
 
     Ok(())
+}
+
+/// apidoc パスを解決
+///
+/// 1. 明示的に指定されている場合はそれを使用
+/// 2. --auto モードで省略された場合は Perl バージョンから自動検索
+/// 3. 手動モードで省略された場合は None
+fn resolve_apidoc_path(
+    explicit_path: Option<&PathBuf>,
+    auto_mode: bool,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    // 明示的に指定されている場合
+    if let Some(path) = explicit_path {
+        return Ok(Some(path.clone()));
+    }
+
+    // --auto モードで省略された場合
+    if auto_mode {
+        let (major, minor) = get_perl_version()?;
+
+        // 奇数マイナーバージョン（開発版）はエラー
+        if minor % 2 == 1 {
+            return Err(format!(
+                "Perl {}.{} is a development version.\n\
+                 Please specify --apidoc explicitly (e.g., --apidoc path/to/embed.fnc)",
+                major, minor
+            ).into());
+        }
+
+        // apidoc ディレクトリを検索
+        let apidoc_dir = find_apidoc_dir().ok_or_else(|| {
+            format!(
+                "apidoc directory not found.\n\
+                 Please specify --apidoc explicitly."
+            )
+        })?;
+
+        // バージョンに対応する JSON ファイルを検索
+        let json_path = ApidocDict::find_json_for_version(&apidoc_dir, major, minor)
+            .ok_or_else(|| {
+                format!(
+                    "{}/v{}.{}.json not found for Perl {}.{}.\n\
+                     Please specify --apidoc explicitly or add the JSON file.",
+                    apidoc_dir.display(),
+                    major, minor, major, minor
+                )
+            })?;
+
+        eprintln!("Note: Auto-loaded {} for Perl {}.{}", json_path.display(), major, minor);
+        return Ok(Some(json_path));
+    }
+
+    // 手動モードで省略された場合
+    Ok(None)
 }
 
 /// ストリーミングモードで実行
@@ -326,6 +382,50 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) ->
 // fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
 //     ...
 // }
+
+/// apidoc ディレクトリのパスを取得
+///
+/// 検索順序:
+/// 1. 実行ファイルと同じディレクトリの apidoc/
+/// 2. 実行ファイルの親ディレクトリの apidoc/ (開発時: target/debug/../apidoc)
+/// 3. カレントディレクトリの apidoc/
+fn find_apidoc_dir() -> Option<PathBuf> {
+    // 1. 実行ファイルと同じディレクトリ
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let apidoc_dir = exe_dir.join("apidoc");
+            if apidoc_dir.is_dir() {
+                return Some(apidoc_dir);
+            }
+
+            // 2. 実行ファイルの親ディレクトリ (開発時: target/debug/../apidoc -> project/apidoc)
+            if let Some(parent_dir) = exe_dir.parent() {
+                let apidoc_dir = parent_dir.join("apidoc");
+                if apidoc_dir.is_dir() {
+                    return Some(apidoc_dir);
+                }
+
+                // target/debug の場合は 2階層上
+                if let Some(grandparent_dir) = parent_dir.parent() {
+                    let apidoc_dir = grandparent_dir.join("apidoc");
+                    if apidoc_dir.is_dir() {
+                        return Some(apidoc_dir);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. カレントディレクトリ
+    if let Ok(cwd) = std::env::current_dir() {
+        let apidoc_dir = cwd.join("apidoc");
+        if apidoc_dir.is_dir() {
+            return Some(apidoc_dir);
+        }
+    }
+
+    None
+}
 
 /// マクロ型推論（ExprId + TypeEnv ベース）
 fn run_infer_macro_types(

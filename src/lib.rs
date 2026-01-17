@@ -44,7 +44,7 @@ pub use macro_infer::{
     MacroInferInfo, MacroInferStats, NoExpandSymbols, ParseResult, SvAnyPattern, SvUFieldPattern,
 };
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, parse_type_from_string, Parser};
-pub use perl_config::{get_default_target_dir, get_perl_config, PerlConfig, PerlConfigError};
+pub use perl_config::{get_default_target_dir, get_perl_config, get_perl_version, PerlConfig, PerlConfigError};
 pub use preprocessor::{
     CallbackPair, MacroCalledCallback, MacroCallWatcher, MacroDefCallback, PPConfig, Preprocessor,
 };

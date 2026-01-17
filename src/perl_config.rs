@@ -145,6 +145,36 @@ pub fn get_default_target_dir() -> Result<PathBuf, PerlConfigError> {
     Ok(PathBuf::from(&archlib).join("CORE"))
 }
 
+/// Perl のメジャー・マイナーバージョンを取得
+///
+/// $Config{version} は "5.40.0" のような形式
+/// 戻り値: (major, minor) タプル (例: (5, 40))
+pub fn get_perl_version() -> Result<(u32, u32), PerlConfigError> {
+    let version = get_config_value("version")?;
+    if version.is_empty() {
+        return Err(PerlConfigError::ConfigNotFound("version".to_string()));
+    }
+
+    // "5.40.0" -> ["5", "40", "0"]
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() < 2 {
+        return Err(PerlConfigError::ParseError(format!(
+            "invalid version format: {}",
+            version
+        )));
+    }
+
+    let major = parts[0].parse::<u32>().map_err(|_| {
+        PerlConfigError::ParseError(format!("invalid major version: {}", parts[0]))
+    })?;
+
+    let minor = parts[1].parse::<u32>().map_err(|_| {
+        PerlConfigError::ParseError(format!("invalid minor version: {}", parts[1]))
+    })?;
+
+    Ok((major, minor))
+}
+
 /// Perl Config.pm から設定を取得
 pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
     // インクルードパスを取得
@@ -247,5 +277,25 @@ mod tests {
         assert_eq!(result[0], PathBuf::from("/usr/lib/gcc/x86_64-redhat-linux/15/include"));
         assert_eq!(result[1], PathBuf::from("/usr/local/include"));
         assert_eq!(result[2], PathBuf::from("/usr/include"));
+    }
+
+    #[test]
+    fn test_parse_version() {
+        // バージョン文字列のパースをテスト（内部ヘルパー関数で）
+        fn parse_version(version: &str) -> Option<(u32, u32)> {
+            let parts: Vec<&str> = version.split('.').collect();
+            if parts.len() < 2 {
+                return None;
+            }
+            let major = parts[0].parse::<u32>().ok()?;
+            let minor = parts[1].parse::<u32>().ok()?;
+            Some((major, minor))
+        }
+
+        assert_eq!(parse_version("5.40.0"), Some((5, 40)));
+        assert_eq!(parse_version("5.38.2"), Some((5, 38)));
+        assert_eq!(parse_version("5.10.1"), Some((5, 10)));
+        assert_eq!(parse_version("5.8"), Some((5, 8)));
+        assert_eq!(parse_version("invalid"), None);
     }
 }
