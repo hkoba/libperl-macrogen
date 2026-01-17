@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::preprocessor::PPConfig;
+
 /// Perl Config から取得した設定
 #[derive(Debug)]
 pub struct PerlConfig {
@@ -223,6 +225,22 @@ pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
     Ok(PerlConfig {
         include_paths,
         defines,
+    })
+}
+
+/// Perl 環境用の PPConfig を構築
+///
+/// get_perl_config() と get_default_target_dir() を組み合わせて
+/// プリプロセッサ設定を構築する。build.rs から呼び出すことを想定。
+pub fn build_pp_config_for_perl() -> Result<PPConfig, PerlConfigError> {
+    let perl_cfg = get_perl_config()?;
+    let target_dir = get_default_target_dir().ok();
+    Ok(PPConfig {
+        include_paths: perl_cfg.include_paths,
+        predefined: perl_cfg.defines,
+        debug_pp: false,
+        target_dir,
+        emit_markers: false,
     })
 }
 

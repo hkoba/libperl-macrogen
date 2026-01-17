@@ -7,6 +7,7 @@ pub mod apidoc;
 pub mod ast;
 pub mod error;
 pub mod fields_dict;
+pub mod infer_api;
 pub mod inline_fn;
 pub mod intern;
 pub mod lexer;
@@ -30,7 +31,14 @@ pub mod type_repr;
 pub mod unified_type;
 
 // 主要な型を再エクスポート
-pub use apidoc::{ApidocArg, ApidocCollector, ApidocDict, ApidocEntry, ApidocFlags, ApidocStats, Nullability};
+pub use apidoc::{
+    find_apidoc_dir_from, resolve_apidoc_path,
+    ApidocArg, ApidocCollector, ApidocDict, ApidocEntry, ApidocFlags, ApidocResolveError, ApidocStats, Nullability,
+};
+pub use infer_api::{
+    run_inference_with_preprocessor, run_macro_inference,
+    InferConfig, InferError, InferResult, InferStats, TypedefDict,
+};
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};
 pub use fields_dict::FieldsDict;
@@ -44,7 +52,10 @@ pub use macro_infer::{
     MacroInferInfo, MacroInferStats, NoExpandSymbols, ParseResult, SvAnyPattern, SvUFieldPattern,
 };
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, parse_type_from_string, Parser};
-pub use perl_config::{get_default_target_dir, get_perl_config, get_perl_version, PerlConfig, PerlConfigError};
+pub use perl_config::{
+    build_pp_config_for_perl, get_default_target_dir, get_perl_config, get_perl_version,
+    PerlConfig, PerlConfigError,
+};
 pub use preprocessor::{
     CallbackPair, MacroCalledCallback, MacroCallWatcher, MacroDefCallback, PPConfig, Preprocessor,
 };

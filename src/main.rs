@@ -10,10 +10,11 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    get_default_target_dir, get_perl_config, get_perl_version, ApidocCollector, ApidocDict,
-    BlockItem, CompileError, Declaration, ExternalDecl, FieldsDict, FileId, InlineFnDict,
-    MacroCallWatcher, MacroInferContext, NoExpandSymbols, PPConfig, ParseResult, Parser, Preprocessor,
-    RustDeclDict, SexpPrinter, SourceLocation, TokenKind, TypeSpec, TypedSexpPrinter,
+    get_default_target_dir, get_perl_config,
+    resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor,
+    ApidocDict, BlockItem, CompileError, FieldsDict, FileId,
+    PPConfig, ParseResult, Parser, Preprocessor, RustDeclDict, SexpPrinter, SourceLocation,
+    TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -222,66 +223,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // デフォルト: マクロ型推論
-        // apidoc パスを解決
-        let apidoc_path = resolve_apidoc_path(cli.apidoc.as_ref(), cli.auto)?;
-        run_infer_macro_types(&mut pp, apidoc_path.as_ref(), cli.bindings.as_ref())?;
+        // apidoc パスを解決（ライブラリ版を使用）
+        let apidoc_path = resolve_apidoc_path(
+            cli.apidoc.as_deref(),
+            cli.auto,
+            None, // apidoc_dir は自動検索
+        ).map_err(|e| format_apidoc_error(&e))?;
+
+        // 自動ロード時はパスを表示
+        if cli.auto && cli.apidoc.is_none() {
+            if let Some(ref path) = apidoc_path {
+                eprintln!("Note: Auto-loaded {}", path.display());
+            }
+        }
+
+        run_infer_macro_types(pp, apidoc_path.as_deref(), cli.bindings.as_deref())?;
     }
 
     Ok(())
-}
-
-/// apidoc パスを解決
-///
-/// 1. 明示的に指定されている場合はそれを使用
-/// 2. --auto モードで省略された場合は Perl バージョンから自動検索
-/// 3. 手動モードで省略された場合は None
-fn resolve_apidoc_path(
-    explicit_path: Option<&PathBuf>,
-    auto_mode: bool,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    // 明示的に指定されている場合
-    if let Some(path) = explicit_path {
-        return Ok(Some(path.clone()));
-    }
-
-    // --auto モードで省略された場合
-    if auto_mode {
-        let (major, minor) = get_perl_version()?;
-
-        // 奇数マイナーバージョン（開発版）はエラー
-        if minor % 2 == 1 {
-            return Err(format!(
-                "Perl {}.{} is a development version.\n\
-                 Please specify --apidoc explicitly (e.g., --apidoc path/to/embed.fnc)",
-                major, minor
-            ).into());
-        }
-
-        // apidoc ディレクトリを検索
-        let apidoc_dir = find_apidoc_dir().ok_or_else(|| {
-            format!(
-                "apidoc directory not found.\n\
-                 Please specify --apidoc explicitly."
-            )
-        })?;
-
-        // バージョンに対応する JSON ファイルを検索
-        let json_path = ApidocDict::find_json_for_version(&apidoc_dir, major, minor)
-            .ok_or_else(|| {
-                format!(
-                    "{}/v{}.{}.json not found for Perl {}.{}.\n\
-                     Please specify --apidoc explicitly or add the JSON file.",
-                    apidoc_dir.display(),
-                    major, minor, major, minor
-                )
-            })?;
-
-        eprintln!("Note: Auto-loaded {} for Perl {}.{}", json_path.display(), major, minor);
-        return Ok(Some(json_path));
-    }
-
-    // 手動モードで省略された場合
-    Ok(None)
 }
 
 /// ストリーミングモードで実行
@@ -378,202 +337,21 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) ->
     Ok(())
 }
 
-// 廃止予定: run_analyze_macros (MacroAnalyzer2 使用)
-// fn run_analyze_macros(pp: &mut Preprocessor, target_dir: Option<&PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-//     ...
-// }
-
-/// apidoc ディレクトリのパスを取得
-///
-/// 検索順序:
-/// 1. 実行ファイルと同じディレクトリの apidoc/
-/// 2. 実行ファイルの親ディレクトリの apidoc/ (開発時: target/debug/../apidoc)
-/// 3. カレントディレクトリの apidoc/
-fn find_apidoc_dir() -> Option<PathBuf> {
-    // 1. 実行ファイルと同じディレクトリ
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let apidoc_dir = exe_dir.join("apidoc");
-            if apidoc_dir.is_dir() {
-                return Some(apidoc_dir);
-            }
-
-            // 2. 実行ファイルの親ディレクトリ (開発時: target/debug/../apidoc -> project/apidoc)
-            if let Some(parent_dir) = exe_dir.parent() {
-                let apidoc_dir = parent_dir.join("apidoc");
-                if apidoc_dir.is_dir() {
-                    return Some(apidoc_dir);
-                }
-
-                // target/debug の場合は 2階層上
-                if let Some(grandparent_dir) = parent_dir.parent() {
-                    let apidoc_dir = grandparent_dir.join("apidoc");
-                    if apidoc_dir.is_dir() {
-                        return Some(apidoc_dir);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. カレントディレクトリ
-    if let Ok(cwd) = std::env::current_dir() {
-        let apidoc_dir = cwd.join("apidoc");
-        if apidoc_dir.is_dir() {
-            return Some(apidoc_dir);
-        }
-    }
-
-    None
-}
-
 /// マクロ型推論（ExprId + TypeEnv ベース）
+///
+/// ライブラリの run_inference_with_preprocessor を呼び出し、結果を出力する。
 fn run_infer_macro_types(
-    pp: &mut Preprocessor,
-    apidoc_path: Option<&PathBuf>,
-    bindings_path: Option<&PathBuf>,
+    pp: Preprocessor,
+    apidoc_path: Option<&std::path::Path>,
+    bindings_path: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // フィールド辞書を作成（パースしながら収集）
-    let mut fields_dict = FieldsDict::new();
+    // ライブラリ API を呼び出して型推論を実行
+    let result = run_inference_with_preprocessor(pp, apidoc_path, bindings_path)?;
 
-    // ApidocCollector を Preprocessor に設定
-    pp.set_macro_def_callback(Box::new(ApidocCollector::new()));
-
-    // _SV_HEAD マクロ呼び出しを監視
-    let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
-    pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
-
-    // パーサー作成
-    let mut parser = match Parser::new(pp) {
-        Ok(p) => p,
-        Err(e) => return Err(format_error(&e, pp).into()),
-    };
-
-    // inline 関数辞書を作成
-    let mut inline_fn_dict = InlineFnDict::new();
-
-    // parse_each_with_pp でフィールド辞書と inline 関数を収集
-    // 同時に _SV_HEAD マクロ呼び出しを検出して SV ファミリーを動的に構築
-    parser.parse_each_with_pp(|result, _loc, _path, pp| {
-        if let Ok(ref decl) = result {
-            let interner = pp.interner();
-            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
-
-            // inline 関数を収集
-            if decl.is_target() {
-                if let ExternalDecl::FunctionDef(func_def) = decl {
-                    inline_fn_dict.collect_from_function_def(func_def);
-                }
-            }
-
-            // 構造体定義の場合、_SV_HEAD フラグをチェック
-            if decl.is_target() {
-                if let Some(struct_names) = extract_struct_names(decl) {
-                    // _SV_HEAD が呼ばれていたら SV ファミリーに追加
-                    if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
-                        if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
-                            if watcher.take_called() {
-                                // _SV_HEAD(typeName) の引数を取得
-                                let type_name = watcher.last_args()
-                                    .and_then(|args| args.first().cloned())
-                                    .unwrap_or_default();
-
-                                for name in struct_names {
-                                    // typeName → 構造体名マッピングも同時に登録
-                                    fields_dict.add_sv_family_member_with_type(name, &type_name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        ControlFlow::Continue(())
-    });
-
-    // パーサーから typedef 辞書を取得
-    let typedefs = parser.typedefs().clone();
-
-    // コールバックを取り出してダウンキャスト
-    let callback = pp.take_macro_def_callback().expect("callback should exist");
-    let apidoc_collector = callback
-        .into_any()
-        .downcast::<ApidocCollector>()
-        .expect("callback type mismatch");
-
-    // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
-    fields_dict.build_consistent_type_cache();
-
-    // sv_u フィールド型は parse_each で動的に収集済み
-    // （SV ファミリー構造体の sv_u union から自動検出）
-
-    // Apidoc をロード（ファイルから + コメントから）
-    let mut apidoc = if let Some(path) = apidoc_path {
-        ApidocDict::load_auto(path)?
-    } else {
-        ApidocDict::new()
-    };
-    let apidoc_from_comments = apidoc_collector.len();
-    apidoc_collector.merge_into(&mut apidoc);
-
-    // RustDeclDict をロード
-    let rust_decl_dict = if let Some(path) = bindings_path {
-        Some(RustDeclDict::parse_file(path)?)
-    } else {
-        None
-    };
-
-    // MacroInferContext を作成して解析
-    let mut infer_ctx = MacroInferContext::new();
-
-    // THX シンボルを事前に intern
-    let sym_athx = pp.interner_mut().intern("aTHX");
-    let sym_tthx = pp.interner_mut().intern("tTHX");
-    let sym_my_perl = pp.interner_mut().intern("my_perl");
-    let thx_symbols = (sym_athx, sym_tthx, sym_my_perl);
-
-    // 展開を抑制するマクロシンボルを作成（assert, SvANY など）
-    let no_expand = NoExpandSymbols::new(pp.interner_mut());
-
-    let interner = pp.interner();
-    let files = pp.files();
-
-    infer_ctx.analyze_all_macros(
-        pp.macros(),
-        interner,
-        files,
-        Some(&apidoc),
-        Some(&fields_dict),
-        rust_decl_dict.as_ref(),
-        Some(&inline_fn_dict),
-        &typedefs,
-        thx_symbols,
-        no_expand,
-    );
-
-    // SvANY パターンから追加の型制約を適用
-    // パラメータの ExprId を使って expr_constraints に制約を追加
-    let mut sv_any_constraint_count = 0;
-    let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
-    for name in macro_names {
-        sv_any_constraint_count += infer_ctx.apply_sv_any_constraints(
-            name,
-            &fields_dict,
-            no_expand,
-            interner,
-        );
-    }
-
-    // sv_u フィールドパターンから追加の型制約を適用
-    // 例: hv->sv_u.svu_hash → hv: HV*
-    let mut sv_u_field_constraint_count = 0;
-    let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
-    for name in macro_names {
-        sv_u_field_constraint_count += infer_ctx.apply_sv_u_field_constraints(
-            name,
-            interner,
-        );
-    }
+    // 結果から必要な情報を取り出す
+    let infer_ctx = &result.infer_ctx;
+    let interner = result.preprocessor.interner();
+    let stats = &result.stats;
 
     // パース結果の統計を収集
     let mut expr_count = 0;
@@ -593,27 +371,26 @@ fn run_infer_macro_types(
     }
 
     // 統計情報を出力
-    let stats = infer_ctx.stats();
+    let macro_stats = infer_ctx.stats();
     eprintln!("=== Macro Type Inference Stats ===");
-    eprintln!("Total macros analyzed: {}", stats.total);
+    eprintln!("Total macros analyzed: {}", macro_stats.total);
     eprintln!("  - Expression macros: {}", expr_count);
     eprintln!("  - Statement macros: {}", stmt_count);
     eprintln!("  - Unparseable: {}", unparseable_count);
-    eprintln!("Confirmed (type complete): {}", stats.confirmed);
-    eprintln!("Unconfirmed (pending): {}", stats.unconfirmed);
-    eprintln!("Args unknown: {}", stats.args_unknown);
-    eprintln!("Return unknown: {}", stats.return_unknown);
+    eprintln!("Confirmed (type complete): {}", macro_stats.confirmed);
+    eprintln!("Unconfirmed (pending): {}", macro_stats.unconfirmed);
+    eprintln!("Args unknown: {}", macro_stats.args_unknown);
+    eprintln!("Return unknown: {}", macro_stats.return_unknown);
     eprintln!();
 
     // コメントから収集した apidoc 数
-    eprintln!("Apidoc from comments: {}", apidoc_from_comments);
+    eprintln!("Apidoc from comments: {}", stats.apidoc_from_comments);
     // THX 依存マクロ数（解析済みターゲットマクロのうち）
-    let thx_count = infer_ctx.macros.values().filter(|info| info.is_target && info.is_thx_dependent).count();
-    eprintln!("THX-dependent macros: {}", thx_count);
+    eprintln!("THX-dependent macros: {}", stats.thx_dependent_count);
     // SvANY パターンから推論された型制約数
-    eprintln!("SvANY pattern constraints: {}", sv_any_constraint_count);
+    eprintln!("SvANY pattern constraints: {}", stats.sv_any_constraint_count);
     // sv_u フィールドパターンから推論された型制約数
-    eprintln!("sv_u field pattern constraints: {}", sv_u_field_constraint_count);
+    eprintln!("sv_u field pattern constraints: {}", stats.sv_u_field_constraint_count);
     eprintln!();
 
     // 各マクロの詳細を出力（辞書順）
@@ -862,36 +639,29 @@ fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
     e.format_with_files(pp.files())
 }
 
-/// 外部宣言から構造体名を抽出
-///
-/// 宣言に含まれる構造体・共用体の名前を返す。
-/// メンバーリストを持つ定義のみを対象とする（前方宣言は除外）。
-fn extract_struct_names(decl: &ExternalDecl) -> Option<Vec<libperl_macrogen::InternedStr>> {
-    let declaration = match decl {
-        ExternalDecl::Declaration(d) => d,
-        _ => return None,
-    };
-
-    let mut names = Vec::new();
-
-    for type_spec in &declaration.specs.type_specs {
-        match type_spec {
-            TypeSpec::Struct(spec) | TypeSpec::Union(spec) => {
-                // メンバーリストを持つ定義のみ（前方宣言は除外）
-                if spec.members.is_some() {
-                    if let Some(name) = spec.name {
-                        names.push(name);
-                    }
-                }
-            }
-            _ => {}
+/// apidoc 解決エラーをフォーマット
+fn format_apidoc_error(e: &ApidocResolveError) -> String {
+    match e {
+        ApidocResolveError::DevelopmentVersion { major, minor } => {
+            format!(
+                "Perl {}.{} is a development version.\n\
+                 Please specify --apidoc explicitly (e.g., --apidoc path/to/embed.fnc)",
+                major, minor
+            )
         }
-    }
-
-    if names.is_empty() {
-        None
-    } else {
-        Some(names)
+        ApidocResolveError::DirectoryNotFound => {
+            "apidoc directory not found.\nPlease specify --apidoc explicitly.".to_string()
+        }
+        ApidocResolveError::JsonNotFound { path, major, minor } => {
+            format!(
+                "{}/v{}.{}.json not found for Perl {}.{}.\n\
+                 Please specify --apidoc explicitly or add the JSON file.",
+                path.display(), major, minor, major, minor
+            )
+        }
+        ApidocResolveError::VersionError(e) => {
+            format!("Failed to get Perl version: {}", e)
+        }
     }
 }
 

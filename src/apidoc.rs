@@ -7,7 +7,9 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::perl_config::{get_perl_version, PerlConfigError};
 
 use serde::{Deserialize, Serialize};
 
@@ -633,6 +635,178 @@ impl ApidocDict {
         })?;
         Self::load_json(&path)
     }
+}
+
+/// apidoc 解決エラー
+#[derive(Debug)]
+pub enum ApidocResolveError {
+    /// 開発版 Perl（奇数マイナーバージョン）
+    DevelopmentVersion { major: u32, minor: u32 },
+    /// apidoc ディレクトリが見つからない
+    DirectoryNotFound,
+    /// 対応する JSON ファイルが見つからない
+    JsonNotFound { path: PathBuf, major: u32, minor: u32 },
+    /// Perl バージョン取得エラー
+    VersionError(PerlConfigError),
+}
+
+impl std::fmt::Display for ApidocResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApidocResolveError::DevelopmentVersion { major, minor } => {
+                write!(
+                    f,
+                    "Perl {}.{} is a development version.\n\
+                     Please specify --apidoc explicitly (e.g., --apidoc path/to/embed.fnc)",
+                    major, minor
+                )
+            }
+            ApidocResolveError::DirectoryNotFound => {
+                write!(
+                    f,
+                    "apidoc directory not found.\n\
+                     Please specify --apidoc explicitly."
+                )
+            }
+            ApidocResolveError::JsonNotFound { path, major, minor } => {
+                write!(
+                    f,
+                    "{}/v{}.{}.json not found for Perl {}.{}.\n\
+                     Please specify --apidoc explicitly or add the JSON file.",
+                    path.display(),
+                    major, minor, major, minor
+                )
+            }
+            ApidocResolveError::VersionError(e) => {
+                write!(f, "Failed to get Perl version: {}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApidocResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ApidocResolveError::VersionError(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<PerlConfigError> for ApidocResolveError {
+    fn from(e: PerlConfigError) -> Self {
+        ApidocResolveError::VersionError(e)
+    }
+}
+
+/// apidoc ディレクトリを検索
+///
+/// 検索順序:
+/// 1. 指定されたベースディレクトリの apidoc/（base_dir が Some の場合）
+/// 2. 実行ファイルと同じディレクトリの apidoc/
+/// 3. 実行ファイルの親ディレクトリの apidoc/ (開発時: target/debug/../apidoc)
+/// 4. カレントディレクトリの apidoc/
+pub fn find_apidoc_dir_from(base_dir: Option<&Path>) -> Option<PathBuf> {
+    // 1. 指定されたベースディレクトリ
+    if let Some(base) = base_dir {
+        let apidoc_dir = base.join("apidoc");
+        if apidoc_dir.is_dir() {
+            return Some(apidoc_dir);
+        }
+        // base_dir 自体が apidoc ディレクトリかもしれない
+        if base.is_dir() && base.file_name().is_some_and(|n| n == "apidoc") {
+            return Some(base.to_path_buf());
+        }
+    }
+
+    // 2. 実行ファイルと同じディレクトリ
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let apidoc_dir = exe_dir.join("apidoc");
+            if apidoc_dir.is_dir() {
+                return Some(apidoc_dir);
+            }
+
+            // 3. 実行ファイルの親ディレクトリ (開発時: target/debug/../apidoc -> project/apidoc)
+            if let Some(parent_dir) = exe_dir.parent() {
+                let apidoc_dir = parent_dir.join("apidoc");
+                if apidoc_dir.is_dir() {
+                    return Some(apidoc_dir);
+                }
+
+                // target/debug の場合は 2階層上
+                if let Some(grandparent_dir) = parent_dir.parent() {
+                    let apidoc_dir = grandparent_dir.join("apidoc");
+                    if apidoc_dir.is_dir() {
+                        return Some(apidoc_dir);
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. カレントディレクトリ
+    if let Ok(cwd) = std::env::current_dir() {
+        let apidoc_dir = cwd.join("apidoc");
+        if apidoc_dir.is_dir() {
+            return Some(apidoc_dir);
+        }
+    }
+
+    None
+}
+
+/// apidoc ファイルのパスを解決
+///
+/// - explicit_path が Some なら: そのまま返す
+/// - explicit_path が None で auto_mode なら: Perl バージョンから自動検索
+/// - それ以外: None を返す
+///
+/// # Arguments
+/// - `explicit_path`: 明示的に指定されたパス
+/// - `auto_mode`: 自動モード（Perl バージョンから検索）
+/// - `apidoc_dir`: 検索対象ディレクトリ（None なら find_apidoc_dir_from() で検索）
+///
+/// # Returns
+/// - `Ok(Some(path))`: 解決されたパス
+/// - `Ok(None)`: 自動モードでなく、明示的パスもない場合
+/// - `Err(...)`: 自動モードで解決に失敗した場合
+pub fn resolve_apidoc_path(
+    explicit_path: Option<&Path>,
+    auto_mode: bool,
+    apidoc_dir: Option<&Path>,
+) -> Result<Option<PathBuf>, ApidocResolveError> {
+    // 明示的に指定されている場合
+    if let Some(path) = explicit_path {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    // 自動モードでない場合
+    if !auto_mode {
+        return Ok(None);
+    }
+
+    // 自動モード: Perl バージョンから検索
+    let (major, minor) = get_perl_version()?;
+
+    // 奇数マイナーバージョン（開発版）はエラー
+    if minor % 2 == 1 {
+        return Err(ApidocResolveError::DevelopmentVersion { major, minor });
+    }
+
+    // apidoc ディレクトリを検索
+    let resolved_apidoc_dir = find_apidoc_dir_from(apidoc_dir)
+        .ok_or(ApidocResolveError::DirectoryNotFound)?;
+
+    // バージョンに対応する JSON ファイルを検索
+    let json_path = ApidocDict::find_json_for_version(&resolved_apidoc_dir, major, minor)
+        .ok_or_else(|| ApidocResolveError::JsonNotFound {
+            path: resolved_apidoc_dir,
+            major,
+            minor,
+        })?;
+
+    Ok(Some(json_path))
 }
 
 /// 統計情報
