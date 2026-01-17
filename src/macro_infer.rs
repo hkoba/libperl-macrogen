@@ -331,8 +331,11 @@ pub struct SvUFieldPattern {
     pub inferred_type: &'static str,
 }
 
-/// sv_u ユニオンフィールドから SV ファミリー型へのマッピング
-fn sv_u_field_to_type(field: &str) -> Option<&'static str> {
+/// sv_u ユニオンフィールドから SV ファミリー引数型へのマッピング
+///
+/// このマッピングは意味的な対応関係であり、C 型とは独立。
+/// `sv->sv_u.svu_XXX` パターンから `sv` の SV ファミリー型を推論するために使用。
+fn sv_u_field_to_parameter_type(field: &str) -> Option<&'static str> {
     match field {
         "svu_pv" => Some("SV"),    // char* - PV系SV
         "svu_iv" => Some("SV"),    // IV - 整数SV
@@ -454,7 +457,7 @@ fn extract_sv_u_pattern(
             if let ExprKind::Ident(arg_ident) = &ptr_base.kind {
                 // svu_field が有効なフィールド名か確認
                 let field_str = interner.get(svu_field);
-                if let Some(inferred_type) = sv_u_field_to_type(field_str) {
+                if let Some(inferred_type) = sv_u_field_to_parameter_type(field_str) {
                     return Some(SvUFieldPattern {
                         sv_u_field: svu_field,
                         arg_ident: *arg_ident,

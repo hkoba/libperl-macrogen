@@ -140,6 +140,10 @@ impl FieldsDict {
                     }
                     TypeSpec::Union(nested) => {
                         self.collect_from_struct_spec(nested, interner);
+                        // sv_u union を検出して C 型を収集
+                        if self.is_sv_u_union_member(member, interner) {
+                            self.collect_sv_u_union_fields(nested, interner);
+                        }
                     }
                     _ => {}
                 }
@@ -166,6 +170,87 @@ impl FieldsDict {
                 }
             }
         }
+    }
+
+    /// メンバーが sv_u という名前の union かどうかを判定
+    fn is_sv_u_union_member(&self, member: &crate::ast::StructMember, interner: &StringInterner) -> bool {
+        // declarators に sv_u という名前があるか確認
+        for decl in &member.declarators {
+            if let Some(ref declarator) = decl.declarator {
+                if let Some(name) = declarator.name {
+                    if interner.get(name) == "sv_u" {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// sv_u union の内部フィールドから C 型を収集
+    ///
+    /// union のメンバーを走査し、フィールド名と C 型を sv_u_field_types に登録する。
+    fn collect_sv_u_union_fields(&mut self, union_spec: &StructSpec, interner: &StringInterner) {
+        let members = match &union_spec.members {
+            Some(m) => m,
+            None => return,
+        };
+
+        for member in members {
+            for struct_decl in &member.declarators {
+                if let Some(ref declarator) = struct_decl.declarator {
+                    if let Some(field_name) = declarator.name {
+                        // C 型を抽出
+                        if let Some(c_type) = self.extract_c_type(&member.specs, declarator, interner) {
+                            self.register_sv_u_field(field_name, c_type);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// DeclSpecs と Declarator から C 型文字列を抽出
+    fn extract_c_type(&self, specs: &DeclSpecs, declarator: &Declarator, interner: &StringInterner) -> Option<String> {
+        // 基本型を取得
+        let base_type = self.extract_c_base_type(specs, interner)?;
+
+        // ポインタを適用
+        let mut result = base_type;
+        for derived in &declarator.derived {
+            if let DerivedDecl::Pointer { .. } = derived {
+                result = format!("{}*", result);
+            }
+        }
+
+        Some(result)
+    }
+
+    /// DeclSpecs から C 基本型を抽出
+    fn extract_c_base_type(&self, specs: &DeclSpecs, interner: &StringInterner) -> Option<String> {
+        for type_spec in &specs.type_specs {
+            match type_spec {
+                TypeSpec::Void => return Some("void".to_string()),
+                TypeSpec::Char => return Some("char".to_string()),
+                TypeSpec::Int => return Some("int".to_string()),
+                TypeSpec::Short => return Some("short".to_string()),
+                TypeSpec::Long => return Some("long".to_string()),
+                TypeSpec::Float => return Some("float".to_string()),
+                TypeSpec::Double => return Some("double".to_string()),
+                TypeSpec::Unsigned => continue, // 修飾子、次のループで処理
+                TypeSpec::Signed => continue,
+                TypeSpec::Struct(s) | TypeSpec::Union(s) => {
+                    if let Some(name) = s.name {
+                        return Some(interner.get(name).to_string());
+                    }
+                }
+                TypeSpec::TypedefName(name) => {
+                    return Some(interner.get(*name).to_string());
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// DeclSpecs と Declarator からフィールドの Rust 型を抽出
