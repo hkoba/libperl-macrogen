@@ -597,6 +597,259 @@ impl<'a> RustCodegen<'a> {
         }
         result
     }
+
+    /// inline 関数を生成（self を消費）
+    pub fn generate_inline_fn(mut self, name: crate::InternedStr, func_def: &FunctionDef) -> GeneratedCode {
+        let name_str = self.interner.get(name);
+
+        // パラメータリストを取得
+        let params_str = self.build_fn_param_list(&func_def.declarator.derived);
+
+        // 戻り値の型を取得
+        let return_type = self.decl_specs_to_rust(&func_def.specs);
+
+        // ドキュメントコメント
+        self.writeln(&format!("/// {} - inline function", name_str));
+        self.writeln("#[inline]");
+
+        // 関数定義
+        self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
+
+        // 関数本体
+        let body_str = self.compound_stmt_to_string(&func_def.body, "    ");
+        self.buffer.push_str(&body_str);
+
+        self.writeln("}");
+        self.writeln("");
+
+        self.into_generated_code()
+    }
+
+    /// DerivedDecl から関数パラメータリストを構築
+    fn build_fn_param_list(&mut self, derived: &[DerivedDecl]) -> String {
+        for d in derived {
+            if let DerivedDecl::Function(param_list) = d {
+                let params: Vec<_> = param_list.params.iter()
+                    .map(|p| self.param_decl_to_rust(p))
+                    .collect();
+                let mut result = params.join(", ");
+                if param_list.is_variadic {
+                    if !result.is_empty() {
+                        result.push_str(", ");
+                    }
+                    result.push_str("...");
+                }
+                return result;
+            }
+        }
+        String::new()
+    }
+
+    /// ParamDecl を Rust パラメータ宣言に変換
+    fn param_decl_to_rust(&mut self, param: &ParamDecl) -> String {
+        let name = param.declarator
+            .as_ref()
+            .and_then(|d| d.name)
+            .map(|n| self.interner.get(n).to_string())
+            .unwrap_or_else(|| "_".to_string());
+
+        let ty = self.decl_specs_to_rust(&param.specs);
+
+        // ポインタ派生型を適用
+        let ty = if let Some(ref declarator) = param.declarator {
+            self.apply_derived_to_type(&ty, &declarator.derived)
+        } else {
+            ty
+        };
+
+        format!("{}: {}", name, ty)
+    }
+
+    /// 複合文を文字列として生成
+    fn compound_stmt_to_string(&mut self, stmt: &CompoundStmt, indent: &str) -> String {
+        let mut result = String::new();
+        for item in &stmt.items {
+            match item {
+                BlockItem::Decl(decl) => {
+                    result.push_str(&format!("{}// local decl: {:?}\n", indent, decl.specs));
+                }
+                BlockItem::Stmt(s) => {
+                    let rust_stmt = self.stmt_to_rust_inline(s, indent);
+                    result.push_str(&rust_stmt);
+                    result.push('\n');
+                }
+            }
+        }
+        result
+    }
+
+    /// 文を Rust コードに変換（インライン関数用）
+    fn stmt_to_rust_inline(&mut self, stmt: &Stmt, indent: &str) -> String {
+        match stmt {
+            Stmt::Expr(Some(expr), _) => {
+                format!("{}{};", indent, self.expr_to_rust_inline(expr))
+            }
+            Stmt::Expr(None, _) => format!("{};", indent),
+            Stmt::Return(Some(expr), _) => {
+                format!("{}return {};", indent, self.expr_to_rust_inline(expr))
+            }
+            Stmt::Return(None, _) => format!("{}return;", indent),
+            Stmt::If { cond, then_stmt, else_stmt, .. } => {
+                let cond_str = self.expr_to_rust_inline(cond);
+                let mut result = format!("{}if {} != 0 {{\n", indent, cond_str);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(then_stmt, &nested_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                if let Some(else_stmt) = else_stmt {
+                    result.push_str(" else {\n");
+                    result.push_str(&self.stmt_to_rust_inline(else_stmt, &nested_indent));
+                    result.push_str("\n");
+                    result.push_str(&format!("{}}}", indent));
+                }
+                result
+            }
+            Stmt::Compound(compound) => {
+                let mut result = format!("{}{{\n", indent);
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(s) => {
+                            let nested_indent = format!("{}    ", indent);
+                            result.push_str(&self.stmt_to_rust_inline(s, &nested_indent));
+                            result.push_str("\n");
+                        }
+                        BlockItem::Decl(_) => {
+                            result.push_str(&format!("{}    // local decl\n", indent));
+                        }
+                    }
+                }
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(stmt)))
+        }
+    }
+
+    /// 式を Rust コードに変換（インライン関数用）
+    fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                self.interner.get(*name).to_string()
+            }
+            ExprKind::IntLit(n) => {
+                format!("{}", n)
+            }
+            ExprKind::UIntLit(n) => {
+                format!("{}u64", n)
+            }
+            ExprKind::FloatLit(f) => {
+                format!("{}", f)
+            }
+            ExprKind::CharLit(c) => {
+                format!("'{}'", escape_char(*c))
+            }
+            ExprKind::StringLit(s) => {
+                format!("c\"{}\"", escape_string(s))
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let l = self.expr_to_rust_inline(lhs);
+                let r = self.expr_to_rust_inline(rhs);
+                format!("({} {} {})", l, bin_op_to_rust(*op), r)
+            }
+            ExprKind::Call { func, args } => {
+                let f = self.expr_to_rust_inline(func);
+                let a: Vec<_> = args.iter()
+                    .map(|a| self.expr_to_rust_inline(a))
+                    .collect();
+                format!("{}({})", f, a.join(", "))
+            }
+            ExprKind::Member { expr: base, member } => {
+                let e = self.expr_to_rust_inline(base);
+                let m = self.interner.get(*member);
+                format!("({}).{}", e, m)
+            }
+            ExprKind::PtrMember { expr: base, member } => {
+                let e = self.expr_to_rust_inline(base);
+                let m = self.interner.get(*member);
+                format!("(*{}).{}", e, m)
+            }
+            ExprKind::Index { expr: base, index } => {
+                let b = self.expr_to_rust_inline(base);
+                let i = self.expr_to_rust_inline(index);
+                format!("(*{}.offset({} as isize))", b, i)
+            }
+            ExprKind::Cast { type_name, expr: inner } => {
+                let e = self.expr_to_rust_inline(inner);
+                let t = self.type_name_to_rust(type_name);
+                format!("({} as {})", e, t)
+            }
+            ExprKind::Deref(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("(*{})", e)
+            }
+            ExprKind::AddrOf(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("(&mut {})", e)
+            }
+            ExprKind::PreInc(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("{{ {} += 1; {} }}", e, e)
+            }
+            ExprKind::PreDec(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("{{ {} -= 1; {} }}", e, e)
+            }
+            ExprKind::PostInc(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+            }
+            ExprKind::PostDec(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+            }
+            ExprKind::UnaryPlus(inner) => self.expr_to_rust_inline(inner),
+            ExprKind::UnaryMinus(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("(-{})", e)
+            }
+            ExprKind::BitNot(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("(!{})", e)
+            }
+            ExprKind::LogNot(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("(if {} {{ 0 }} else {{ 1 }})", e)
+            }
+            ExprKind::Sizeof(inner) => {
+                let e = self.expr_to_rust_inline(inner);
+                format!("std::mem::size_of_val(&{})", e)
+            }
+            ExprKind::SizeofType(type_name) => {
+                let t = self.type_name_to_rust(type_name);
+                format!("std::mem::size_of::<{}>()", t)
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                let c = self.expr_to_rust_inline(cond);
+                let t = self.expr_to_rust_inline(then_expr);
+                let e = self.expr_to_rust_inline(else_expr);
+                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                let l = self.expr_to_rust_inline(lhs);
+                let r = self.expr_to_rust_inline(rhs);
+                format!("{{ {}; {} }}", l, r)
+            }
+            ExprKind::Assign { op, lhs, rhs } => {
+                let l = self.expr_to_rust_inline(lhs);
+                let r = self.expr_to_rust_inline(rhs);
+                match op {
+                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                }
+            }
+            _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
+        }
+    }
 }
 
 impl<'a, W: Write> CodegenDriver<'a, W> {
@@ -649,16 +902,33 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         fns.sort_by_key(|(name, _)| self.interner.get(**name));
 
         for (name, func_def) in fns {
-            self.generate_inline_fn(*name, func_def)?;
-            self.stats.inline_fns_success += 1;
+            // 新しい RustCodegen を使って inline 関数を生成
+            let codegen = RustCodegen::new(self.interner);
+            let generated = codegen.generate_inline_fn(*name, func_def);
+
+            if generated.is_complete() {
+                // 完全な生成：そのまま出力
+                write!(self.writer, "{}", generated.code)?;
+                self.stats.inline_fns_success += 1;
+            } else {
+                // 不完全な生成：コメントアウトして出力
+                let name_str = self.interner.get(*name);
+                writeln!(self.writer, "// [CODEGEN_INCOMPLETE] {} - inline function", name_str)?;
+                for line in generated.code.lines() {
+                    writeln!(self.writer, "// {}", line)?;
+                }
+                writeln!(self.writer)?;
+                self.stats.inline_fns_type_incomplete += 1;
+            }
         }
 
         writeln!(self.writer)?;
         Ok(())
     }
 
-    /// inline 関数を生成
-    fn generate_inline_fn(&mut self, name: crate::InternedStr, func_def: &FunctionDef) -> io::Result<()> {
+    // 以下は旧 generate_inline_fn（削除予定）
+    #[allow(dead_code)]
+    fn generate_inline_fn_old(&mut self, name: crate::InternedStr, func_def: &FunctionDef) -> io::Result<()> {
         let name_str = self.interner.get(name);
 
         // パラメータリストを取得
