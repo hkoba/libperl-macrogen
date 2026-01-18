@@ -184,6 +184,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // プリプロセッサを初期化してファイルを処理
     let mut pp = Preprocessor::new(config);
+
+    // assert 系マクロをラップ対象として登録（process_file の前に必要）
+    // これにより inline 関数内の assert も Assert 式に変換される
+    pp.add_wrapped_macro("assert");
+    pp.add_wrapped_macro("assert_");
+
     if let Err(e) = pp.process_file(&input) {
         return Err(format_error(&e, &pp).into());
     }
@@ -275,35 +281,26 @@ fn run_streaming(pp: &mut Preprocessor) -> Result<(), Box<dyn std::error::Error>
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut count = 0usize;
-    let mut last_error: Option<(CompileError, SourceLocation)> = None;
 
     // parse_each でパースし、即座に出力
-    parser.parse_each(|result, loc, _path, interner| {
-        match result {
-            Ok(decl) => {
-                let mut printer = SexpPrinter::new(&mut handle, interner);
-                if let Err(e) = printer.print_external_decl(&decl) {
-                    eprintln!("Output error: {}", e);
-                    return ControlFlow::Break(());
-                }
-                if let Err(e) = printer.writeln() {
-                    eprintln!("Output error: {}", e);
-                    return ControlFlow::Break(());
-                }
-                count += 1;
-                ControlFlow::Continue(())
-            }
-            Err(e) => {
-                last_error = Some((e, loc.clone()));
-                ControlFlow::Break(())
-            }
+    let parse_result = parser.parse_each(|decl, _loc, _path, interner| {
+        let mut printer = SexpPrinter::new(&mut handle, interner);
+        if let Err(e) = printer.print_external_decl(decl) {
+            eprintln!("Output error: {}", e);
+            return ControlFlow::Break(());
         }
+        if let Err(e) = printer.writeln() {
+            eprintln!("Output error: {}", e);
+            return ControlFlow::Break(());
+        }
+        count += 1;
+        ControlFlow::Continue(())
     });
 
     drop(handle);
 
     // エラーがあった場合、詳細を表示
-    if let Some((error, _decl_start_loc)) = last_error {
+    if let Err(error) = parse_result {
         // エラー内の実際の位置を使う
         let error_loc = error.loc();
 
@@ -335,12 +332,10 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) ->
     };
 
     // パースしながらフィールド情報を収集
-    parser.parse_each(|result, _loc, _path, interner| {
-        if let Ok(ref decl) = result {
-            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
-        }
+    parser.parse_each(|decl, _loc, _path, interner| {
+        fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
         std::ops::ControlFlow::Continue(())
-    });
+    })?;
 
     // 統計情報を表示
     let stats = fields_dict.stats();

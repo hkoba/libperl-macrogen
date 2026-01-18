@@ -436,6 +436,8 @@ pub struct Preprocessor {
     macro_def_callback: Option<Box<dyn MacroDefCallback>>,
     /// マクロ呼び出し時のコールバック（マクロ名ごとに登録）
     macro_called_callbacks: HashMap<InternedStr, Box<dyn MacroCalledCallback>>,
+    /// マーカーで囲むマクロの辞書（assert 等の特殊処理用）
+    wrapped_macros: HashSet<InternedStr>,
 }
 
 impl Preprocessor {
@@ -456,6 +458,7 @@ impl Preprocessor {
             no_expand_registry: NoExpandRegistry::new(),
             macro_def_callback: None,
             macro_called_callbacks: HashMap::new(),
+            wrapped_macros: HashSet::new(),
         };
 
         // 事前定義マクロを登録
@@ -507,6 +510,15 @@ impl Preprocessor {
         macro_name: InternedStr,
     ) -> Option<&mut Box<dyn MacroCalledCallback>> {
         self.macro_called_callbacks.get_mut(&macro_name)
+    }
+
+    /// マーカーで囲むマクロを登録（assert 等の特殊処理用）
+    ///
+    /// 登録されたマクロは展開時に `MacroBegin`/`MacroEnd` マーカーで囲まれ、
+    /// `is_wrapped` フラグが true になる。パーサーは args から元の式を復元できる。
+    pub fn add_wrapped_macro(&mut self, macro_name: &str) {
+        let id = self.interner.intern(macro_name);
+        self.wrapped_macros.insert(id);
     }
 
     /// 事前定義マクロを登録
@@ -1434,6 +1446,13 @@ impl Preprocessor {
                 }
             }
         }
+    }
+
+    /// トークンを先読みバッファに戻す
+    ///
+    /// パーサーが先読みしたトークンを戻す必要がある場合に使用。
+    pub fn unget_token(&mut self, token: Token) {
+        self.lookahead.push(token);
     }
 
     /// 生のトークンを取得（マクロ展開なし）
@@ -2560,8 +2579,10 @@ impl Preprocessor {
 
     /// マクロ展開結果を MacroBegin/MacroEnd マーカーで囲む
     ///
-    /// emit_markers が有効な場合にのみマーカーを追加する。
+    /// emit_markers が有効な場合、または wrapped_macros に含まれる場合にマーカーを追加する。
     /// マーカーはパーサーがマクロ展開情報をASTに付与するために使用される。
+    /// wrapped_macros に含まれるマクロは is_wrapped フラグが true になり、
+    /// パーサーで特殊処理（assert の復元など）が可能になる。
     fn wrap_with_markers(
         &self,
         tokens: Vec<Token>,
@@ -2570,7 +2591,10 @@ impl Preprocessor {
         kind: MacroInvocationKind,
         call_loc: &SourceLocation,
     ) -> Vec<Token> {
-        if !self.config.emit_markers {
+        let is_wrapped = self.wrapped_macros.contains(&macro_name);
+
+        // emit_markers が off でも、wrapped_macros に含まれていればマーカー出力
+        if !self.config.emit_markers && !is_wrapped {
             return tokens;
         }
 
@@ -2583,6 +2607,7 @@ impl Preprocessor {
             macro_name,
             kind,
             call_loc: call_loc.clone(),
+            is_wrapped,
         };
         let begin_token = Token::new(
             TokenKind::MacroBegin(Box::new(begin_info)),
@@ -2959,6 +2984,10 @@ impl Preprocessor {
 impl TokenSource for Preprocessor {
     fn next_token(&mut self) -> crate::error::Result<Token> {
         Preprocessor::next_token(self)
+    }
+
+    fn unget_token(&mut self, token: Token) {
+        Preprocessor::unget_token(self, token)
     }
 
     fn interner(&self) -> &StringInterner {

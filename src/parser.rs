@@ -7,10 +7,11 @@ use std::collections::HashSet;
 use crate::ast::*;
 use crate::error::{CompileError, ParseError, Result};
 use crate::intern::{InternedStr, StringInterner};
+use crate::macro_infer::detect_assert_kind;
 use crate::preprocessor::Preprocessor;
 use crate::lexer::{Lexer, LookupOnly};
 use crate::source::{FileId, SourceLocation};
-use crate::token::{MacroBeginInfo, Token, TokenKind};
+use crate::token::{MacroBeginInfo, MacroInvocationKind, Token, TokenId, TokenKind};
 use crate::token_source::{TokenSliceRef, TokenSource};
 
 /// マクロ展開コンテキスト
@@ -105,44 +106,43 @@ impl<'a> Parser<'a, Preprocessor> {
 
     /// ストリーミング形式でパース
     ///
-    /// 各外部宣言を順次パースし、結果をコールバックに渡す。
-    /// コールバックが `ControlFlow::Break(())` を返すと処理を中断する。
-    ///
-    /// # Arguments
-    /// * `callback` - 各宣言のパース結果、開始位置、パス、およびインターナーを受け取るクロージャ。
-    ///   `ControlFlow::Continue(())` を返すと次の宣言を処理、
-    ///   `ControlFlow::Break(())` を返すと処理を中断。
-    pub fn parse_each<F>(&mut self, mut callback: F)
+    /// 各宣言をパースするたびにコールバックを呼び出す。
+    /// パースエラーが発生した場合はコールバックを呼ばずにエラーを返す。
+    /// コールバックが `ControlFlow::Break(())` を返した場合はループを終了。
+    pub fn parse_each<F>(&mut self, mut callback: F) -> Result<()>
     where
-        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &std::path::Path, &StringInterner) -> std::ops::ControlFlow<()>,
+        F: FnMut(&ExternalDecl, &crate::source::SourceLocation, &std::path::Path, &StringInterner) -> std::ops::ControlFlow<()>,
     {
         while !self.is_eof() {
             let loc = self.current.loc.clone();
-            let result = self.parse_external_decl();
+            let decl = self.parse_external_decl()?;
             let path = self.source.files().get_path(loc.file_id);
             let interner = self.source.interner();
-            if callback(result, &loc, path, interner).is_break() {
+            if callback(&decl, &loc, path, interner).is_break() {
                 break;
             }
         }
+        Ok(())
     }
 
     /// ストリーミング形式でパース（Preprocessor アクセス付き）
     ///
     /// `parse_each` と同様だが、コールバックに Preprocessor への可変参照も渡す。
     /// マクロ呼び出しコールバック（MacroCallWatcher など）にアクセスする場合に使用。
-    pub fn parse_each_with_pp<F>(&mut self, mut callback: F)
+    /// パースエラーが発生した場合はコールバックを呼ばずにエラーを返す。
+    pub fn parse_each_with_pp<F>(&mut self, mut callback: F) -> Result<()>
     where
-        F: FnMut(Result<ExternalDecl>, &crate::source::SourceLocation, &std::path::Path, &mut Preprocessor) -> std::ops::ControlFlow<()>,
+        F: FnMut(&ExternalDecl, &crate::source::SourceLocation, &std::path::Path, &mut Preprocessor) -> std::ops::ControlFlow<()>,
     {
         while !self.is_eof() {
             let loc = self.current.loc.clone();
-            let result = self.parse_external_decl();
+            let decl = self.parse_external_decl()?;
             let path = self.source.files().get_path(loc.file_id).to_path_buf();
-            if callback(result, &loc, &path, self.source).is_break() {
+            if callback(&decl, &loc, &path, self.source).is_break() {
                 break;
             }
         }
+        Ok(())
     }
 }
 
@@ -1968,6 +1968,10 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     Ok(expr)
                 }
             }
+            TokenKind::MacroBegin(info) if info.is_wrapped => {
+                // wrapped マクロ（assert 等）を処理
+                self.parse_wrapped_macro_expr()
+            }
             _ => Err(CompileError::Parse {
                 loc,
                 kind: ParseError::UnexpectedToken {
@@ -1978,12 +1982,175 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         }
     }
 
+    /// wrapped マクロ（assert 等）を Assert 式としてパース
+    ///
+    /// MacroBegin(is_wrapped=true) から args を取得し、condition をパースして
+    /// Assert 式を生成する。その後 MacroEnd までスキップ。
+    ///
+    /// `assert_` や `__ASSERT_` は末尾カンマ形式で、式の前に付ける修飾子として使用される。
+    /// 空展開時はカンマがないため、後続の式があれば暗黙的にカンマ式を形成する。
+    fn parse_wrapped_macro_expr(&mut self) -> Result<Expr> {
+        let loc = self.current.loc.clone();
+
+        // MacroBegin から情報を取得
+        let (marker_id, macro_name, args) = match &self.current.kind {
+            TokenKind::MacroBegin(info) if info.is_wrapped => {
+                let args = match &info.kind {
+                    MacroInvocationKind::Function { args } => args.clone(),
+                    MacroInvocationKind::Object => {
+                        let name = self.source.interner().get(info.macro_name).to_string();
+                        return Err(CompileError::Parse {
+                            loc,
+                            kind: ParseError::AssertNotFunctionMacro { macro_name: name },
+                        });
+                    }
+                };
+                (info.marker_id, info.macro_name, args)
+            }
+            _ => unreachable!("parse_wrapped_macro_expr called without wrapped MacroBegin"),
+        };
+
+        // 引数数チェック（assert は 1 引数）
+        if args.len() != 1 {
+            let name = self.source.interner().get(macro_name).to_string();
+            return Err(CompileError::Parse {
+                loc,
+                kind: ParseError::InvalidAssertArgs {
+                    macro_name: name,
+                    arg_count: args.len(),
+                },
+            });
+        }
+
+        // args[0] から condition をパース
+        let condition = self.parse_expr_from_tokens(&args[0], &loc)?;
+
+        // AssertKind を判定
+        let macro_name_str = self.source.interner().get(macro_name);
+        let kind = detect_assert_kind(macro_name_str).unwrap_or(AssertKind::Assert);
+
+        // MacroBegin を消費して MacroEnd までスキップ
+        // 注意: advance() は inner_next_token() を使うため MacroEnd をスキップしてしまう
+        // そのため、ここでは skip_to_macro_end() を使って直接ソースから読み取る
+        self.skip_to_macro_end(marker_id)?;
+
+        let assert_expr = Expr::new(ExprKind::Assert {
+            kind,
+            condition: Box::new(condition),
+        }, loc.clone());
+
+        // 末尾カンマ形式（assert_, __ASSERT_）の場合、後続の式と暗黙的にカンマ式を形成
+        // 次のトークンが式の開始（別の Assert 含む）であれば結合
+        if self.is_expression_start() {
+            // 後続の式をパース（再帰的に Assert もパースされる）
+            let next_expr = self.parse_assignment_expr()?;
+            Ok(Expr::new(
+                ExprKind::Comma {
+                    lhs: Box::new(assert_expr),
+                    rhs: Box::new(next_expr),
+                },
+                loc,
+            ))
+        } else {
+            Ok(assert_expr)
+        }
+    }
+
+    /// 現在のトークンが式の開始かどうかを判定
+    fn is_expression_start(&self) -> bool {
+        match &self.current.kind {
+            // 式の開始になり得るトークン
+            TokenKind::Ident(_)
+            | TokenKind::IntLit(_)
+            | TokenKind::UIntLit(_)
+            | TokenKind::FloatLit(_)
+            | TokenKind::CharLit(_)
+            | TokenKind::WideCharLit(_)
+            | TokenKind::StringLit(_)
+            | TokenKind::WideStringLit(_)
+            | TokenKind::LParen
+            | TokenKind::Star      // 間接参照
+            | TokenKind::Amp       // アドレス取得
+            | TokenKind::Plus      // 単項プラス
+            | TokenKind::Minus     // 単項マイナス
+            | TokenKind::Bang      // 論理否定
+            | TokenKind::Tilde     // ビット反転
+            | TokenKind::PlusPlus  // 前置インクリメント
+            | TokenKind::MinusMinus // 前置デクリメント
+            | TokenKind::KwSizeof
+            | TokenKind::KwAlignof
+            | TokenKind::KwAlignof2
+            | TokenKind::KwAlignof3
+            | TokenKind::MacroBegin(_) => true, // 別の Assert も含む
+            _ => false,
+        }
+    }
+
+    /// トークン列から式をパース
+    ///
+    /// args から取り出したトークン列を一時的なソースとして式をパースする。
+    /// 入れ子の wrapped マクロがあればエラー。
+    fn parse_expr_from_tokens(&self, tokens: &[Token], loc: &SourceLocation) -> Result<Expr> {
+        // 入れ子チェック：tokens 内に wrapped MacroBegin があればエラー
+        for token in tokens {
+            if let TokenKind::MacroBegin(info) = &token.kind {
+                if info.is_wrapped {
+                    return Err(CompileError::Parse {
+                        loc: loc.clone(),
+                        kind: ParseError::NestedAssertNotSupported,
+                    });
+                }
+            }
+        }
+
+        // トークン列から式をパース
+        crate::parser::parse_expression_from_tokens_ref(
+            tokens.to_vec(),
+            self.source.interner(),
+            self.source.files(),
+            &self.typedefs,
+        )
+    }
+
+    /// 指定した marker_id に対応する MacroEnd までスキップ
+    ///
+    /// inner_next_token は MacroEnd をスキップするため、
+    /// ここでは source から直接読み取る。
+    fn skip_to_macro_end(&mut self, target_marker_id: TokenId) -> Result<()> {
+        // まず current をチェック（MacroBegin の直後なので通常は MacroEnd ではない）
+        loop {
+            // source から直接読み取る（inner_next_token は MacroEnd をスキップするため）
+            let token = self.source.next_token()?;
+
+            match &token.kind {
+                TokenKind::MacroEnd(info) if info.begin_marker_id == target_marker_id => {
+                    // 目標の MacroEnd を見つけた
+                    // current を次のトークンで更新（inner_next_token を使って正常なフローに戻す）
+                    self.current = self.inner_next_token()?;
+                    return Ok(());
+                }
+                TokenKind::Eof => {
+                    return Err(CompileError::Parse {
+                        loc: token.loc.clone(),
+                        kind: ParseError::MacroEndNotFound,
+                    });
+                }
+                _ => {
+                    // 他のトークンはスキップ（MacroBegin/MacroEnd 含む）
+                    continue;
+                }
+            }
+        }
+    }
+
     // ==================== ユーティリティ ====================
 
     /// 内部トークン取得メソッド（マーカーを透過的に処理）
     ///
     /// `handle_macro_markers` が true の場合、MacroBegin/MacroEnd マーカーを
     /// 処理してスキップし、通常のトークンのみを返す。
+    /// ただし、is_wrapped が true の MacroBegin はスキップせず返す（assert 処理用）。
+    /// 空展開でも MacroBegin を返し、parse_wrapped_macro_expr で Assert ノードを生成する。
     fn inner_next_token(&mut self) -> Result<Token> {
         loop {
             let token = self.source.next_token()?;
@@ -1994,7 +2161,12 @@ impl<'a, S: TokenSource> Parser<'a, S> {
 
             match &token.kind {
                 TokenKind::MacroBegin(info) => {
-                    // マクロ展開開始：コンテキストにプッシュ
+                    if info.is_wrapped {
+                        // wrapped マクロ（assert 等）は常に返す
+                        // 空展開でも Assert ノードとして AST に残す
+                        return Ok(token);
+                    }
+                    // 通常のマクロ展開開始：コンテキストにプッシュ
                     self.macro_ctx.push((**info).clone());
                     continue; // マーカーはスキップ
                 }

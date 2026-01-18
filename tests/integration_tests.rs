@@ -75,21 +75,13 @@ fn parse_streaming(source: &str) -> (Vec<ExternalDecl>, Option<String>) {
 
     let mut parser = Parser::new(&mut pp).unwrap();
     let mut decls = Vec::new();
-    let mut error = None;
 
-    parser.parse_each(|result, _loc, _path, _interner| {
-        match result {
-            Ok(decl) => {
-                decls.push(decl);
-                ControlFlow::Continue(())
-            }
-            Err(e) => {
-                error = Some(format!("{}", e));
-                ControlFlow::Break(())
-            }
-        }
+    let result = parser.parse_each(|decl, _loc, _path, _interner| {
+        decls.push(decl.clone());
+        ControlFlow::Continue(())
     });
 
+    let error = result.err().map(|e| format!("{}", e));
     (decls, error)
 }
 

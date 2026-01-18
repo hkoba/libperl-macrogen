@@ -117,6 +117,14 @@ pub enum ParseError {
     InvalidDeclaration(String),
     /// 型エラー
     InvalidType(String),
+    /// assert マクロの引数数が不正
+    InvalidAssertArgs { macro_name: String, arg_count: usize },
+    /// assert マクロがオブジェクトマクロとして呼ばれた
+    AssertNotFunctionMacro { macro_name: String },
+    /// 入れ子の assert はサポートされない
+    NestedAssertNotSupported,
+    /// MacroEnd が見つからない
+    MacroEndNotFound,
 }
 
 impl fmt::Display for ParseError {
@@ -128,6 +136,18 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedEof => write!(f, "unexpected end of file"),
             ParseError::InvalidDeclaration(s) => write!(f, "invalid declaration: {}", s),
             ParseError::InvalidType(s) => write!(f, "invalid type: {}", s),
+            ParseError::InvalidAssertArgs { macro_name, arg_count } => {
+                write!(f, "assert macro '{}' expects 1 argument, got {}", macro_name, arg_count)
+            }
+            ParseError::AssertNotFunctionMacro { macro_name } => {
+                write!(f, "assert macro '{}' must be called as function macro", macro_name)
+            }
+            ParseError::NestedAssertNotSupported => {
+                write!(f, "nested assert macros are not supported")
+            }
+            ParseError::MacroEndNotFound => {
+                write!(f, "matching MacroEnd not found")
+            }
         }
     }
 }

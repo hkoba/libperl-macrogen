@@ -70,6 +70,8 @@ pub struct MacroBeginInfo {
     pub kind: MacroInvocationKind,
     /// 展開が発生した位置（マクロ呼び出し位置）
     pub call_loc: SourceLocation,
+    /// wrap 対象マクロの場合 true（assert 等の特殊処理用）
+    pub is_wrapped: bool,
 }
 
 /// マクロ展開終了マーカーの情報

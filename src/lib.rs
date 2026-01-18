@@ -49,8 +49,9 @@ pub use rust_decl::RustDeclDict;
 pub use lexer::{IdentResolver, Interning, Lexer, LookupOnly, MutableLexer, ReadOnlyLexer};
 pub use macro_def::{MacroDef, MacroKind, MacroTable};
 pub use macro_infer::{
-    detect_sv_any_patterns, detect_sv_u_field_patterns, InferStatus, MacroInferContext,
-    MacroInferInfo, MacroInferStats, NoExpandSymbols, ParseResult, SvAnyPattern, SvUFieldPattern,
+    convert_assert_calls_in_compound_stmt, detect_assert_kind, detect_sv_any_patterns,
+    detect_sv_u_field_patterns, InferStatus, MacroInferContext, MacroInferInfo, MacroInferStats,
+    NoExpandSymbols, ParseResult, SvAnyPattern, SvUFieldPattern,
 };
 pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref, parse_type_from_string, Parser};
 pub use perl_config::{

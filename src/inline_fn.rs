@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use crate::ast::FunctionDef;
-use crate::intern::InternedStr;
+use crate::intern::{InternedStr, StringInterner};
+use crate::macro_infer::convert_assert_calls_in_compound_stmt;
 
 /// inline 関数辞書
 ///
@@ -48,7 +49,9 @@ impl InlineFnDict {
     }
 
     /// FunctionDef から inline 関数を収集
-    pub fn collect_from_function_def(&mut self, func_def: &FunctionDef) {
+    ///
+    /// assert/assert_ 呼び出しを Assert 式に変換してから保存する。
+    pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &StringInterner) {
         if !func_def.specs.is_inline {
             return;
         }
@@ -58,7 +61,11 @@ impl InlineFnDict {
             None => return,
         };
 
-        self.insert(name, func_def.clone());
+        // クローンして assert 呼び出しを変換
+        let mut func_def = func_def.clone();
+        convert_assert_calls_in_compound_stmt(&mut func_def.body, interner);
+
+        self.insert(name, func_def);
     }
 }
 

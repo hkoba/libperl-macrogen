@@ -194,6 +194,14 @@ pub fn run_macro_inference(config: InferConfig) -> Result<InferResult, InferErro
 
     // Preprocessor を初期化してファイルを処理
     let mut pp = Preprocessor::new(pp_config);
+
+    // assert 系マクロをラップ対象として登録
+    // これにより inline 関数内の assert も Assert 式に変換される
+    pp.add_wrapped_macro("assert");
+    pp.add_wrapped_macro("assert_");
+    // __ASSERT_ は末尾カンマを含む特殊な形式で、現状の実装では対応困難
+    // pp.add_wrapped_macro("__ASSERT_");
+
     pp.process_file(&config.input_file)?;
 
     // apidoc パスを解決
@@ -238,34 +246,32 @@ pub fn run_inference_with_preprocessor(
 
     // parse_each_with_pp でフィールド辞書と inline 関数を収集
     // 同時に _SV_HEAD マクロ呼び出しを検出して SV ファミリーを動的に構築
-    parser.parse_each_with_pp(|result, _loc, _path, pp| {
-        if let Ok(ref decl) = result {
-            let interner = pp.interner();
-            fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
+    parser.parse_each_with_pp(|decl, _loc, _path, pp| {
+        let interner = pp.interner();
+        fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
-            // inline 関数を収集
-            if decl.is_target() {
-                if let ExternalDecl::FunctionDef(func_def) = decl {
-                    inline_fn_dict.collect_from_function_def(func_def);
-                }
+        // inline 関数を収集
+        if decl.is_target() {
+            if let ExternalDecl::FunctionDef(func_def) = decl {
+                inline_fn_dict.collect_from_function_def(func_def, interner);
             }
+        }
 
-            // 構造体定義の場合、_SV_HEAD フラグをチェック
-            if decl.is_target() {
-                if let Some(struct_names) = extract_struct_names(decl) {
-                    // _SV_HEAD が呼ばれていたら SV ファミリーに追加
-                    if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
-                        if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
-                            if watcher.take_called() {
-                                // _SV_HEAD(typeName) の引数を取得
-                                let type_name = watcher.last_args()
-                                    .and_then(|args| args.first().cloned())
-                                    .unwrap_or_default();
+        // 構造体定義の場合、_SV_HEAD フラグをチェック
+        if decl.is_target() {
+            if let Some(struct_names) = extract_struct_names(decl) {
+                // _SV_HEAD が呼ばれていたら SV ファミリーに追加
+                if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
+                    if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                        if watcher.take_called() {
+                            // _SV_HEAD(typeName) の引数を取得
+                            let type_name = watcher.last_args()
+                                .and_then(|args| args.first().cloned())
+                                .unwrap_or_default();
 
-                                for name in struct_names {
-                                    // typeName → 構造体名マッピングも同時に登録
-                                    fields_dict.add_sv_family_member_with_type(name, &type_name);
-                                }
+                            for name in struct_names {
+                                // typeName → 構造体名マッピングも同時に登録
+                                fields_dict.add_sv_family_member_with_type(name, &type_name);
                             }
                         }
                     }
@@ -273,7 +279,7 @@ pub fn run_inference_with_preprocessor(
             }
         }
         ControlFlow::Continue(())
-    });
+    })?;
 
     // パーサーから typedef 辞書を取得
     let typedefs = parser.typedefs().clone();

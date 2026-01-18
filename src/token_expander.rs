@@ -635,6 +635,7 @@ impl<'a> TokenExpander<'a> {
             macro_name,
             kind,
             call_loc: call_loc.clone(),
+            is_wrapped: false, // TokenExpander ではラップ対象マクロは処理しない
         };
         let begin_token = Token::new(
             TokenKind::MacroBegin(Box::new(begin_info)),

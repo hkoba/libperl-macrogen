@@ -13,6 +13,9 @@ pub trait TokenSource {
     /// 次のトークンを取得
     fn next_token(&mut self) -> Result<Token>;
 
+    /// トークンを先読みバッファに戻す
+    fn unget_token(&mut self, token: Token);
+
     /// StringInterner への参照を取得
     fn interner(&self) -> &StringInterner;
 
@@ -39,6 +42,8 @@ pub struct TokenSlice {
     interner: StringInterner,
     files: FileRegistry,
     eof_loc: SourceLocation,
+    /// 先読みバッファ（unget_token で戻されたトークン）
+    lookahead: Vec<Token>,
 }
 
 impl TokenSlice {
@@ -60,6 +65,7 @@ impl TokenSlice {
             interner,
             files,
             eof_loc,
+            lookahead: Vec::new(),
         }
     }
 
@@ -76,6 +82,10 @@ impl TokenSlice {
 
 impl TokenSource for TokenSlice {
     fn next_token(&mut self) -> Result<Token> {
+        // 先読みバッファがあればそこから取得
+        if let Some(token) = self.lookahead.pop() {
+            return Ok(token);
+        }
         if self.pos < self.tokens.len() {
             let token = self.tokens[self.pos].clone();
             self.pos += 1;
@@ -84,6 +94,10 @@ impl TokenSource for TokenSlice {
             // EOF トークンを返す
             Ok(Token::new(TokenKind::Eof, self.eof_loc.clone()))
         }
+    }
+
+    fn unget_token(&mut self, token: Token) {
+        self.lookahead.push(token);
     }
 
     fn interner(&self) -> &StringInterner {
@@ -109,6 +123,8 @@ pub struct TokenSliceRef<'a> {
     interner: &'a StringInterner,
     files: &'a FileRegistry,
     eof_loc: SourceLocation,
+    /// 先読みバッファ（unget_token で戻されたトークン）
+    lookahead: Vec<Token>,
 }
 
 impl<'a> TokenSliceRef<'a> {
@@ -128,11 +144,15 @@ impl<'a> TokenSliceRef<'a> {
             interner,
             files,
             eof_loc,
+            lookahead: Vec::new(),
         }
     }
 
     /// 次のトークンを取得
     pub fn next_token(&mut self) -> Result<Token> {
+        if let Some(token) = self.lookahead.pop() {
+            return Ok(token);
+        }
         if self.pos < self.tokens.len() {
             let token = self.tokens[self.pos].clone();
             self.pos += 1;
@@ -155,6 +175,9 @@ impl<'a> TokenSliceRef<'a> {
 
 impl<'a> TokenSource for TokenSliceRef<'a> {
     fn next_token(&mut self) -> Result<Token> {
+        if let Some(token) = self.lookahead.pop() {
+            return Ok(token);
+        }
         if self.pos < self.tokens.len() {
             let token = self.tokens[self.pos].clone();
             self.pos += 1;
@@ -162,6 +185,10 @@ impl<'a> TokenSource for TokenSliceRef<'a> {
         } else {
             Ok(Token::new(TokenKind::Eof, self.eof_loc.clone()))
         }
+    }
+
+    fn unget_token(&mut self, token: Token) {
+        self.lookahead.push(token);
     }
 
     fn interner(&self) -> &StringInterner {

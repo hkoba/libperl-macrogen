@@ -1760,7 +1760,7 @@ impl Default for MacroInferContext {
 }
 
 /// マクロ名がアサーションマクロかどうかを判定
-fn detect_assert_kind(name: &str) -> Option<AssertKind> {
+pub fn detect_assert_kind(name: &str) -> Option<AssertKind> {
     match name {
         "assert" => Some(AssertKind::Assert),
         "assert_" => Some(AssertKind::AssertUnderscore),
@@ -1772,7 +1772,7 @@ fn detect_assert_kind(name: &str) -> Option<AssertKind> {
 ///
 /// パース後に呼び出し、`Call { func: Ident("assert"), args }` を
 /// `Assert { kind, condition }` に変換する。
-fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
+pub fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
     match &mut expr.kind {
         ExprKind::Call { func, args } => {
             // 子を先に処理
@@ -1861,8 +1861,20 @@ fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
     }
 }
 
+/// CompoundStmt 内の assert 呼び出しを変換
+///
+/// inline 関数の本体などに使用。
+pub fn convert_assert_calls_in_compound_stmt(compound: &mut crate::ast::CompoundStmt, interner: &StringInterner) {
+    use crate::ast::BlockItem;
+    for item in &mut compound.items {
+        if let BlockItem::Stmt(s) = item {
+            convert_assert_calls_in_stmt(s, interner);
+        }
+    }
+}
+
 /// Statement 内の assert 呼び出しを変換
-fn convert_assert_calls_in_stmt(stmt: &mut crate::ast::Stmt, interner: &StringInterner) {
+pub fn convert_assert_calls_in_stmt(stmt: &mut crate::ast::Stmt, interner: &StringInterner) {
     use crate::ast::Stmt;
     match stmt {
         Stmt::Expr(Some(expr), _) => convert_assert_calls(expr, interner),
