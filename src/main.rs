@@ -596,7 +596,7 @@ fn apply_rustfmt(code: &[u8]) -> Vec<u8> {
     let mut child = match Command::new("rustfmt")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
@@ -616,8 +616,17 @@ fn apply_rustfmt(code: &[u8]) -> Vec<u8> {
     // 結果を取得
     match child.wait_with_output() {
         Ok(output) if output.status.success() => output.stdout,
-        _ => {
+        Ok(output) => {
             eprintln!("Warning: rustfmt failed, using unformatted output");
+            if !output.stderr.is_empty() {
+                if let Ok(stderr_str) = std::str::from_utf8(&output.stderr) {
+                    eprintln!("rustfmt error: {}", stderr_str);
+                }
+            }
+            code.to_vec()
+        }
+        Err(e) => {
+            eprintln!("Warning: rustfmt failed: {}", e);
             code.to_vec()
         }
     }
