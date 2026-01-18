@@ -127,8 +127,14 @@ pub struct TypeEnv {
     /// 戻り値の型制約
     pub return_constraints: Vec<TypeConstraint>,
 
-    /// ExprId → パラメータ名のリンク
+    /// ExprId → パラメータ名のリンク（正引き）
     pub expr_to_param: Vec<ParamLink>,
+
+    /// パラメータ名 → ExprId リスト（逆引き）
+    ///
+    /// パラメータを参照する全ての式の ExprId を保持。
+    /// 引数の型推論時に、関連する式の型制約を探すために使用。
+    pub param_to_exprs: HashMap<InternedStr, Vec<ExprId>>,
 }
 
 impl TypeEnv {
@@ -164,12 +170,21 @@ impl TypeEnv {
     }
 
     /// 式をパラメータにリンク
+    ///
+    /// 正引き（expr_to_param）と逆引き（param_to_exprs）の両方を更新する。
     pub fn link_expr_to_param(&mut self, expr_id: ExprId, param_name: InternedStr, context: impl Into<String>) {
+        // 正引き: ExprId → パラメータ名
         self.expr_to_param.push(ParamLink {
             expr_id,
             param_name,
             context: context.into(),
         });
+
+        // 逆引き: パラメータ名 → ExprId リスト
+        self.param_to_exprs
+            .entry(param_name)
+            .or_default()
+            .push(expr_id);
     }
 
     /// パラメータの制約を取得
@@ -238,6 +253,14 @@ impl TypeEnv {
         }
         self.return_constraints.extend(other.return_constraints);
         self.expr_to_param.extend(other.expr_to_param);
+
+        // 逆引き辞書もマージ
+        for (param, expr_ids) in other.param_to_exprs {
+            self.param_to_exprs
+                .entry(param)
+                .or_default()
+                .extend(expr_ids);
+        }
     }
 
     /// デバッグ用: 制約のサマリを文字列で取得
