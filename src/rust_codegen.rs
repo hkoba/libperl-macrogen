@@ -10,6 +10,28 @@ use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
 use crate::sexp::SexpPrinter;
 
+/// Rust の予約語リスト（strict keywords + reserved keywords）
+const RUST_KEYWORDS: &[&str] = &[
+    // Strict keywords
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn",
+    "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
+    "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while",
+    // Reserved keywords
+    "abstract", "become", "box", "do", "final", "macro", "override",
+    "priv", "try", "typeof", "unsized", "virtual", "yield",
+];
+
+/// Rust の予約語をエスケープ（必要なら r# を付ける）
+fn escape_rust_keyword(name: &str) -> String {
+    if RUST_KEYWORDS.contains(&name) {
+        format!("r#{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
 /// 二項演算子を Rust 形式に変換
 fn bin_op_to_rust(op: BinOp) -> &'static str {
     match op {
@@ -282,7 +304,7 @@ impl<'a> RustCodegen<'a> {
     fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
         info.params.iter()
             .map(|p| {
-                let name = self.interner.get(p.name);
+                let name = escape_rust_keyword(self.interner.get(p.name));
                 let ty = self.get_param_type(p, info);
                 format!("{}: {}", name, ty)
             })
@@ -346,7 +368,7 @@ impl<'a> RustCodegen<'a> {
     fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                self.interner.get(*name).to_string()
+                escape_rust_keyword(self.interner.get(*name))
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -681,7 +703,7 @@ impl<'a> RustCodegen<'a> {
         let name = param.declarator
             .as_ref()
             .and_then(|d| d.name)
-            .map(|n| self.interner.get(n).to_string())
+            .map(|n| escape_rust_keyword(self.interner.get(n)))
             .unwrap_or_else(|| "_".to_string());
 
         let ty = self.decl_specs_to_rust(&param.specs);
@@ -765,7 +787,7 @@ impl<'a> RustCodegen<'a> {
     fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                self.interner.get(*name).to_string()
+                escape_rust_keyword(self.interner.get(*name))
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -1021,7 +1043,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         let name = param.declarator
             .as_ref()
             .and_then(|d| d.name)
-            .map(|n| self.interner.get(n).to_string())
+            .map(|n| escape_rust_keyword(self.interner.get(n)))
             .unwrap_or_else(|| "_".to_string());
 
         let ty = self.decl_specs_to_rust(&param.specs);
@@ -1208,7 +1230,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     fn expr_to_rust_inline(&self, expr: &Expr) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                self.interner.get(*name).to_string()
+                escape_rust_keyword(self.interner.get(*name))
             }
             ExprKind::IntLit(n) => format!("{}", n),
             ExprKind::UIntLit(n) => format!("{}u64", n),
@@ -1416,7 +1438,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     fn build_param_list(&self, info: &MacroInferInfo) -> String {
         info.params.iter()
             .map(|p| {
-                let name = self.interner.get(p.name);
+                let name = escape_rust_keyword(self.interner.get(p.name));
                 let ty = self.get_param_type(p, info);
                 format!("{}: {}", name, ty)
             })
@@ -1475,7 +1497,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     fn expr_to_rust(&self, expr: &Expr, info: &MacroInferInfo) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                self.interner.get(*name).to_string()
+                escape_rust_keyword(self.interner.get(*name))
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
