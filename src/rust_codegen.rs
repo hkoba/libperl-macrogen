@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, ParamDecl, Stmt, TypeSpec};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -371,6 +371,52 @@ impl<'a> RustCodegen<'a> {
         is_boolean_expr_kind(&expr.kind)
     }
 
+    /// MUTABLE_PTR パターンを検出
+    ///
+    /// `({ void *p_ = (expr); p_; })` のような構造を検出し、
+    /// 初期化子の式を返す。
+    fn detect_mutable_ptr_pattern<'b>(&self, compound: &'b CompoundStmt) -> Option<&'b Expr> {
+        // 2つの要素: 宣言 + 式文
+        if compound.items.len() != 2 {
+            return None;
+        }
+
+        // 最初の要素: 宣言
+        let decl = match &compound.items[0] {
+            BlockItem::Decl(d) => d,
+            _ => return None,
+        };
+
+        // 宣言子が1つで、初期化子がある
+        if decl.declarators.len() != 1 {
+            return None;
+        }
+        let init_decl = &decl.declarators[0];
+        let declared_name = init_decl.declarator.name?;
+        let init = init_decl.init.as_ref()?;
+
+        // 初期化子は式
+        let init_expr = match init {
+            Initializer::Expr(e) => e.as_ref(),
+            _ => return None,
+        };
+
+        // 2番目の要素: 式文で、宣言した変数を参照
+        let last_expr = match &compound.items[1] {
+            BlockItem::Stmt(Stmt::Expr(Some(e), _)) => e,
+            _ => return None,
+        };
+
+        // 最後の式が宣言した変数への参照
+        if let ExprKind::Ident(name) = &last_expr.kind {
+            if *name == declared_name {
+                return Some(init_expr);
+            }
+        }
+
+        None
+    }
+
     /// 式を Rust コードに変換
     fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
         match &expr.kind {
@@ -502,6 +548,40 @@ impl<'a> RustCodegen<'a> {
                     AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
+            ExprKind::StmtExpr(compound) => {
+                // GCC Statement Expression: ({ decl; stmt; ...; expr })
+                //
+                // MUTABLE_PTR パターンを検出:
+                // ({ void *p_ = (expr); p_; }) => expr
+                if let Some(init_expr) = self.detect_mutable_ptr_pattern(compound) {
+                    return self.expr_to_rust(init_expr, info);
+                }
+
+                // 通常の statement expression: Rust のブロック式として出力
+                let mut parts = Vec::new();
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
+                            parts.push(self.expr_to_rust(e, info));
+                        }
+                        BlockItem::Stmt(stmt) => {
+                            parts.push(self.stmt_to_rust(stmt, info));
+                        }
+                        BlockItem::Decl(_) => {
+                            // 宣言はスキップ
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    "{ }".to_string()
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    let last = parts.pop().unwrap();
+                    let stmts = parts.join("; ");
+                    format!("{{ {}; {} }}", stmts, last)
+                }
+            }
             _ => {
                 self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
             }
@@ -525,13 +605,39 @@ impl<'a> RustCodegen<'a> {
 
     /// TypeName を Rust 型文字列に変換
     fn type_name_to_rust(&mut self, type_name: &crate::ast::TypeName) -> String {
-        // 簡易実装: typedef 名があればそれを使用
+        // ベース型を取得（typedef 名があればそれを使用、なければ不完全マーカー）
+        let mut base_type: Option<String> = None;
         for spec in &type_name.specs.type_specs {
             if let crate::ast::TypeSpec::TypedefName(name) = spec {
-                return self.interner.get(*name).to_string();
+                base_type = Some(self.interner.get(*name).to_string());
+                break;
             }
         }
-        self.type_marker().to_string()
+        let mut base_type = base_type.unwrap_or_else(|| self.type_marker().to_string());
+
+        // 宣言子からポインタ/配列を適用
+        if let Some(ref decl) = type_name.declarator {
+            for derived in &decl.derived {
+                match derived {
+                    DerivedDecl::Pointer(quals) => {
+                        if quals.is_const {
+                            base_type = format!("*const {}", base_type);
+                        } else {
+                            base_type = format!("*mut {}", base_type);
+                        }
+                    }
+                    DerivedDecl::Array(_) => {
+                        // 配列は簡易的にポインタとして扱う
+                        base_type = format!("*mut {}", base_type);
+                    }
+                    DerivedDecl::Function(_) => {
+                        // 関数ポインタは複雑なのでスキップ
+                    }
+                }
+            }
+        }
+
+        base_type
     }
 
     /// DeclSpecs を Rust 型文字列に変換
@@ -1352,6 +1458,30 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
+            ExprKind::StmtExpr(compound) => {
+                // GCC Statement Expression: ({ decl; stmt; ...; expr })
+                let mut parts = Vec::new();
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
+                            parts.push(self.expr_to_rust_inline(e));
+                        }
+                        BlockItem::Stmt(stmt) => {
+                            parts.push(self.stmt_to_rust_inline(stmt, ""));
+                        }
+                        BlockItem::Decl(_) => {}
+                    }
+                }
+                if parts.is_empty() {
+                    "{ }".to_string()
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    let last = parts.pop().unwrap();
+                    let stmts = parts.join("; ");
+                    format!("{{ {}; {} }}", stmts, last)
+                }
+            }
             _ => format!("/* TODO: {:?} */", std::mem::discriminant(&expr.kind))
         }
     }
@@ -1620,6 +1750,30 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
                 }
             }
+            ExprKind::StmtExpr(compound) => {
+                // GCC Statement Expression: ({ decl; stmt; ...; expr })
+                let mut parts = Vec::new();
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
+                            parts.push(self.expr_to_rust(e, info));
+                        }
+                        BlockItem::Stmt(stmt) => {
+                            parts.push(self.stmt_to_rust(stmt, info));
+                        }
+                        BlockItem::Decl(_) => {}
+                    }
+                }
+                if parts.is_empty() {
+                    "{ }".to_string()
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    let last = parts.pop().unwrap();
+                    let stmts = parts.join("; ");
+                    format!("{{ {}; {} }}", stmts, last)
+                }
+            }
             _ => {
                 format!("/* TODO: {:?} */", std::mem::discriminant(&expr.kind))
             }
@@ -1643,13 +1797,37 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
     /// TypeName を Rust 型文字列に変換
     fn type_name_to_rust(&self, type_name: &crate::ast::TypeName) -> String {
-        // 簡易実装: typedef 名があればそれを使用
+        // ベース型を取得
+        let mut base_type = "/* type */".to_string();
         for spec in &type_name.specs.type_specs {
             if let crate::ast::TypeSpec::TypedefName(name) = spec {
-                return self.interner.get(*name).to_string();
+                base_type = self.interner.get(*name).to_string();
+                break;
             }
         }
-        "/* type */".to_string()
+
+        // 宣言子からポインタ/配列を適用
+        if let Some(ref decl) = type_name.declarator {
+            for derived in &decl.derived {
+                match derived {
+                    DerivedDecl::Pointer(quals) => {
+                        if quals.is_const {
+                            base_type = format!("*const {}", base_type);
+                        } else {
+                            base_type = format!("*mut {}", base_type);
+                        }
+                    }
+                    DerivedDecl::Array(_) => {
+                        base_type = format!("*mut {}", base_type);
+                    }
+                    DerivedDecl::Function(_) => {
+                        // 関数ポインタは複雑なのでスキップ
+                    }
+                }
+            }
+        }
+
+        base_type
     }
 
     /// パース失敗マクロをコメント出力

@@ -2077,6 +2077,10 @@ impl<'a> SemanticAnalyzer<'a> {
     fn collect_compound_constraints(&mut self, compound: &CompoundStmt, type_env: &mut TypeEnv) {
         for item in &compound.items {
             match item {
+                BlockItem::Decl(decl) => {
+                    // 宣言の初期化子内の式を処理
+                    self.collect_decl_initializer_constraints(decl, type_env);
+                }
                 BlockItem::Stmt(Stmt::Expr(Some(expr), _)) => {
                     self.collect_expr_constraints(expr, type_env);
                 }
@@ -2087,6 +2091,29 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.collect_compound_constraints(inner, type_env);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// 宣言の初期化子から型制約を収集
+    fn collect_decl_initializer_constraints(&mut self, decl: &Declaration, type_env: &mut TypeEnv) {
+        for init_decl in &decl.declarators {
+            if let Some(ref init) = init_decl.init {
+                self.collect_initializer_constraints(init, type_env);
+            }
+        }
+    }
+
+    /// 初期化子から型制約を収集（再帰）
+    fn collect_initializer_constraints(&mut self, init: &Initializer, type_env: &mut TypeEnv) {
+        match init {
+            Initializer::Expr(expr) => {
+                self.collect_expr_constraints(expr, type_env);
+            }
+            Initializer::List(items) => {
+                for item in items {
+                    self.collect_initializer_constraints(&item.init, type_env);
+                }
             }
         }
     }
