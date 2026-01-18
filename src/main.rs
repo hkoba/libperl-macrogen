@@ -124,6 +124,10 @@ struct Cli {
     /// apidoc マージ後にダンプして終了（フィルタ文字列を指定可能）
     #[arg(long = "dump-apidoc-after-merge", value_name = "FILTER")]
     dump_apidoc_after_merge: Option<Option<String>>,
+
+    /// rustfmt に渡す Rust edition (デフォルト: 2024)
+    #[arg(long = "rust-edition", default_value = "2024")]
+    rust_edition: String,
 }
 
 fn main() {
@@ -254,7 +258,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref())?;
+        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref(), &cli.rust_edition)?;
     } else {
         // デフォルト: マクロ型推論（統計出力）
         // apidoc パスを解決（ライブラリ版を使用）
@@ -532,6 +536,7 @@ fn run_gen_rust(
     bindings_path: Option<&std::path::Path>,
     output_path: Option<&PathBuf>,
     debug_opts: Option<&DebugOptions>,
+    rust_edition: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ライブラリ API を呼び出して型推論を実行
     let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
@@ -551,7 +556,7 @@ fn run_gen_rust(
     };
 
     // rustfmt を適用
-    let formatted = apply_rustfmt(&buffer);
+    let formatted = apply_rustfmt(&buffer, rust_edition);
 
     // 出力先に書き込み
     if let Some(path) = output_path {
@@ -590,10 +595,12 @@ fn build_debug_options(cli: &Cli) -> Option<DebugOptions> {
 }
 
 /// rustfmt を適用（失敗した場合は元のコードを返す）
-fn apply_rustfmt(code: &[u8]) -> Vec<u8> {
+fn apply_rustfmt(code: &[u8], edition: &str) -> Vec<u8> {
     use std::process::{Command, Stdio};
 
     let mut child = match Command::new("rustfmt")
+        .arg("--edition")
+        .arg(edition)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
