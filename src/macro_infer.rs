@@ -928,20 +928,6 @@ impl MacroInferContext {
         // 直接 ## を含むかチェック
         let has_pasting_direct = def.body.iter().any(|t| matches!(t.kind, TokenKind::HashHash));
 
-        // 直接 THX トークンを含むかチェック
-        let (sym_athx, sym_tthx, sym_my_perl) = thx_symbols;
-        let has_thx_direct = def.body.iter().any(|t| {
-            if let TokenKind::Ident(id) = t.kind {
-                id == sym_athx || id == sym_tthx || id == sym_my_perl
-            } else {
-                false
-            }
-        });
-
-        // 初期値を設定（後で propagate で上書きされる可能性あり）
-        info.has_token_pasting = has_pasting_direct;
-        info.is_thx_dependent = has_thx_direct;
-
         // マクロ本体を展開（TokenExpander を使用）
         let mut expander = TokenExpander::new(macro_table, interner, files);
         if let Some(dict) = rust_decl_dict {
@@ -953,8 +939,21 @@ impl MacroInferContext {
         }
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
-        // def-use 関係を収集（展開後のトークンから識別子を抽出）
-        self.collect_uses(&expanded_tokens, macro_table, &mut info);
+        // def-use 関係を収集（展開されたマクロの集合から）
+        self.collect_uses_from_expanded(expander.expanded_macros(), &mut info);
+
+        // THX 判定: 展開されたマクロに aTHX, tTHX が含まれるか、
+        // または展開後トークンに my_perl が含まれるかをチェック
+        let (sym_athx, sym_tthx, sym_my_perl) = thx_symbols;
+        let has_thx_from_uses = info.uses.contains(&sym_athx) || info.uses.contains(&sym_tthx);
+        let has_my_perl = expanded_tokens.iter().any(|t| {
+            matches!(t.kind, TokenKind::Ident(id) if id == sym_my_perl)
+        });
+        let has_thx = has_thx_from_uses || has_my_perl;
+
+        // 初期値を設定（後で propagate で上書きされる可能性あり）
+        info.has_token_pasting = has_pasting_direct;
+        info.is_thx_dependent = has_thx;
 
         // パースを試行
         info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
@@ -974,7 +973,7 @@ impl MacroInferContext {
             ParseResult::Unparseable(_) => {}
         }
 
-        (info, has_pasting_direct, has_thx_direct)
+        (info, has_pasting_direct, has_thx)
     }
 
     /// Phase 2: 型推論の適用
@@ -1324,8 +1323,8 @@ impl MacroInferContext {
         }
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
-        // def-use 関係を収集（展開後のトークンから識別子を抽出）
-        self.collect_uses(&expanded_tokens, macro_table, &mut info);
+        // def-use 関係を収集（展開されたマクロの集合から）
+        self.collect_uses_from_expanded(expander.expanded_macros(), &mut info);
 
         // パースを試行
         info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
@@ -1388,18 +1387,17 @@ impl MacroInferContext {
     }
 
     /// トークン列から使用するマクロ/関数を収集
-    fn collect_uses(
+    /// 展開されたマクロを uses に追加
+    ///
+    /// TokenExpander が展開したマクロの集合から、自分自身を除いて uses に追加する。
+    fn collect_uses_from_expanded(
         &self,
-        tokens: &[crate::token::Token],
-        macro_table: &MacroTable,
+        expanded_macros: &HashSet<InternedStr>,
         info: &mut MacroInferInfo,
     ) {
-        for token in tokens {
-            if let TokenKind::Ident(id) = &token.kind {
-                // マクロテーブルに存在する識別子は使用マクロ
-                if macro_table.get(*id).is_some() && *id != info.name {
-                    info.add_use(*id);
-                }
+        for &id in expanded_macros {
+            if id != info.name {
+                info.add_use(id);
             }
         }
     }

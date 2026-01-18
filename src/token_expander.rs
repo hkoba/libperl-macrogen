@@ -42,6 +42,11 @@ pub struct TokenExpander<'a> {
     emit_markers: bool,
     /// bindings.rs 定数名のキーセット（値の型は隠蔽）
     bindings_consts: Option<&'a dyn KeySet>,
+    /// 展開されたマクロの集合（展開プロセス中に累積記録）
+    ///
+    /// `expand_with_calls` 呼び出し時にクリアされ、展開中に使用された
+    /// マクロ名が記録される。THX 依存判定などに使用。
+    expanded_macros: HashSet<InternedStr>,
 }
 
 impl<'a> TokenExpander<'a> {
@@ -58,7 +63,15 @@ impl<'a> TokenExpander<'a> {
             no_expand: HashSet::new(),
             emit_markers: false,
             bindings_consts: None,
+            expanded_macros: HashSet::new(),
         }
+    }
+
+    /// 展開されたマクロの集合を取得
+    ///
+    /// `expand_with_calls` 呼び出し後に、どのマクロが展開されたかを取得できる。
+    pub fn expanded_macros(&self) -> &HashSet<InternedStr> {
+        &self.expanded_macros
     }
 
     /// bindings.rs の定数名セットを設定
@@ -92,9 +105,11 @@ impl<'a> TokenExpander<'a> {
     /// トークン列をマクロ展開する（関数マクロ呼び出しも含む）
     ///
     /// `FOO(a, b)` のような関数マクロ呼び出しも展開する。
-    pub fn expand_with_calls(&self, tokens: &[Token]) -> Vec<Token> {
-        let mut visited = HashSet::new();
-        self.expand_with_calls_internal(tokens, &mut visited)
+    /// 展開されたマクロ名は `expanded_macros()` で取得できる。
+    pub fn expand_with_calls(&mut self, tokens: &[Token]) -> Vec<Token> {
+        self.expanded_macros.clear();
+        let mut in_progress = HashSet::new();
+        self.expand_with_calls_internal(tokens, &mut in_progress)
     }
 
     /// 内部展開ロジック（オブジェクトマクロのみ）
@@ -148,10 +163,13 @@ impl<'a> TokenExpander<'a> {
     }
 
     /// 内部展開ロジック（関数マクロ呼び出しも含む）
+    ///
+    /// `in_progress` は再帰防止用で、現在展開中のマクロを追跡する。
+    /// 展開されたマクロは `self.expanded_macros` に累積記録される。
     fn expand_with_calls_internal(
-        &self,
+        &mut self,
         tokens: &[Token],
-        visited: &mut HashSet<InternedStr>,
+        in_progress: &mut HashSet<InternedStr>,
     ) -> Vec<Token> {
         let mut result = Vec::new();
         let mut i = 0;
@@ -179,7 +197,7 @@ impl<'a> TokenExpander<'a> {
                     }
 
                     // 再帰防止
-                    if visited.contains(id) {
+                    if in_progress.contains(id) {
                         result.push(token.clone());
                         i += 1;
                         continue;
@@ -190,20 +208,24 @@ impl<'a> TokenExpander<'a> {
                         if def.is_function() {
                             // 関数マクロ: 次のトークンが '(' かチェック
                             if let Some((args, end_idx)) = self.try_collect_args(&tokens[i + 1..]) {
-                                visited.insert(*id);
+                                // 展開記録（累積）
+                                self.expanded_macros.insert(*id);
+                                in_progress.insert(*id);
                                 let expanded =
-                                    self.expand_function_macro(def, token, &args, visited);
+                                    self.expand_function_macro_mut(def, token, &args, in_progress);
                                 result.extend(expanded);
-                                visited.remove(id);
+                                in_progress.remove(id);
                                 i += 1 + end_idx + 1; // id + args + closing paren
                                 continue;
                             }
                         } else {
                             // オブジェクトマクロ
-                            visited.insert(*id);
-                            let expanded = self.expand_object_macro(def, token, visited);
+                            // 展開記録（累積）
+                            self.expanded_macros.insert(*id);
+                            in_progress.insert(*id);
+                            let expanded = self.expand_object_macro_mut(def, token, in_progress);
                             result.extend(expanded);
-                            visited.remove(id);
+                            in_progress.remove(id);
                             i += 1;
                             continue;
                         }
@@ -249,6 +271,36 @@ impl<'a> TokenExpander<'a> {
         )
     }
 
+    /// オブジェクトマクロを展開（&mut self 版）
+    ///
+    /// `expand_with_calls` から呼ばれ、展開したマクロを `expanded_macros` に記録する。
+    fn expand_object_macro_mut(
+        &mut self,
+        def: &MacroDef,
+        trigger_token: &Token,
+        in_progress: &mut HashSet<InternedStr>,
+    ) -> Vec<Token> {
+        // 再帰的に展開（expand_with_calls_internal を使用）
+        let expanded = self.expand_with_calls_internal(&def.body, in_progress);
+
+        // 呼び出し位置を設定
+        let tokens_with_loc: Vec<Token> = expanded
+            .into_iter()
+            .map(|mut t| {
+                t.loc = trigger_token.loc.clone();
+                t
+            })
+            .collect();
+
+        // マーカーで囲む
+        self.wrap_with_markers(
+            tokens_with_loc,
+            def.name,
+            trigger_token,
+            MacroInvocationKind::Object,
+        )
+    }
+
     /// 関数マクロを展開
     fn expand_function_macro(
         &self,
@@ -267,6 +319,47 @@ impl<'a> TokenExpander<'a> {
 
         // ボディを置換しながら展開
         let expanded = self.substitute_and_expand(&def.body, &arg_map, visited);
+
+        // 呼び出し位置を設定
+        let tokens_with_loc: Vec<Token> = expanded
+            .into_iter()
+            .map(|mut t| {
+                t.loc = trigger_token.loc.clone();
+                t
+            })
+            .collect();
+
+        // マーカーで囲む
+        self.wrap_with_markers(
+            tokens_with_loc,
+            def.name,
+            trigger_token,
+            MacroInvocationKind::Function {
+                args: args.to_vec(),
+            },
+        )
+    }
+
+    /// 関数マクロを展開（&mut self 版）
+    ///
+    /// `expand_with_calls` から呼ばれ、展開したマクロを `expanded_macros` に記録する。
+    fn expand_function_macro_mut(
+        &mut self,
+        def: &MacroDef,
+        trigger_token: &Token,
+        args: &[Vec<Token>],
+        in_progress: &mut HashSet<InternedStr>,
+    ) -> Vec<Token> {
+        let (params, is_variadic) = match &def.kind {
+            MacroKind::Function { params, is_variadic } => (params, *is_variadic),
+            _ => return vec![trigger_token.clone()],
+        };
+
+        // 引数マップを構築
+        let arg_map = self.build_arg_map(params, args, is_variadic, &trigger_token.loc);
+
+        // ボディを置換しながら展開
+        let expanded = self.substitute_and_expand_mut(&def.body, &arg_map, in_progress);
 
         // 呼び出し位置を設定
         let tokens_with_loc: Vec<Token> = expanded
@@ -349,7 +442,7 @@ impl<'a> TokenExpander<'a> {
                     // パラメータなら置換
                     if let Some(arg_tokens) = arg_map.get(id) {
                         // 引数を展開して追加
-                        let expanded = self.expand_with_calls_internal(arg_tokens, visited);
+                        let expanded = self.expand_internal(arg_tokens, visited);
                         result.extend(expanded);
                     } else if self.no_expand.contains(id) || visited.contains(id) {
                         result.push(token.clone());
@@ -378,6 +471,70 @@ impl<'a> TokenExpander<'a> {
                             let expanded = self.expand_object_macro(def, token, visited);
                             result.extend(expanded);
                             visited.remove(id);
+                        } else {
+                            result.push(token.clone());
+                        }
+                    } else {
+                        result.push(token.clone());
+                    }
+                }
+                _ => {
+                    result.push(token.clone());
+                }
+            }
+        }
+
+        result
+    }
+
+    /// パラメータを置換しながら展開（&mut self 版）
+    ///
+    /// `expand_with_calls` から呼ばれ、展開したマクロを `expanded_macros` に記録する。
+    fn substitute_and_expand_mut(
+        &mut self,
+        body: &[Token],
+        arg_map: &HashMap<InternedStr, Vec<Token>>,
+        in_progress: &mut HashSet<InternedStr>,
+    ) -> Vec<Token> {
+        let mut result = Vec::new();
+
+        for token in body {
+            match &token.kind {
+                TokenKind::Ident(id) => {
+                    // パラメータなら置換
+                    if let Some(arg_tokens) = arg_map.get(id) {
+                        // 引数を展開して追加
+                        let expanded = self.expand_with_calls_internal(arg_tokens, in_progress);
+                        result.extend(expanded);
+                    } else if self.no_expand.contains(id) || in_progress.contains(id) {
+                        result.push(token.clone());
+                    } else if let Some(consts) = self.bindings_consts {
+                        // bindings.rs に定数として存在すればそのまま
+                        let name_str = self.interner.get(*id);
+                        if consts.contains(name_str) {
+                            result.push(token.clone());
+                        } else if let Some(def) = self.macro_table.get(*id) {
+                            // マクロ呼び出し（関数マクロでなければ展開）
+                            if !def.is_function() {
+                                self.expanded_macros.insert(*id);
+                                in_progress.insert(*id);
+                                let expanded = self.expand_object_macro_mut(def, token, in_progress);
+                                result.extend(expanded);
+                                in_progress.remove(id);
+                            } else {
+                                result.push(token.clone());
+                            }
+                        } else {
+                            result.push(token.clone());
+                        }
+                    } else if let Some(def) = self.macro_table.get(*id) {
+                        // マクロ呼び出し（関数マクロでなければ展開）
+                        if !def.is_function() {
+                            self.expanded_macros.insert(*id);
+                            in_progress.insert(*id);
+                            let expanded = self.expand_object_macro_mut(def, token, in_progress);
+                            result.extend(expanded);
+                            in_progress.remove(id);
                         } else {
                             result.push(token.clone());
                         }
