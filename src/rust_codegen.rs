@@ -118,16 +118,489 @@ pub struct CodegenStats {
     pub inline_fns_type_incomplete: usize,
 }
 
-/// Rust コード生成器
-pub struct RustCodegen<'a, W: Write> {
+/// 一つの関数の生成結果
+#[derive(Debug, Clone)]
+pub struct GeneratedCode {
+    /// 生成されたコード
+    pub code: String,
+    /// 不完全マーカーの数
+    pub incomplete_count: usize,
+}
+
+impl GeneratedCode {
+    /// 生成が完全かどうか（不完全マーカーがないか）
+    pub fn is_complete(&self) -> bool {
+        self.incomplete_count == 0
+    }
+}
+
+/// 単一関数を生成するためのコード生成器（使い捨て）
+///
+/// 各関数の生成ごとにフレッシュなインスタンスを作成して使用する。
+/// 生成中に不完全マーカーが出力された回数をカウントし、
+/// 生成完了時に `GeneratedCode` として結果を返す。
+pub struct RustCodegen<'a> {
+    interner: &'a StringInterner,
+    /// 内部バッファ（生成結果を蓄積）
+    buffer: String,
+    /// 不完全マーカーの生成回数
+    incomplete_count: usize,
+}
+
+/// コード生成全体を管理する構造体
+///
+/// 実際の出力先（Write）を保持し、生成の成功/失敗に応じて
+/// 適切な形式で出力する。
+pub struct CodegenDriver<'a, W: Write> {
     writer: W,
     interner: &'a StringInterner,
     config: CodegenConfig,
     stats: CodegenStats,
 }
 
-impl<'a, W: Write> RustCodegen<'a, W> {
-    /// 新しいコード生成器を作成
+impl<'a> RustCodegen<'a> {
+    /// 新しい単一関数用コード生成器を作成
+    pub fn new(interner: &'a StringInterner) -> Self {
+        Self {
+            interner,
+            buffer: String::new(),
+            incomplete_count: 0,
+        }
+    }
+
+    /// 不完全マーカー: 型が不明
+    fn unknown_marker(&mut self) -> &'static str {
+        self.incomplete_count += 1;
+        "/* unknown */"
+    }
+
+    /// 不完全マーカー: TODO
+    fn todo_marker(&mut self, msg: &str) -> String {
+        self.incomplete_count += 1;
+        format!("/* TODO: {} */", msg)
+    }
+
+    /// 不完全マーカー: 型
+    fn type_marker(&mut self) -> &'static str {
+        self.incomplete_count += 1;
+        "/* type */"
+    }
+
+    /// バッファに書き込み
+    fn write(&mut self, s: &str) {
+        self.buffer.push_str(s);
+    }
+
+    /// バッファに行を書き込み
+    fn writeln(&mut self, s: &str) {
+        self.buffer.push_str(s);
+        self.buffer.push('\n');
+    }
+
+    /// 生成結果を取得（self を消費）
+    fn into_generated_code(self) -> GeneratedCode {
+        GeneratedCode {
+            code: self.buffer,
+            incomplete_count: self.incomplete_count,
+        }
+    }
+
+    /// マクロ関数を生成（self を消費）
+    pub fn generate_macro(mut self, info: &MacroInferInfo) -> GeneratedCode {
+        let name_str = self.interner.get(info.name);
+
+        // パラメータリストを構築（型情報付き）
+        let params_with_types = self.build_param_list(info);
+
+        // 戻り値の型を取得
+        let return_type = self.get_return_type(info);
+
+        // THX 依存の場合は my_perl パラメータを追加
+        let thx_param = if info.is_thx_dependent {
+            "my_perl: *mut PerlInterpreter"
+        } else {
+            ""
+        };
+
+        // 関数シグネチャ
+        let params_str = if thx_param.is_empty() {
+            params_with_types.clone()
+        } else if params_with_types.is_empty() {
+            thx_param.to_string()
+        } else {
+            format!("{}, {}", thx_param, params_with_types)
+        };
+
+        // ドキュメントコメント
+        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+        self.writeln(&format!("/// {}{} - macro function", name_str, thx_info));
+        self.writeln("#[inline]");
+
+        // 関数定義
+        self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
+
+        // 関数本体
+        match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                let rust_expr = self.expr_to_rust(expr, info);
+                self.writeln(&format!("    {}", rust_expr));
+            }
+            ParseResult::Statement(block_items) => {
+                for item in block_items {
+                    if let BlockItem::Stmt(stmt) = item {
+                        let rust_stmt = self.stmt_to_rust(stmt, info);
+                        self.writeln(&format!("    {}", rust_stmt));
+                    }
+                }
+            }
+            ParseResult::Unparseable(_) => {
+                self.writeln("    unimplemented!()");
+            }
+        }
+
+        self.writeln("}");
+        self.writeln("");
+
+        self.into_generated_code()
+    }
+
+    /// パラメータリストを構築（型情報付き）
+    fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
+        info.params.iter()
+            .map(|p| {
+                let name = self.interner.get(p.name);
+                let ty = self.get_param_type(p, info);
+                format!("{}: {}", name, ty)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// パラメータの型を取得
+    fn get_param_type(&mut self, param: &MacroParam, info: &MacroInferInfo) -> String {
+        let param_name = param.name;
+
+        // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
+        if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param_name) {
+            for expr_id in expr_ids {
+                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                    if let Some(first) = constraints.first() {
+                        return self.type_repr_to_rust(&first.ty);
+                    }
+                }
+            }
+        }
+
+        // 方法2: 従来の方法（MacroParam の ExprId）- フォールバック
+        let expr_id = param.expr_id();
+        if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
+            if let Some(first) = constraints.first() {
+                return self.type_repr_to_rust(&first.ty);
+            }
+        }
+
+        self.unknown_marker().to_string()
+    }
+
+    /// 戻り値の型を取得
+    fn get_return_type(&mut self, info: &MacroInferInfo) -> String {
+        match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                if let Some(constraints) = info.type_env.expr_constraints.get(&expr.id) {
+                    if let Some(first) = constraints.first() {
+                        return self.type_repr_to_rust(&first.ty);
+                    }
+                }
+                self.unknown_marker().to_string()
+            }
+            ParseResult::Statement(_) => "()".to_string(),
+            ParseResult::Unparseable(_) => "()".to_string(),
+        }
+    }
+
+    /// TypeRepr を Rust 型文字列に変換
+    fn type_repr_to_rust(&self, ty: &crate::type_repr::TypeRepr) -> String {
+        ty.to_rust_string(self.interner)
+    }
+
+    /// 式を Rust コードに変換
+    fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                self.interner.get(*name).to_string()
+            }
+            ExprKind::IntLit(n) => {
+                format!("{}", n)
+            }
+            ExprKind::UIntLit(n) => {
+                format!("{}u64", n)
+            }
+            ExprKind::FloatLit(f) => {
+                format!("{}", f)
+            }
+            ExprKind::CharLit(c) => {
+                format!("'{}'", escape_char(*c))
+            }
+            ExprKind::StringLit(s) => {
+                format!("c\"{}\"", escape_string(s))
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let l = self.expr_to_rust(lhs, info);
+                let r = self.expr_to_rust(rhs, info);
+                format!("({} {} {})", l, bin_op_to_rust(*op), r)
+            }
+            ExprKind::Call { func, args } => {
+                let f = self.expr_to_rust(func, info);
+                let a: Vec<_> = args.iter()
+                    .map(|a| self.expr_to_rust(a, info))
+                    .collect();
+                format!("{}({})", f, a.join(", "))
+            }
+            ExprKind::Member { expr: base, member } => {
+                let e = self.expr_to_rust(base, info);
+                let m = self.interner.get(*member);
+                format!("({}).{}", e, m)
+            }
+            ExprKind::PtrMember { expr: base, member } => {
+                let e = self.expr_to_rust(base, info);
+                let m = self.interner.get(*member);
+                format!("(*{}).{}", e, m)
+            }
+            ExprKind::Index { expr: base, index } => {
+                let b = self.expr_to_rust(base, info);
+                let i = self.expr_to_rust(index, info);
+                format!("(*{}.offset({} as isize))", b, i)
+            }
+            ExprKind::Cast { type_name, expr: inner } => {
+                let e = self.expr_to_rust(inner, info);
+                let t = self.type_name_to_rust(type_name);
+                format!("({} as {})", e, t)
+            }
+            ExprKind::Deref(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("(*{})", e)
+            }
+            ExprKind::AddrOf(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("(&mut {})", e)
+            }
+            ExprKind::PreInc(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("{{ {} += 1; {} }}", e, e)
+            }
+            ExprKind::PreDec(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("{{ {} -= 1; {} }}", e, e)
+            }
+            ExprKind::PostInc(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+            }
+            ExprKind::PostDec(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+            }
+            ExprKind::UnaryPlus(inner) => {
+                self.expr_to_rust(inner, info)
+            }
+            ExprKind::UnaryMinus(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("(-{})", e)
+            }
+            ExprKind::BitNot(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("(!{})", e)
+            }
+            ExprKind::LogNot(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("(if {} {{ 0 }} else {{ 1 }})", e)
+            }
+            ExprKind::Sizeof(inner) => {
+                let e = self.expr_to_rust(inner, info);
+                format!("std::mem::size_of_val(&{})", e)
+            }
+            ExprKind::SizeofType(type_name) => {
+                let t = self.type_name_to_rust(type_name);
+                format!("std::mem::size_of::<{}>()", t)
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                let c = self.expr_to_rust(cond, info);
+                let t = self.expr_to_rust(then_expr, info);
+                let e = self.expr_to_rust(else_expr, info);
+                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                let l = self.expr_to_rust(lhs, info);
+                let r = self.expr_to_rust(rhs, info);
+                format!("{{ {}; {} }}", l, r)
+            }
+            ExprKind::Assign { op, lhs, rhs } => {
+                let l = self.expr_to_rust(lhs, info);
+                let r = self.expr_to_rust(rhs, info);
+                match op {
+                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                }
+            }
+            _ => {
+                self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
+            }
+        }
+    }
+
+    /// 文を Rust コードに変換
+    fn stmt_to_rust(&mut self, stmt: &Stmt, info: &MacroInferInfo) -> String {
+        match stmt {
+            Stmt::Expr(Some(expr), _) => {
+                format!("{};", self.expr_to_rust(expr, info))
+            }
+            Stmt::Expr(None, _) => ";".to_string(),
+            Stmt::Return(Some(expr), _) => {
+                format!("return {};", self.expr_to_rust(expr, info))
+            }
+            Stmt::Return(None, _) => "return;".to_string(),
+            _ => self.todo_marker("stmt")
+        }
+    }
+
+    /// TypeName を Rust 型文字列に変換
+    fn type_name_to_rust(&mut self, type_name: &crate::ast::TypeName) -> String {
+        // 簡易実装: typedef 名があればそれを使用
+        for spec in &type_name.specs.type_specs {
+            if let crate::ast::TypeSpec::TypedefName(name) = spec {
+                return self.interner.get(*name).to_string();
+            }
+        }
+        self.type_marker().to_string()
+    }
+
+    /// DeclSpecs を Rust 型文字列に変換
+    fn decl_specs_to_rust(&mut self, specs: &DeclSpecs) -> String {
+        // typedef 名を優先
+        for spec in &specs.type_specs {
+            if let TypeSpec::TypedefName(name) = spec {
+                return self.interner.get(*name).to_string();
+            }
+        }
+
+        // 基本型をチェック
+        let mut is_void = false;
+        let mut is_char = false;
+        let mut is_int = false;
+        let mut is_short = false;
+        let mut is_long = 0usize;
+        let mut is_unsigned = false;
+        let mut is_float = false;
+        let mut is_double = false;
+
+        for spec in &specs.type_specs {
+            match spec {
+                TypeSpec::Void => is_void = true,
+                TypeSpec::Char => is_char = true,
+                TypeSpec::Int => is_int = true,
+                TypeSpec::Short => is_short = true,
+                TypeSpec::Long => is_long += 1,
+                TypeSpec::Unsigned => is_unsigned = true,
+                TypeSpec::Signed => {}
+                TypeSpec::Float => is_float = true,
+                TypeSpec::Double => is_double = true,
+                TypeSpec::Bool => return "bool".to_string(),
+                TypeSpec::Struct(spec) => {
+                    if let Some(n) = spec.name {
+                        return self.interner.get(n).to_string();
+                    } else {
+                        return self.type_marker().to_string();
+                    }
+                }
+                TypeSpec::Union(spec) => {
+                    if let Some(n) = spec.name {
+                        return self.interner.get(n).to_string();
+                    } else {
+                        return self.type_marker().to_string();
+                    }
+                }
+                TypeSpec::Enum(spec) => {
+                    if let Some(n) = spec.name {
+                        return self.interner.get(n).to_string();
+                    } else {
+                        return "c_int".to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if is_void {
+            return "()".to_string();
+        }
+
+        if is_float {
+            return "c_float".to_string();
+        }
+
+        if is_double {
+            return if is_long > 0 { "c_longdouble".to_string() } else { "c_double".to_string() };
+        }
+
+        if is_char {
+            return if is_unsigned { "c_uchar".to_string() } else { "c_char".to_string() };
+        }
+
+        if is_short {
+            return if is_unsigned { "c_ushort".to_string() } else { "c_short".to_string() };
+        }
+
+        if is_long >= 2 {
+            return if is_unsigned { "c_ulonglong".to_string() } else { "c_longlong".to_string() };
+        }
+
+        if is_long == 1 {
+            return if is_unsigned { "c_ulong".to_string() } else { "c_long".to_string() };
+        }
+
+        if is_int || is_unsigned {
+            return if is_unsigned { "c_uint".to_string() } else { "c_int".to_string() };
+        }
+
+        self.type_marker().to_string()
+    }
+
+    /// 派生型を型に適用
+    fn apply_derived_to_type(&self, base: &str, derived: &[DerivedDecl]) -> String {
+        let mut result = base.to_string();
+        for d in derived.iter().rev() {
+            match d {
+                DerivedDecl::Pointer(quals) => {
+                    if quals.is_const {
+                        result = format!("*const {}", result);
+                    } else {
+                        result = format!("*mut {}", result);
+                    }
+                }
+                DerivedDecl::Array(arr) => {
+                    if let Some(ref size_expr) = arr.size {
+                        // 定数サイズ配列
+                        if let ExprKind::IntLit(n) = &size_expr.kind {
+                            result = format!("[{}; {}]", result, n);
+                        } else {
+                            result = format!("*mut {}", result);
+                        }
+                    } else {
+                        result = format!("*mut {}", result);
+                    }
+                }
+                DerivedDecl::Function(_) => {
+                    // 関数ポインタは複雑なので簡易実装
+                    result = format!("/* fn */ {}", result);
+                }
+            }
+        }
+        result
+    }
+}
+
+impl<'a, W: Write> CodegenDriver<'a, W> {
+    /// 新しいコード生成ドライバを作成
     pub fn new(writer: W, interner: &'a StringInterner, config: CodegenConfig) -> Self {
         Self {
             writer,
@@ -546,8 +1019,25 @@ impl<'a, W: Write> RustCodegen<'a, W> {
             let status = self.get_macro_status(info);
             match status {
                 GenerateStatus::Success => {
-                    self.generate_macro_success(info)?;
-                    self.stats.macros_success += 1;
+                    // 新しい RustCodegen を使ってマクロを生成
+                    let codegen = RustCodegen::new(self.interner);
+                    let generated = codegen.generate_macro(info);
+
+                    if generated.is_complete() {
+                        // 完全な生成：そのまま出力
+                        write!(self.writer, "{}", generated.code)?;
+                        self.stats.macros_success += 1;
+                    } else {
+                        // 不完全な生成：コメントアウトして出力
+                        let name_str = self.interner.get(info.name);
+                        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+                        writeln!(self.writer, "// [CODEGEN_INCOMPLETE] {}{} - macro function", name_str, thx_info)?;
+                        for line in generated.code.lines() {
+                            writeln!(self.writer, "// {}", line)?;
+                        }
+                        writeln!(self.writer)?;
+                        self.stats.macros_type_incomplete += 1;
+                    }
                 }
                 GenerateStatus::ParseFailed => {
                     self.generate_macro_parse_failed(info)?;
@@ -595,65 +1085,6 @@ impl<'a, W: Write> RustCodegen<'a, W> {
                 }
             }
         }
-    }
-
-    /// 成功したマクロを生成
-    fn generate_macro_success(&mut self, info: &MacroInferInfo) -> io::Result<()> {
-        let name_str = self.interner.get(info.name);
-
-        // パラメータリストを構築（型情報付き）
-        let params_with_types = self.build_param_list(info);
-
-        // 戻り値の型を取得
-        let return_type = self.get_return_type(info);
-
-        // THX 依存の場合は my_perl パラメータを追加
-        let thx_param = if info.is_thx_dependent {
-            "my_perl: *mut PerlInterpreter"
-        } else {
-            ""
-        };
-
-        // 関数シグネチャ
-        let params_str = if thx_param.is_empty() {
-            params_with_types.clone()
-        } else if params_with_types.is_empty() {
-            thx_param.to_string()
-        } else {
-            format!("{}, {}", thx_param, params_with_types)
-        };
-
-        // ドキュメントコメント
-        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
-        writeln!(self.writer, "/// {}{} - macro function", name_str, thx_info)?;
-        writeln!(self.writer, "#[inline]")?;
-
-        // 関数定義
-        writeln!(self.writer, "pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type)?;
-
-        // 関数本体
-        match &info.parse_result {
-            ParseResult::Expression(expr) => {
-                let rust_expr = self.expr_to_rust(expr, info);
-                writeln!(self.writer, "    {}", rust_expr)?;
-            }
-            ParseResult::Statement(block_items) => {
-                for item in block_items {
-                    if let BlockItem::Stmt(stmt) = item {
-                        let rust_stmt = self.stmt_to_rust(stmt, info);
-                        writeln!(self.writer, "    {}", rust_stmt)?;
-                    }
-                }
-            }
-            ParseResult::Unparseable(_) => {
-                writeln!(self.writer, "    unimplemented!()")?;
-            }
-        }
-
-        writeln!(self.writer, "}}")?;
-        writeln!(self.writer)?;
-
-        Ok(())
     }
 
     /// パラメータリストを構築（型情報付き）

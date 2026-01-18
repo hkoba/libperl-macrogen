@@ -74,7 +74,7 @@ pub use type_repr::{
     IntSize as TypeReprIntSize, RustPrimitiveKind, RustTypeRepr, RustTypeSource, TypeRepr,
 };
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
-pub use rust_codegen::{CodegenConfig, CodegenStats, GenerateStatus, RustCodegen};
+pub use rust_codegen::{CodegenConfig, CodegenDriver, CodegenStats, GeneratedCode, GenerateStatus, RustCodegen};
 
 #[cfg(test)]
 mod tests {

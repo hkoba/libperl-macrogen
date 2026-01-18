@@ -13,7 +13,7 @@ use libperl_macrogen::{
     get_default_target_dir, get_perl_config,
     resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor,
     ApidocDict, BlockItem, CodegenConfig, CompileError, FieldsDict, FileId,
-    PPConfig, ParseResult, Parser, Preprocessor, RustCodegen, RustDeclDict, SexpPrinter,
+    PPConfig, ParseResult, Parser, Preprocessor, CodegenDriver, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
@@ -532,7 +532,7 @@ fn run_gen_rust(
     // まずバッファに生成
     let mut buffer = Vec::new();
     let stats = {
-        let mut codegen = RustCodegen::new(&mut buffer, result.preprocessor.interner(), config);
+        let mut codegen = CodegenDriver::new(&mut buffer, result.preprocessor.interner(), config);
         codegen.generate(&result)?;
         codegen.stats().clone()
     };
