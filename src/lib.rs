@@ -59,7 +59,8 @@ pub use perl_config::{
     PerlConfig, PerlConfigError,
 };
 pub use preprocessor::{
-    CallbackPair, MacroCalledCallback, MacroCallWatcher, MacroDefCallback, PPConfig, Preprocessor,
+    CallbackPair, CommentCallback, MacroCalledCallback, MacroCallWatcher, MacroDefCallback,
+    PPConfig, Preprocessor,
 };
 pub use thx_collector::ThxCollector;
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};

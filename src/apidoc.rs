@@ -13,8 +13,9 @@ use crate::perl_config::{get_perl_version, PerlConfigError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::macro_def::MacroDef;
-use crate::preprocessor::MacroDefCallback;
+use crate::preprocessor::CommentCallback;
+use crate::source::FileId;
+use crate::token::Comment;
 
 /// 引数のNULL許容性
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -819,7 +820,10 @@ pub struct ApidocStats {
     pub api_count: usize,
 }
 
-/// MacroDef.leading_comments から apidoc を抽出するコレクター
+/// コメントから apidoc を抽出するコレクター
+///
+/// Preprocessor の CommentCallback として登録し、
+/// `=for apidoc` を含むコメントを見つけたら辞書に登録する。
 pub struct ApidocCollector {
     entries: HashMap<String, ApidocEntry>,
 }
@@ -856,13 +860,13 @@ impl Default for ApidocCollector {
     }
 }
 
-impl MacroDefCallback for ApidocCollector {
-    fn on_macro_defined(&mut self, def: &MacroDef) {
-        for comment in &def.leading_comments {
-            for line in comment.text.lines() {
-                if let Some(entry) = ApidocEntry::parse_apidoc_line(line) {
-                    self.entries.insert(entry.name.clone(), entry);
-                }
+impl CommentCallback for ApidocCollector {
+    fn on_comment(&mut self, comment: &Comment, _file_id: FileId, _is_target: bool) {
+        // コメント内の各行を処理
+        // （is_target チェックは呼び出し側で行われるため、ここでは常に処理）
+        for line in comment.text.lines() {
+            if let Some(entry) = ApidocEntry::parse_apidoc_line(line) {
+                self.entries.insert(entry.name.clone(), entry);
             }
         }
     }

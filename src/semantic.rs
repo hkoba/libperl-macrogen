@@ -1261,26 +1261,29 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         // apidoc からマクロ情報を取得
+        let macro_name_str = self.interner.get(macro_name);
         if let Some(apidoc) = self.apidoc {
-            let macro_name_str = self.interner.get(macro_name);
             if let Some(entry) = apidoc.get(macro_name_str) {
                 // パラメータをシンボルとして登録
                 for (i, &param_name) in params.iter().enumerate() {
                     if let Some(apidoc_arg) = entry.args.get(i) {
                         // parser で型文字列をパース
-                        if let Ok(type_name) = parse_type_from_string(
+                        match parse_type_from_string(
                             &apidoc_arg.ty,
                             self.interner,
                             files,
                             typedefs,
                         ) {
-                            let ty = self.resolve_type_name(&type_name);
-                            self.define_symbol(Symbol {
-                                name: param_name,
-                                ty,
-                                loc: SourceLocation::default(),
-                                kind: SymbolKind::Variable,
-                            });
+                            Ok(type_name) => {
+                                let ty = self.resolve_type_name(&type_name);
+                                self.define_symbol(Symbol {
+                                    name: param_name,
+                                    ty,
+                                    loc: SourceLocation::default(),
+                                    kind: SymbolKind::Variable,
+                                });
+                            }
+                            Err(_) => {}
                         }
                     }
                 }
@@ -1462,6 +1465,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 // シンボルテーブルから型を取得
                 if let Some(sym) = self.lookup_symbol(*name) {
                     let ty_str = sym.ty.display(self.interner);
+                    if name_str == "c" {
+                        eprintln!("DEBUG lookup 'c': found symbol with ty={:?}, ty_str='{}'", sym.ty, ty_str);
+                    }
                     // シンボル参照を示す TypeRepr を作成
                     // resolved_type は文字列からパースした C 型
                     let resolved = TypeRepr::from_apidoc_string(&ty_str, self.interner);

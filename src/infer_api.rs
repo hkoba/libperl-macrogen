@@ -232,7 +232,7 @@ pub fn run_inference_with_preprocessor(
     let mut fields_dict = FieldsDict::new();
 
     // ApidocCollector を Preprocessor に設定
-    pp.set_macro_def_callback(Box::new(ApidocCollector::new()));
+    pp.set_comment_callback(Box::new(ApidocCollector::new()));
 
     // _SV_HEAD マクロ呼び出しを監視
     let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
@@ -285,7 +285,7 @@ pub fn run_inference_with_preprocessor(
     let typedefs = parser.typedefs().clone();
 
     // コールバックを取り出してダウンキャスト
-    let callback = pp.take_macro_def_callback().expect("callback should exist");
+    let callback = pp.take_comment_callback().expect("callback should exist");
     let apidoc_collector = callback
         .into_any()
         .downcast::<ApidocCollector>()

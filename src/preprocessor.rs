@@ -152,6 +152,22 @@ impl MacroCalledCallback for MacroCallWatcher {
     }
 }
 
+/// コメント読み込み時のコールバックトレイト
+///
+/// Preprocessor がコメントを読み込んだときに呼び出される。
+/// apidoc の収集など、コメント内容に基づく処理に使用する。
+pub trait CommentCallback {
+    /// コメントが読み込まれたときに呼ばれる
+    ///
+    /// - `comment`: コメント内容
+    /// - `file_id`: ファイルID
+    /// - `is_target`: このファイルが解析対象（samples/wrapper.h からの include）かどうか
+    fn on_comment(&mut self, comment: &Comment, file_id: FileId, is_target: bool);
+
+    /// ダウンキャスト用に Any に変換
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
 /// インクルードパスの種類
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncludeKind {
@@ -438,6 +454,8 @@ pub struct Preprocessor {
     macro_called_callbacks: HashMap<InternedStr, Box<dyn MacroCalledCallback>>,
     /// マーカーで囲むマクロの辞書（assert 等の特殊処理用）
     wrapped_macros: HashSet<InternedStr>,
+    /// コメント読み込み時のコールバック
+    comment_callback: Option<Box<dyn CommentCallback>>,
 }
 
 impl Preprocessor {
@@ -459,6 +477,7 @@ impl Preprocessor {
             macro_def_callback: None,
             macro_called_callbacks: HashMap::new(),
             wrapped_macros: HashSet::new(),
+            comment_callback: None,
         };
 
         // 事前定義マクロを登録
@@ -475,6 +494,16 @@ impl Preprocessor {
     /// マクロ定義コールバックを取得（所有権を移動）
     pub fn take_macro_def_callback(&mut self) -> Option<Box<dyn MacroDefCallback>> {
         self.macro_def_callback.take()
+    }
+
+    /// コメントコールバックを設定
+    pub fn set_comment_callback(&mut self, callback: Box<dyn CommentCallback>) {
+        self.comment_callback = Some(callback);
+    }
+
+    /// コメントコールバックを取得（所有権を移動）
+    pub fn take_comment_callback(&mut self) -> Option<Box<dyn CommentCallback>> {
+        self.comment_callback.take()
     }
 
     /// 特定マクロの呼び出しコールバックを設定
@@ -697,48 +726,79 @@ impl Preprocessor {
 
     /// 行コメントをスキャン
     fn scan_line_comment(&mut self) -> Comment {
-        let source = self.sources.last_mut().unwrap();
-        let loc = source.current_location();
-        source.advance(); // /
-        source.advance(); // /
+        let (text, loc, file_id) = {
+            let source = self.sources.last_mut().unwrap();
+            let loc = source.current_location();
+            let file_id = source.file_id;
+            source.advance(); // /
+            source.advance(); // /
 
-        let start = source.pos;
-        while source.peek().is_some_and(|c| c != b'\n') {
-            source.advance();
+            let start = source.pos;
+            while source.peek().is_some_and(|c| c != b'\n') {
+                source.advance();
+            }
+            let text = String::from_utf8_lossy(&source.source[start..source.pos]).to_string();
+            (text, loc, file_id)
+        };
+
+        let comment = Comment::new(crate::token::CommentKind::Line, text, loc);
+        let is_target = self.is_file_in_target(file_id);
+
+        // コールバック呼び出し（is_target なファイルのみ）
+        if is_target {
+            if let Some(cb) = &mut self.comment_callback {
+                cb.on_comment(&comment, file_id, is_target);
+            }
         }
-        let text = String::from_utf8_lossy(&source.source[start..source.pos]).to_string();
 
-        Comment::new(crate::token::CommentKind::Line, text, loc)
+        comment
     }
 
     /// ブロックコメントをスキャン
     fn scan_block_comment(&mut self) -> Result<Comment, CompileError> {
-        let source = self.sources.last_mut().unwrap();
-        let loc = source.current_location();
-        source.advance(); // /
-        source.advance(); // *
+        // まずソースを借用して必要な情報を取得
+        let result = {
+            let source = self.sources.last_mut().unwrap();
+            let loc = source.current_location();
+            let file_id = source.file_id;
+            source.advance(); // /
+            source.advance(); // *
 
-        let start = source.pos;
-        loop {
-            match (source.peek(), source.peek_n(1)) {
-                (Some(b'*'), Some(b'/')) => {
-                    let end = source.pos;
-                    source.advance(); // *
-                    source.advance(); // /
-                    let text = String::from_utf8_lossy(&source.source[start..end]).to_string();
-                    return Ok(Comment::new(crate::token::CommentKind::Block, text, loc));
-                }
-                (Some(_), _) => {
-                    source.advance();
-                }
-                (None, _) => {
-                    return Err(CompileError::Lex {
-                        loc,
-                        kind: crate::error::LexError::UnterminatedComment,
-                    });
+            let start = source.pos;
+            loop {
+                match (source.peek(), source.peek_n(1)) {
+                    (Some(b'*'), Some(b'/')) => {
+                        let end = source.pos;
+                        source.advance(); // *
+                        source.advance(); // /
+                        let text = String::from_utf8_lossy(&source.source[start..end]).to_string();
+                        break Ok((text, loc, file_id));
+                    }
+                    (Some(_), _) => {
+                        source.advance();
+                    }
+                    (None, _) => {
+                        break Err(CompileError::Lex {
+                            loc,
+                            kind: crate::error::LexError::UnterminatedComment,
+                        });
+                    }
                 }
             }
+        };
+
+        let (text, loc, file_id) = result?;
+        let comment = Comment::new(crate::token::CommentKind::Block, text, loc);
+        let is_target = self.is_file_in_target(file_id);
+
+        // コールバック呼び出し（is_target なファイルのみ）
+        if is_target {
+            if let Some(cb) = &mut self.comment_callback {
+                cb.on_comment(&comment, file_id, is_target);
+            }
         }
+
+        Ok(comment)
     }
 
     /// トークン種別をスキャン
