@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssignOp, BinOp, BlockItem, CompoundStmt, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, ParamDecl, Stmt, TypeSpec};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, ParamDecl, Stmt, TypeSpec};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -67,6 +67,20 @@ fn escape_char(c: u8) -> String {
 /// 文字列をエスケープ
 fn escape_string(s: &[u8]) -> String {
     s.iter().map(|&c| escape_char(c)).collect()
+}
+
+/// 式がブール型を返すかどうかを判定（フリー関数版）
+///
+/// 注: LogNot は含めない。現在の LogNot -> Rust 変換は
+/// `(if x { 0 } else { 1 })` という int 値を返すため。
+fn is_boolean_expr_kind(kind: &ExprKind) -> bool {
+    match kind {
+        ExprKind::Binary { op, .. } => matches!(op,
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
+            BinOp::Eq | BinOp::Ne | BinOp::LogAnd | BinOp::LogOr
+        ),
+        _ => false,
+    }
 }
 
 /// コード生成の設定
@@ -323,6 +337,11 @@ impl<'a> RustCodegen<'a> {
         ty.to_rust_string(self.interner)
     }
 
+    /// 式がブール型を返すかどうかを判定
+    fn is_boolean_expr(&self, expr: &Expr) -> bool {
+        is_boolean_expr_kind(&expr.kind)
+    }
+
     /// 式を Rust コードに変換
     fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
         match &expr.kind {
@@ -440,6 +459,18 @@ impl<'a> RustCodegen<'a> {
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
                     _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                }
+            }
+            ExprKind::Assert { kind, condition } => {
+                let cond = self.expr_to_rust(condition, info);
+                let assert_expr = if self.is_boolean_expr(condition) {
+                    format!("assert!({})", cond)
+                } else {
+                    format!("assert!(({}) != 0)", cond)
+                };
+                match kind {
+                    AssertKind::Assert => assert_expr,
+                    AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
             _ => {
@@ -845,6 +876,18 @@ impl<'a> RustCodegen<'a> {
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
                     _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                }
+            }
+            ExprKind::Assert { kind, condition } => {
+                let cond = self.expr_to_rust_inline(condition);
+                let assert_expr = if self.is_boolean_expr(condition) {
+                    format!("assert!({})", cond)
+                } else {
+                    format!("assert!(({}) != 0)", cond)
+                };
+                match kind {
+                    AssertKind::Assert => assert_expr,
+                    AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
@@ -1266,6 +1309,18 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
                     _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                }
+            }
+            ExprKind::Assert { kind, condition } => {
+                let cond = self.expr_to_rust_inline(condition);
+                let assert_expr = if is_boolean_expr_kind(&condition.kind) {
+                    format!("assert!({})", cond)
+                } else {
+                    format!("assert!(({}) != 0)", cond)
+                };
+                match kind {
+                    AssertKind::Assert => assert_expr,
+                    AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
             _ => format!("/* TODO: {:?} */", std::mem::discriminant(&expr.kind))
