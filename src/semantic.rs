@@ -1088,7 +1088,8 @@ impl<'a> SemanticAnalyzer<'a> {
     fn lookup_field_type_from_dict(&self, field: InternedStr) -> Type {
         if let Some(fields_dict) = self.fields_dict {
             if let Some(field_type) = fields_dict.get_unique_field_type(field) {
-                return self.parse_rust_type_string(&field_type.rust_type);
+                let type_str = field_type.type_repr.to_rust_string(self.interner);
+                return self.parse_rust_type_string(&type_str);
             }
         }
         Type::Unknown
@@ -1615,19 +1616,15 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 // sv_u フィールドアクセスの特殊処理
                 // base が ->sv_u パターンの場合、sv_u 辞書から型を解決
-                let member_ty_str = if self.is_sv_u_access(base) {
+                // それ以外は FieldsDict から TypeRepr を直接取得
+                let field_type = if self.is_sv_u_access(base) {
+                    // sv_u フィールドは C 形式の型文字列で格納されている
                     self.lookup_sv_u_field_type(*member)
-                        .unwrap_or_else(|| "<unknown>".to_string())
+                        .map(|c_type| Box::new(TypeRepr::from_apidoc_string(&c_type, self.interner)))
                 } else {
                     // 直接アクセスの場合、base_ty は構造体名そのもの
-                    self.lookup_field_type_by_name(&base_ty, *member)
-                        .unwrap_or_else(|| "<unknown>".to_string())
-                };
-
-                let field_type = if member_ty_str != "<unknown>" {
-                    Some(Box::new(TypeRepr::from_apidoc_string(&member_ty_str, self.interner)))
-                } else {
-                    None
+                    self.lookup_field_type_repr(&base_ty, *member)
+                        .map(Box::new)
                 };
 
                 type_env.add_constraint(TypeEnvConstraint::new(
@@ -1648,24 +1645,21 @@ impl<'a> SemanticAnalyzer<'a> {
                 // ベース型からメンバー型を推論
                 let base_ty = self.get_expr_type_str(base.id, type_env);
                 let member_name = self.interner.get(*member);
-                let (member_ty_str, used_consistent_type) = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
-                    // ベース型が既知の場合：従来通り
-                    let ty = self.lookup_field_type_by_name(struct_name, *member)
-                        .unwrap_or_else(|| "<unknown>".to_string());
+
+                // フィールド型を TypeRepr として直接取得（文字列変換を介さない）
+                let (field_type, used_consistent_type) = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
+                    // ベース型が既知の場合：構造体名でルックアップ
+                    let ty = self.lookup_field_type_repr(struct_name, *member)
+                        .map(Box::new);
                     (ty, false)
                 } else if let Some(fields_dict) = self.fields_dict {
                     // ベース型が不明な場合：一致型があればそれを使用（O(1)）
                     let ty = fields_dict.get_consistent_field_type(*member)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string());
+                        .cloned()
+                        .map(Box::new);
                     (ty, true)
                 } else {
-                    ("<unknown>".to_string(), false)
-                };
-                let field_type = if member_ty_str != "<unknown>" {
-                    Some(Box::new(TypeRepr::from_apidoc_string(&member_ty_str, self.interner)))
-                } else {
-                    None
+                    (None, false)
                 };
 
                 type_env.add_constraint(TypeEnvConstraint::new(
@@ -1912,10 +1906,11 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     /// 構造体メンバーの型を取得（FieldsDict から、構造体名は文字列）
-    fn lookup_field_type_by_name(&self, struct_name: &str, field_name: InternedStr) -> Option<String> {
+    /// 構造体名とフィールド名から TypeRepr を検索
+    fn lookup_field_type_repr(&self, struct_name: &str, field_name: InternedStr) -> Option<TypeRepr> {
         let fields_dict = self.fields_dict?;
         let field_type = fields_dict.get_field_type_by_name(struct_name, field_name, self.interner)?;
-        Some(field_type.rust_type.clone())
+        Some(field_type.type_repr.clone())
     }
 
     /// base が ->sv_u アクセスかどうかを判定

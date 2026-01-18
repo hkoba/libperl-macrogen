@@ -65,6 +65,8 @@ pub enum RustTypeSource {
     FnReturn { func_name: String },
     /// bindings.rs の定数
     Const { const_name: String },
+    /// 文字列からパースされた型（具体的な出所は不明）
+    Parsed { raw: String },
 }
 
 // ============================================================================
@@ -760,6 +762,38 @@ impl TypeRepr {
             specs,
             derived,
             source: CTypeSource::Apidoc { raw: s.to_string() },
+        }
+    }
+
+    /// Rust 形式の型文字列から TypeRepr を作成
+    ///
+    /// `*mut T`, `*const T`, `c_int` などの Rust 形式の型文字列をパースする。
+    /// rust_decl.rs からの型情報の読み込みに使用する。
+    pub fn from_rust_string(s: &str) -> Self {
+        let repr = RustTypeRepr::from_type_string(s);
+        TypeRepr::RustType {
+            repr,
+            source: RustTypeSource::Parsed {
+                raw: s.to_string(),
+            },
+        }
+    }
+
+    /// DeclSpecs と Declarator から TypeRepr を作成
+    ///
+    /// C ヘッダーのパース結果から直接 TypeRepr を生成する。
+    /// fields_dict.rs でのフィールド型収集に使用する。
+    pub fn from_decl(
+        specs: &crate::ast::DeclSpecs,
+        declarator: &crate::ast::Declarator,
+        _interner: &crate::intern::StringInterner,
+    ) -> Self {
+        let c_specs = CTypeSpecs::from_decl_specs(specs, _interner);
+        let derived = CDerivedType::from_derived_decls(&declarator.derived);
+        TypeRepr::CType {
+            specs: c_specs,
+            derived,
+            source: CTypeSource::Header,
         }
     }
 

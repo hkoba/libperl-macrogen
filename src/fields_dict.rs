@@ -7,12 +7,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StorageClass, StructSpec, TypeSpec};
 use crate::intern::{InternedStr, StringInterner};
+use crate::type_repr::TypeRepr;
 
 /// フィールドの型情報
 #[derive(Debug, Clone)]
 pub struct FieldType {
-    /// Rust言語での型表現
-    pub rust_type: String,
+    /// 型情報（構造化された表現）
+    pub type_repr: TypeRepr,
 }
 
 /// フィールド名から構造体名へのマッピング
@@ -26,7 +27,7 @@ pub struct FieldsDict {
     /// typedef名 -> 構造体名のマッピング (例: XPV -> xpv)
     typedef_to_struct: HashMap<InternedStr, InternedStr>,
     /// 一致型キャッシュ: フィールド名 -> 一致型（全バリアントで型が同じ場合のみ Some）
-    consistent_type_cache: HashMap<InternedStr, Option<String>>,
+    consistent_type_cache: HashMap<InternedStr, Option<TypeRepr>>,
     /// SV ファミリーメンバー（_SV_HEAD マクロを使用する構造体）
     /// 動的に検出される
     sv_family_members: HashSet<InternedStr>,
@@ -160,10 +161,10 @@ impl FieldsDict {
                             .insert(struct_name);
 
                         // フィールド型の収集
-                        if let Some(rust_type) = self.extract_field_type(&member.specs, declarator, interner) {
+                        if let Some(type_repr) = self.extract_field_type(&member.specs, declarator, interner) {
                             self.field_types.insert(
                                 (struct_name, field_name),
-                                FieldType { rust_type },
+                                FieldType { type_repr },
                             );
                         }
                     }
@@ -253,113 +254,10 @@ impl FieldsDict {
         None
     }
 
-    /// DeclSpecs と Declarator からフィールドの Rust 型を抽出
-    fn extract_field_type(&self, specs: &DeclSpecs, declarator: &Declarator, interner: &StringInterner) -> Option<String> {
-        // 基本型を取得
-        let base_type = self.extract_base_type(specs, interner)?;
-
-        // ポインタ等の派生型を適用
-        let full_type = self.apply_derived_decls(&base_type, &declarator.derived, &specs.qualifiers);
-
-        Some(full_type)
-    }
-
-    /// DeclSpecs から基本型を抽出
-    fn extract_base_type(&self, specs: &DeclSpecs, interner: &StringInterner) -> Option<String> {
-        let mut has_signed = false;
-        let mut has_unsigned = false;
-        let mut has_short = false;
-        let mut has_long = 0u8;
-        let mut base_type: Option<String> = None;
-
-        for type_spec in &specs.type_specs {
-            match type_spec {
-                TypeSpec::Void => base_type = Some("()".to_string()),
-                TypeSpec::Char => base_type = Some("c_char".to_string()),
-                TypeSpec::Short => has_short = true,
-                TypeSpec::Int => {
-                    if base_type.is_none() {
-                        base_type = Some("c_int".to_string());
-                    }
-                }
-                TypeSpec::Long => has_long += 1,
-                TypeSpec::Float => base_type = Some("c_float".to_string()),
-                TypeSpec::Double => base_type = Some("c_double".to_string()),
-                TypeSpec::Signed => has_signed = true,
-                TypeSpec::Unsigned => has_unsigned = true,
-                TypeSpec::Bool => base_type = Some("bool".to_string()),
-                TypeSpec::Int128 => {
-                    base_type = Some(if has_unsigned { "u128" } else { "i128" }.to_string())
-                }
-                TypeSpec::Struct(s) | TypeSpec::Union(s) => {
-                    if let Some(name) = s.name {
-                        base_type = Some(interner.get(name).to_string());
-                    }
-                }
-                TypeSpec::Enum(_) => base_type = Some("c_int".to_string()),
-                TypeSpec::TypedefName(name) => {
-                    base_type = Some(interner.get(*name).to_string());
-                }
-                _ => {}
-            }
-        }
-
-        // signed/unsigned と short/long の組み合わせを処理
-        if has_short {
-            base_type = Some(if has_unsigned { "c_ushort" } else { "c_short" }.to_string());
-        } else if has_long >= 2 {
-            base_type = Some(if has_unsigned { "c_ulonglong" } else { "c_longlong" }.to_string());
-        } else if has_long == 1 {
-            if base_type.as_deref() == Some("c_double") {
-                // long double は特別扱い（Rust には直接対応がない）
-                base_type = Some("c_double".to_string());
-            } else {
-                base_type = Some(if has_unsigned { "c_ulong" } else { "c_long" }.to_string());
-            }
-        } else if has_unsigned && base_type.is_none() {
-            base_type = Some("c_uint".to_string());
-        } else if has_signed && base_type.is_none() {
-            base_type = Some("c_int".to_string());
-        } else if has_unsigned && base_type.as_deref() == Some("c_char") {
-            base_type = Some("c_uchar".to_string());
-        } else if has_unsigned && base_type.as_deref() == Some("c_int") {
-            base_type = Some("c_uint".to_string());
-        }
-
-        base_type
-    }
-
-    /// 派生型（ポインタ、配列など）を適用
-    fn apply_derived_decls(
-        &self,
-        base_type: &str,
-        derived: &[DerivedDecl],
-        _qualifiers: &crate::ast::TypeQualifiers,
-    ) -> String {
-        let mut result = base_type.to_string();
-
-        // 派生宣言子は逆順に適用（内側から外側へ）
-        for decl in derived.iter().rev() {
-            match decl {
-                DerivedDecl::Pointer(quals) => {
-                    if quals.is_const {
-                        result = format!("*const {}", result);
-                    } else {
-                        result = format!("*mut {}", result);
-                    }
-                }
-                DerivedDecl::Array(_) => {
-                    // 配列はポインタとして扱う
-                    result = format!("*mut {}", result);
-                }
-                DerivedDecl::Function(_) => {
-                    // 関数ポインタ（簡略化）
-                    result = "unsafe extern \"C\" fn()".to_string();
-                }
-            }
-        }
-
-        result
+    /// DeclSpecs と Declarator からフィールドの TypeRepr を抽出
+    fn extract_field_type(&self, specs: &DeclSpecs, declarator: &Declarator, interner: &StringInterner) -> Option<TypeRepr> {
+        // TypeRepr::from_decl を使用して構造化された型情報を生成
+        Some(TypeRepr::from_decl(specs, declarator, interner))
     }
 
     /// 一意に構造体を特定できるフィールド名から構造体名を取得
@@ -504,48 +402,58 @@ impl FieldsDict {
     ///
     /// 全フィールドについて、全バリアントで型が一致するかを事前計算する。
     /// パース完了後、型推論前に1回呼び出す。
-    pub fn build_consistent_type_cache(&mut self) {
+    pub fn build_consistent_type_cache(&mut self, interner: &StringInterner) {
         self.consistent_type_cache.clear();
 
-        for (&field_name, structs) in &self.field_to_structs {
-            let consistent_type = self.compute_consistent_type(field_name, structs);
+        // field_to_structs を先にクローンして borrow を分離
+        let field_structs: Vec<_> = self.field_to_structs.iter()
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+
+        for (field_name, structs) in field_structs {
+            let consistent_type = self.compute_consistent_type(field_name, &structs, interner);
             self.consistent_type_cache.insert(field_name, consistent_type);
         }
     }
 
     /// 一致型を計算（内部用）
+    ///
+    /// TypeRepr を保持しつつ、型の比較には to_rust_string() を使用する
+    /// （source が異なっても型が同じなら一致とみなす）
     fn compute_consistent_type(
         &self,
         field_name: InternedStr,
         structs: &HashSet<InternedStr>,
-    ) -> Option<String> {
+        interner: &StringInterner,
+    ) -> Option<TypeRepr> {
         if structs.is_empty() {
             return None;
         }
 
-        let mut first_type: Option<&str> = None;
+        let mut first_type: Option<(&TypeRepr, String)> = None;
 
         for struct_name in structs {
             if let Some(ft) = self.field_types.get(&(*struct_name, field_name)) {
-                match first_type {
-                    None => first_type = Some(&ft.rust_type),
-                    Some(t) if t != ft.rust_type => return None, // 不一致
+                let type_str = ft.type_repr.to_rust_string(interner);
+                match &first_type {
+                    None => first_type = Some((&ft.type_repr, type_str)),
+                    Some((_, first_str)) if first_str != &type_str => return None, // 不一致
                     Some(_) => {} // 一致、続行
                 }
             }
         }
 
-        first_type.map(|s| s.to_string())
+        first_type.map(|(tr, _)| tr.clone())
     }
 
     /// キャッシュから一致型を取得（O(1)）
     ///
     /// フィールドが全バリアントで同じ型を持つ場合、その型を返す。
     /// 型が不一致、またはフィールドが存在しない場合は None。
-    pub fn get_consistent_field_type(&self, field_name: InternedStr) -> Option<&str> {
+    pub fn get_consistent_field_type(&self, field_name: InternedStr) -> Option<&TypeRepr> {
         self.consistent_type_cache
             .get(&field_name)
-            .and_then(|opt| opt.as_deref())
+            .and_then(|opt| opt.as_ref())
     }
 
     // ==================== Dump and Debug ====================
@@ -627,10 +535,28 @@ impl FieldsDict {
         for ((struct_name, field_name), field_type) in entries {
             let struct_str = interner.get(*struct_name);
             let field_str = interner.get(*field_name);
+            let type_str = field_type.type_repr.to_rust_string(interner);
             result.push_str(&format!(
                 "{}.{}: {}\n",
-                struct_str, field_str, field_type.rust_type
+                struct_str, field_str, type_str
             ));
+        }
+
+        result
+    }
+
+    /// typedef マッピング情報をダンプ（デバッグ用）
+    pub fn dump_typedefs(&self, interner: &StringInterner) -> String {
+        let mut result = String::new();
+
+        // typedef 名でソートして出力
+        let mut entries: Vec<_> = self.typedef_to_struct.iter().collect();
+        entries.sort_by_key(|(typedef_name, _)| interner.get(**typedef_name));
+
+        for (typedef_name, struct_name) in entries {
+            let typedef_str = interner.get(*typedef_name);
+            let struct_str = interner.get(*struct_name);
+            result.push_str(&format!("typedef {} = struct {}\n", typedef_str, struct_str));
         }
 
         result

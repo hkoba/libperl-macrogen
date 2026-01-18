@@ -292,7 +292,7 @@ pub fn run_inference_with_preprocessor(
         .expect("callback type mismatch");
 
     // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
-    fields_dict.build_consistent_type_cache();
+    fields_dict.build_consistent_type_cache(pp.interner());
 
     // sv_u フィールド型は parse_each で動的に収集済み
     // （SV ファミリー構造体の sv_u union から自動検出）
