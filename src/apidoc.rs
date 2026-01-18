@@ -534,6 +534,46 @@ impl ApidocDict {
         self.entries.iter().filter(|(_, e)| e.is_macro())
     }
 
+    /// フィルタにマッチするエントリをダンプ（デバッグ用）
+    ///
+    /// filter が空文字列の場合は全エントリを出力。
+    /// filter に文字列が指定された場合は、名前にその文字列を含むエントリのみ出力。
+    pub fn dump_filtered(&self, filter: &str) {
+        let mut names: Vec<_> = self.entries.keys().collect();
+        names.sort();
+
+        for name in names {
+            // フィルタが空でない場合、名前にフィルタ文字列を含むかチェック
+            if !filter.is_empty() && !name.contains(filter) {
+                continue;
+            }
+
+            if let Some(entry) = self.entries.get(name) {
+                eprintln!("{}:", name);
+                eprintln!("  flags: {}", entry.flags.raw);
+                if let Some(ref ret) = entry.return_type {
+                    eprintln!("  return_type: {}", ret);
+                } else {
+                    eprintln!("  return_type: (none)");
+                }
+                eprintln!("  args:");
+                for (i, arg) in entry.args.iter().enumerate() {
+                    eprintln!("    [{}] {} {} ({:?}{})",
+                        i,
+                        arg.ty,
+                        arg.name,
+                        arg.nullability,
+                        if arg.non_zero { ", NZ" } else { "" }
+                    );
+                }
+                if let Some(ref src) = entry.source_file {
+                    eprintln!("  source: {}:{}", src, entry.line_number.unwrap_or(0));
+                }
+                eprintln!();
+            }
+        }
+    }
+
     /// 統計情報を出力
     pub fn stats(&self) -> ApidocStats {
         let mut stats = ApidocStats::default();

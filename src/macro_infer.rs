@@ -17,8 +17,8 @@ use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
 use crate::token::TokenKind;
 use crate::token_expander::TokenExpander;
-#[allow(deprecated)]
-use crate::type_env::{ConstraintSource, TypeConstraint, TypeEnv};
+use crate::type_env::{TypeConstraint, TypeEnv};
+use crate::type_repr::TypeRepr;
 
 // use std::io;
 // use crate::SexpPrinter;
@@ -1032,11 +1032,10 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        #[allow(deprecated)]
-                        info.type_env.add_return_constraint(TypeConstraint::from_legacy(
+                        let type_repr = TypeRepr::from_apidoc_string(return_type, interner);
+                        info.type_env.add_return_constraint(TypeConstraint::new(
                             expr.id,
-                            return_type,
-                            ConstraintSource::Apidoc,
+                            type_repr,
                             format!("return type of macro {}", macro_name_str),
                         ));
                     }
@@ -1350,11 +1349,10 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(def.name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        #[allow(deprecated)]
-                        info.type_env.add_return_constraint(TypeConstraint::from_legacy(
+                        let type_repr = TypeRepr::from_apidoc_string(return_type, interner);
+                        info.type_env.add_return_constraint(TypeConstraint::new(
                             expr.id,
-                            return_type,
-                            ConstraintSource::Apidoc,
+                            type_repr,
                             format!("return type of macro {}", macro_name_str),
                         ));
                     }
@@ -1645,10 +1643,37 @@ impl MacroInferContext {
         loop {
             let candidates = self.get_inference_candidates();
             if candidates.is_empty() {
-                // 残りを全て unknown へ
+                // 残りの未確定マクロにも型推論を実行（apidoc 情報を適用するため）
                 let remaining: Vec<_> = self.unconfirmed.iter().copied().collect();
                 for name in remaining {
-                    self.move_to_unknown(name);
+                    // パラメータを取得
+                    let params: Vec<InternedStr> = macro_table
+                        .get(name)
+                        .map(|def| match &def.kind {
+                            MacroKind::Function { params, .. } => params.clone(),
+                            MacroKind::Object => vec![],
+                        })
+                        .unwrap_or_default();
+
+                    // 型推論を実行（apidoc 型情報を適用）
+                    self.infer_macro_types(
+                        name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs,
+                        &return_types_cache,
+                    );
+
+                    // apidoc から型が確定した場合は confirmed に
+                    let is_confirmed = self.macros.get(&name)
+                        .map(|info| info.get_return_type().is_some())
+                        .unwrap_or(false);
+
+                    if is_confirmed {
+                        if let Some((macro_name, return_type)) = self.get_macro_return_type(name, interner) {
+                            return_types_cache.insert(macro_name, return_type);
+                        }
+                        self.mark_confirmed(name);
+                    } else {
+                        self.move_to_unknown(name);
+                    }
                 }
                 break;
             }

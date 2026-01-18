@@ -132,6 +132,28 @@ impl InferConfig {
     }
 }
 
+/// デバッグ出力オプション
+///
+/// パイプラインの特定の段階でデータ構造をダンプして早期終了するためのオプション。
+#[derive(Debug, Clone, Default)]
+pub struct DebugOptions {
+    /// apidoc マージ後にダンプして終了
+    /// Some(filter) でフィルタ指定（正規表現）、Some("") で全件出力
+    pub dump_apidoc_after_merge: Option<String>,
+}
+
+impl DebugOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// apidoc マージ後にダンプして終了するオプションを設定
+    pub fn dump_apidoc(mut self, filter: impl Into<String>) -> Self {
+        self.dump_apidoc_after_merge = Some(filter.into());
+        self
+    }
+}
+
 /// 統計情報
 #[derive(Debug, Clone, Default)]
 pub struct InferStats {
@@ -211,23 +233,27 @@ pub fn run_macro_inference(config: InferConfig) -> Result<InferResult, InferErro
         config.apidoc_dir.as_deref(),
     )?;
 
-    // 推論を実行
+    // 推論を実行（デバッグオプションなし）
     run_inference_with_preprocessor(
         pp,
         apidoc_path.as_deref(),
         config.bindings_path.as_deref(),
-    )
+        None,
+    ).map(|opt| opt.expect("debug option not used, result should exist"))
 }
 
 /// 既存の Preprocessor を使ってマクロ型推論を実行
 ///
 /// Preprocessor が既に初期化されている場合に使用。
 /// main.rs から呼び出すことを想定。
+///
+/// `debug_opts` が指定され、デバッグダンプで早期終了した場合は `Ok(None)` を返す。
 pub fn run_inference_with_preprocessor(
     mut pp: Preprocessor,
     apidoc_path: Option<&Path>,
     bindings_path: Option<&Path>,
-) -> Result<InferResult, InferError> {
+    debug_opts: Option<&DebugOptions>,
+) -> Result<Option<InferResult>, InferError> {
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
@@ -306,6 +332,14 @@ pub fn run_inference_with_preprocessor(
     let apidoc_from_comments = apidoc_collector.len();
     apidoc_collector.merge_into(&mut apidoc);
 
+    // デバッグ: apidoc マージ後にダンプして早期終了
+    if let Some(opts) = debug_opts {
+        if let Some(filter) = &opts.dump_apidoc_after_merge {
+            apidoc.dump_filtered(filter);
+            return Ok(None);
+        }
+    }
+
     // RustDeclDict をロード
     let rust_decl_dict = if let Some(path) = bindings_path {
         Some(RustDeclDict::parse_file(path)?)
@@ -383,7 +417,7 @@ pub fn run_inference_with_preprocessor(
         thx_dependent_count,
     };
 
-    Ok(InferResult {
+    Ok(Some(InferResult {
         infer_ctx,
         fields_dict,
         inline_fn_dict,
@@ -392,7 +426,7 @@ pub fn run_inference_with_preprocessor(
         typedefs,
         preprocessor: pp,
         stats,
-    })
+    }))
 }
 
 /// 宣言から構造体名を抽出

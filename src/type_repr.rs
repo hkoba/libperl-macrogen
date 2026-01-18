@@ -94,6 +94,8 @@ pub enum CTypeSpecs {
     Enum { name: Option<InternedStr> },
     /// typedef 名
     TypedefName(InternedStr),
+    /// 未解決の typedef 名（interner に登録されていない場合）
+    UnknownTypedef(String),
 }
 
 /// 整数サイズ
@@ -989,6 +991,7 @@ impl CTypeSpecs {
             CTypeSpecs::Enum { name: Some(n) } => format!("enum {}", interner.get(*n)),
             CTypeSpecs::Enum { name: None } => "enum".to_string(),
             CTypeSpecs::TypedefName(n) => interner.get(*n).to_string(),
+            CTypeSpecs::UnknownTypedef(s) => s.clone(),
         }
     }
 
@@ -1018,6 +1021,7 @@ impl CTypeSpecs {
             CTypeSpecs::Enum { name: Some(n) } => interner.get(*n).to_string(),
             CTypeSpecs::Enum { name: None } => "/* anonymous enum */".to_string(),
             CTypeSpecs::TypedefName(n) => interner.get(*n).to_string(),
+            CTypeSpecs::UnknownTypedef(s) => s.clone(),
         }
     }
 }

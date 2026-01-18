@@ -38,7 +38,7 @@ pub use apidoc::{
 };
 pub use infer_api::{
     run_inference_with_preprocessor, run_macro_inference,
-    InferConfig, InferError, InferResult, InferStats, TypedefDict,
+    DebugOptions, InferConfig, InferError, InferResult, InferStats, TypedefDict,
 };
 pub use ast::*;
 pub use error::{CompileError, DisplayLocation, LexError, PPError, ParseError, Result};

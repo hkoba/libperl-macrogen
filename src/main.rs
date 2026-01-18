@@ -11,7 +11,7 @@ use std::ops::ControlFlow;
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
     get_default_target_dir, get_perl_config,
-    resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor,
+    resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor, DebugOptions,
     ApidocDict, BlockItem, CodegenConfig, CompileError, FieldsDict, FileId,
     PPConfig, ParseResult, Parser, Preprocessor, CodegenDriver, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
@@ -120,6 +120,10 @@ struct Cli {
     /// Rust コード生成（マクロと inline 関数）
     #[arg(long = "gen-rust")]
     gen_rust: bool,
+
+    /// apidoc マージ後にダンプして終了（フィルタ文字列を指定可能）
+    #[arg(long = "dump-apidoc-after-merge", value_name = "FILTER")]
+    dump_apidoc_after_merge: Option<Option<String>>,
 }
 
 fn main() {
@@ -142,6 +146,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let input = cli.input.ok_or("Input file (apidoc) is required for --apidoc-to-json")?;
         return run_apidoc_to_json(&input, cli.output.as_ref(), cli.compact);
     }
+
+    // デバッグオプションを構築（cli.input が move される前に）
+    let debug_opts = build_debug_options(&cli);
 
     // 入力ファイルが必要
     let input = cli.input.ok_or("Input file is required")?;
@@ -247,7 +254,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref())?;
+        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref())?;
     } else {
         // デフォルト: マクロ型推論（統計出力）
         // apidoc パスを解決（ライブラリ版を使用）
@@ -264,7 +271,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        run_infer_macro_types(pp, apidoc_path.as_deref(), cli.bindings.as_deref())?;
+        run_infer_macro_types(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), debug_opts.as_ref())?;
     }
 
     Ok(())
@@ -360,9 +367,13 @@ fn run_infer_macro_types(
     pp: Preprocessor,
     apidoc_path: Option<&std::path::Path>,
     bindings_path: Option<&std::path::Path>,
+    debug_opts: Option<&DebugOptions>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ライブラリ API を呼び出して型推論を実行
-    let result = run_inference_with_preprocessor(pp, apidoc_path, bindings_path)?;
+    let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
+        Some(r) => r,
+        None => return Ok(()),  // デバッグダンプで早期終了
+    };
 
     // 結果から必要な情報を取り出す
     let infer_ctx = &result.infer_ctx;
@@ -520,9 +531,13 @@ fn run_gen_rust(
     apidoc_path: Option<&std::path::Path>,
     bindings_path: Option<&std::path::Path>,
     output_path: Option<&PathBuf>,
+    debug_opts: Option<&DebugOptions>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ライブラリ API を呼び出して型推論を実行
-    let result = run_inference_with_preprocessor(pp, apidoc_path, bindings_path)?;
+    let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
+        Some(r) => r,
+        None => return Ok(()),  // デバッグダンプで早期終了
+    };
 
     // コード生成設定
     let config = CodegenConfig::default();
@@ -559,6 +574,19 @@ fn run_gen_rust(
         stats.inline_fns_success, stats.inline_fns_type_incomplete);
 
     Ok(())
+}
+
+/// CLI引数からDebugOptionsを構築
+fn build_debug_options(cli: &Cli) -> Option<DebugOptions> {
+    // --dump-apidoc-after-merge が指定された場合
+    if let Some(ref filter_opt) = cli.dump_apidoc_after_merge {
+        // Some(None) -> フィルタなし（全件）
+        // Some(Some(filter)) -> フィルタあり
+        let filter = filter_opt.as_deref().unwrap_or("").to_string();
+        return Some(DebugOptions::new().dump_apidoc(filter));
+    }
+
+    None
 }
 
 /// rustfmt を適用（失敗した場合は元のコードを返す）
