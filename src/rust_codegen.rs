@@ -624,7 +624,8 @@ impl<'a, W: Write> RustCodegen<'a, W> {
         };
 
         // ドキュメントコメント
-        writeln!(self.writer, "/// {} - macro function", name_str)?;
+        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+        writeln!(self.writer, "/// {}{} - macro function", name_str, thx_info)?;
         writeln!(self.writer, "#[inline]")?;
 
         // 関数定義

@@ -529,29 +529,29 @@ fn run_gen_rust(
     // コード生成設定
     let config = CodegenConfig::default();
 
-    // 出力先を決定
-    let stats = if let Some(path) = output_path {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        let stats = {
-            let mut codegen = RustCodegen::new(&mut writer, result.preprocessor.interner(), config);
-            codegen.generate(&result)?;
-            codegen.stats().clone()
-        };
-        writer.flush()?;
+    // まずバッファに生成
+    let mut buffer = Vec::new();
+    let stats = {
+        let mut codegen = RustCodegen::new(&mut buffer, result.preprocessor.interner(), config);
+        codegen.generate(&result)?;
+        codegen.stats().clone()
+    };
+
+    // rustfmt を適用
+    let formatted = apply_rustfmt(&buffer);
+
+    // 出力先に書き込み
+    if let Some(path) = output_path {
+        let mut file = File::create(path)?;
+        file.write_all(&formatted)?;
+        file.flush()?;
         eprintln!("Output: {}", path.display());
-        stats
     } else {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-        let stats = {
-            let mut codegen = RustCodegen::new(&mut handle, result.preprocessor.interner(), config);
-            codegen.generate(&result)?;
-            codegen.stats().clone()
-        };
+        handle.write_all(&formatted)?;
         handle.flush()?;
-        stats
-    };
+    }
 
     // 統計情報を出力
     eprintln!("=== Rust Code Generation Stats ===");
@@ -561,6 +561,40 @@ fn run_gen_rust(
         stats.inline_fns_success, stats.inline_fns_type_incomplete);
 
     Ok(())
+}
+
+/// rustfmt を適用（失敗した場合は元のコードを返す）
+fn apply_rustfmt(code: &[u8]) -> Vec<u8> {
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("rustfmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            eprintln!("Warning: rustfmt not found, skipping formatting");
+            return code.to_vec();
+        }
+    };
+
+    // stdin に書き込み
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(code).is_err() {
+            return code.to_vec();
+        }
+    }
+
+    // 結果を取得
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => {
+            eprintln!("Warning: rustfmt failed, using unformatted output");
+            code.to_vec()
+        }
+    }
 }
 
 // 廃止予定: run_gen_rust_fns_lib (macrogen 使用)
