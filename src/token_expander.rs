@@ -47,6 +47,12 @@ pub struct TokenExpander<'a> {
     /// `expand_with_calls` 呼び出し時にクリアされ、展開中に使用された
     /// マクロ名が記録される。THX 依存判定などに使用。
     expanded_macros: HashSet<InternedStr>,
+    /// 呼び出されたマクロの集合（no_expand マクロを含む）
+    ///
+    /// `expand_with_calls` 呼び出し時にクリアされ、展開プロセス中に
+    /// 呼び出されたマクロ名（展開されたものと no_expand のもの両方）が記録される。
+    /// SvANY パターン検出などの型推論に使用。
+    called_macros: HashSet<InternedStr>,
 }
 
 impl<'a> TokenExpander<'a> {
@@ -64,6 +70,7 @@ impl<'a> TokenExpander<'a> {
             emit_markers: false,
             bindings_consts: None,
             expanded_macros: HashSet::new(),
+            called_macros: HashSet::new(),
         }
     }
 
@@ -72,6 +79,14 @@ impl<'a> TokenExpander<'a> {
     /// `expand_with_calls` 呼び出し後に、どのマクロが展開されたかを取得できる。
     pub fn expanded_macros(&self) -> &HashSet<InternedStr> {
         &self.expanded_macros
+    }
+
+    /// 呼び出されたマクロの集合を取得（no_expand マクロを含む）
+    ///
+    /// `expand_with_calls` 呼び出し後に、どのマクロが呼び出されたかを取得できる。
+    /// これには展開されたマクロと、展開されなかった（no_expand）マクロの両方が含まれる。
+    pub fn called_macros(&self) -> &HashSet<InternedStr> {
+        &self.called_macros
     }
 
     /// bindings.rs の定数名セットを設定
@@ -108,6 +123,7 @@ impl<'a> TokenExpander<'a> {
     /// 展開されたマクロ名は `expanded_macros()` で取得できる。
     pub fn expand_with_calls(&mut self, tokens: &[Token]) -> Vec<Token> {
         self.expanded_macros.clear();
+        self.called_macros.clear();
         let mut in_progress = HashSet::new();
         self.expand_with_calls_internal(tokens, &mut in_progress)
     }
@@ -179,8 +195,24 @@ impl<'a> TokenExpander<'a> {
 
             match &token.kind {
                 TokenKind::Ident(id) => {
-                    // 展開禁止リストにあればそのまま
+                    // 展開禁止リストにあればそのまま（ただしマクロ呼び出しは記録）
                     if self.no_expand.contains(id) {
+                        // 関数マクロとして呼び出されているかチェック
+                        if let Some(def) = self.macro_table.get(*id) {
+                            if def.is_function() {
+                                if let Some((_args, end_idx)) = self.try_collect_args(&tokens[i + 1..]) {
+                                    // 呼び出し記録（展開はしない）
+                                    self.called_macros.insert(*id);
+                                    result.push(token.clone());
+                                    // 引数もそのまま追加
+                                    for j in 0..=end_idx {
+                                        result.push(tokens[i + 1 + j].clone());
+                                    }
+                                    i += 1 + end_idx + 1;
+                                    continue;
+                                }
+                            }
+                        }
                         result.push(token.clone());
                         i += 1;
                         continue;
@@ -210,6 +242,7 @@ impl<'a> TokenExpander<'a> {
                             if let Some((args, end_idx)) = self.try_collect_args(&tokens[i + 1..]) {
                                 // 展開記録（累積）
                                 self.expanded_macros.insert(*id);
+                                self.called_macros.insert(*id);
                                 in_progress.insert(*id);
                                 let expanded =
                                     self.expand_function_macro_mut(def, token, &args, in_progress);
@@ -222,6 +255,7 @@ impl<'a> TokenExpander<'a> {
                             // オブジェクトマクロ
                             // 展開記録（累積）
                             self.expanded_macros.insert(*id);
+                            self.called_macros.insert(*id);
                             in_progress.insert(*id);
                             let expanded = self.expand_object_macro_mut(def, token, in_progress);
                             result.extend(expanded);

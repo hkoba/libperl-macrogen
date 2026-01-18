@@ -939,8 +939,8 @@ impl MacroInferContext {
         }
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
-        // def-use 関係を収集（展開されたマクロの集合から）
-        self.collect_uses_from_expanded(expander.expanded_macros(), &mut info);
+        // def-use 関係を収集（呼び出されたマクロの集合から、no_expand マクロを含む）
+        self.collect_uses_from_called(expander.called_macros(), &mut info);
 
         // THX 判定: 展開されたマクロに aTHX, tTHX が含まれるか、
         // または展開後トークンに my_perl が含まれるかをチェック
@@ -1323,8 +1323,8 @@ impl MacroInferContext {
         }
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
-        // def-use 関係を収集（展開されたマクロの集合から）
-        self.collect_uses_from_expanded(expander.expanded_macros(), &mut info);
+        // def-use 関係を収集（呼び出されたマクロの集合から、no_expand マクロを含む）
+        self.collect_uses_from_called(expander.called_macros(), &mut info);
 
         // パースを試行
         info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
@@ -1387,15 +1387,15 @@ impl MacroInferContext {
     }
 
     /// トークン列から使用するマクロ/関数を収集
-    /// 展開されたマクロを uses に追加
+    /// 呼び出されたマクロを uses に追加
     ///
-    /// TokenExpander が展開したマクロの集合から、自分自身を除いて uses に追加する。
-    fn collect_uses_from_expanded(
+    /// TokenExpander が呼び出したマクロの集合（no_expand を含む）から、自分自身を除いて uses に追加する。
+    fn collect_uses_from_called(
         &self,
-        expanded_macros: &HashSet<InternedStr>,
+        called_macros: &HashSet<InternedStr>,
         info: &mut MacroInferInfo,
     ) {
-        for &id in expanded_macros {
+        for &id in called_macros {
             if id != info.name {
                 info.add_use(id);
             }

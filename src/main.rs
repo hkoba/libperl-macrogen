@@ -403,6 +403,9 @@ fn run_infer_macro_types(
     eprintln!("Apidoc from comments: {}", stats.apidoc_from_comments);
     // THX 依存マクロ数（解析済みターゲットマクロのうち）
     eprintln!("THX-dependent macros: {}", stats.thx_dependent_count);
+    // SV family 検出統計
+    eprintln!("SV family members: {}", result.fields_dict.sv_family_members_count());
+    eprintln!("typeName -> struct mapping: {}", result.fields_dict.sv_head_type_mapping_count());
     // SvANY パターンから推論された型制約数
     eprintln!("SvANY pattern constraints: {}", stats.sv_any_constraint_count);
     // sv_u フィールドパターンから推論された型制約数
