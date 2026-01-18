@@ -12,9 +12,9 @@ use clap::Parser as ClapParser;
 use libperl_macrogen::{
     get_default_target_dir, get_perl_config,
     resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor,
-    ApidocDict, BlockItem, CompileError, FieldsDict, FileId,
-    PPConfig, ParseResult, Parser, Preprocessor, RustDeclDict, SexpPrinter, SourceLocation,
-    TokenKind, TypedSexpPrinter,
+    ApidocDict, BlockItem, CodegenConfig, CompileError, FieldsDict, FileId,
+    PPConfig, ParseResult, Parser, Preprocessor, RustCodegen, RustDeclDict, SexpPrinter,
+    SourceLocation, TokenKind, TypedSexpPrinter,
 };
 
 /// コマンドライン引数
@@ -116,6 +116,10 @@ struct Cli {
     /// 生成コードにマクロ定義位置コメントを追加
     #[arg(long = "macro-comments")]
     macro_comments: bool,
+
+    /// Rust コード生成（マクロと inline 関数）
+    #[arg(long = "gen-rust")]
+    gen_rust: bool,
 }
 
 fn main() {
@@ -221,8 +225,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             printer.print_translation_unit(&tu)?;
             handle.flush()?;
         }
+    } else if cli.gen_rust {
+        // --gen-rust: Rust コード生成
+        // apidoc パスを解決（ライブラリ版を使用）
+        let apidoc_path = resolve_apidoc_path(
+            cli.apidoc.as_deref(),
+            cli.auto,
+            None, // apidoc_dir は自動検索
+        ).map_err(|e| format_apidoc_error(&e))?;
+
+        // 自動ロード時はパスを表示
+        if cli.auto && cli.apidoc.is_none() {
+            if let Some(ref path) = apidoc_path {
+                eprintln!("Note: Auto-loaded {}", path.display());
+            }
+        }
+
+        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref())?;
     } else {
-        // デフォルト: マクロ型推論
+        // デフォルト: マクロ型推論（統計出力）
         // apidoc パスを解決（ライブラリ版を使用）
         let apidoc_path = resolve_apidoc_path(
             cli.apidoc.as_deref(),
@@ -489,6 +510,55 @@ fn run_infer_macro_types(
     eprintln!();
     eprintln!("Parseable macros: {}", parseable_count);
     eprintln!("Macros with type constraints: {}", has_constraints_count);
+
+    Ok(())
+}
+
+/// Rust コード生成
+///
+/// 型推論結果から Rust コードを生成する。
+fn run_gen_rust(
+    pp: Preprocessor,
+    apidoc_path: Option<&std::path::Path>,
+    bindings_path: Option<&std::path::Path>,
+    output_path: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // ライブラリ API を呼び出して型推論を実行
+    let result = run_inference_with_preprocessor(pp, apidoc_path, bindings_path)?;
+
+    // コード生成設定
+    let config = CodegenConfig::default();
+
+    // 出力先を決定
+    let stats = if let Some(path) = output_path {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        let stats = {
+            let mut codegen = RustCodegen::new(&mut writer, result.preprocessor.interner(), config);
+            codegen.generate(&result)?;
+            codegen.stats().clone()
+        };
+        writer.flush()?;
+        eprintln!("Output: {}", path.display());
+        stats
+    } else {
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        let stats = {
+            let mut codegen = RustCodegen::new(&mut handle, result.preprocessor.interner(), config);
+            codegen.generate(&result)?;
+            codegen.stats().clone()
+        };
+        handle.flush()?;
+        stats
+    };
+
+    // 統計情報を出力
+    eprintln!("=== Rust Code Generation Stats ===");
+    eprintln!("Macros: {} success, {} parse failed, {} type incomplete",
+        stats.macros_success, stats.macros_parse_failed, stats.macros_type_incomplete);
+    eprintln!("Inline functions: {} success, {} type incomplete",
+        stats.inline_fns_success, stats.inline_fns_type_incomplete);
 
     Ok(())
 }

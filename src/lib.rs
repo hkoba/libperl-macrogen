@@ -17,6 +17,7 @@ pub mod parser;
 pub mod perl_config;
 pub mod pp_expr;
 pub mod preprocessor;
+pub mod rust_codegen;
 pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
@@ -73,6 +74,7 @@ pub use type_repr::{
     IntSize as TypeReprIntSize, RustPrimitiveKind, RustTypeRepr, RustTypeSource, TypeRepr,
 };
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
+pub use rust_codegen::{CodegenConfig, CodegenStats, GenerateStatus, RustCodegen};
 
 #[cfg(test)]
 mod tests {

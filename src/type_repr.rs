@@ -893,6 +893,29 @@ impl TypeRepr {
             TypeRepr::Inferred(inferred) => inferred.to_display_string(interner),
         }
     }
+
+    /// Rust コード生成用の型文字列に変換
+    pub fn to_rust_string(&self, interner: &crate::intern::StringInterner) -> String {
+        match self {
+            TypeRepr::CType { specs, derived, .. } => {
+                let base = specs.to_rust_string(interner);
+                // ポインタは逆順に適用（Rustの表記に合わせる）
+                let mut result = base;
+                for d in derived.iter().rev() {
+                    result = match d {
+                        CDerivedType::Pointer { is_const: true, .. } => format!("*const {}", result),
+                        CDerivedType::Pointer { .. } => format!("*mut {}", result),
+                        CDerivedType::Array { size: Some(n) } => format!("[{}; {}]", result, n),
+                        CDerivedType::Array { size: None } => format!("*mut {}", result),
+                        CDerivedType::Function { .. } => format!("/* fn */"),
+                    };
+                }
+                result
+            }
+            TypeRepr::RustType { repr, .. } => repr.to_display_string(),
+            TypeRepr::Inferred(inferred) => inferred.to_rust_string(interner),
+        }
+    }
 }
 
 // ============================================================================
@@ -931,6 +954,35 @@ impl CTypeSpecs {
             CTypeSpecs::Struct { name: None, is_union: true } => "union".to_string(),
             CTypeSpecs::Enum { name: Some(n) } => format!("enum {}", interner.get(*n)),
             CTypeSpecs::Enum { name: None } => "enum".to_string(),
+            CTypeSpecs::TypedefName(n) => interner.get(*n).to_string(),
+        }
+    }
+
+    /// Rust コード生成用の型文字列に変換
+    pub fn to_rust_string(&self, interner: &crate::intern::StringInterner) -> String {
+        match self {
+            CTypeSpecs::Void => "c_void".to_string(),
+            CTypeSpecs::Char { signed: None } => "c_char".to_string(),
+            CTypeSpecs::Char { signed: Some(true) } => "c_schar".to_string(),
+            CTypeSpecs::Char { signed: Some(false) } => "c_uchar".to_string(),
+            CTypeSpecs::Int { signed: true, size: IntSize::Short } => "c_short".to_string(),
+            CTypeSpecs::Int { signed: false, size: IntSize::Short } => "c_ushort".to_string(),
+            CTypeSpecs::Int { signed: true, size: IntSize::Int } => "c_int".to_string(),
+            CTypeSpecs::Int { signed: false, size: IntSize::Int } => "c_uint".to_string(),
+            CTypeSpecs::Int { signed: true, size: IntSize::Long } => "c_long".to_string(),
+            CTypeSpecs::Int { signed: false, size: IntSize::Long } => "c_ulong".to_string(),
+            CTypeSpecs::Int { signed: true, size: IntSize::LongLong } => "c_longlong".to_string(),
+            CTypeSpecs::Int { signed: false, size: IntSize::LongLong } => "c_ulonglong".to_string(),
+            CTypeSpecs::Int { signed: true, size: IntSize::Int128 } => "i128".to_string(),
+            CTypeSpecs::Int { signed: false, size: IntSize::Int128 } => "u128".to_string(),
+            CTypeSpecs::Float => "c_float".to_string(),
+            CTypeSpecs::Double { is_long: false } => "c_double".to_string(),
+            CTypeSpecs::Double { is_long: true } => "c_double".to_string(), // long double → c_double
+            CTypeSpecs::Bool => "bool".to_string(),
+            CTypeSpecs::Struct { name: Some(n), .. } => interner.get(*n).to_string(),
+            CTypeSpecs::Struct { name: None, .. } => "/* anonymous struct */".to_string(),
+            CTypeSpecs::Enum { name: Some(n) } => interner.get(*n).to_string(),
+            CTypeSpecs::Enum { name: None } => "/* anonymous enum */".to_string(),
             CTypeSpecs::TypedefName(n) => interner.get(*n).to_string(),
         }
     }
@@ -1066,6 +1118,63 @@ impl InferredType {
             InferredType::Assert => "void".to_string(),
             InferredType::FunctionReturn { func_name } => {
                 format!("{}()", interner.get(*func_name))
+            }
+        }
+    }
+
+    /// Rust コード生成用の型文字列に変換
+    pub fn to_rust_string(&self, interner: &crate::intern::StringInterner) -> String {
+        match self {
+            InferredType::IntLiteral => "c_int".to_string(),
+            InferredType::UIntLiteral => "c_uint".to_string(),
+            InferredType::FloatLiteral => "c_double".to_string(),
+            InferredType::CharLiteral => "c_int".to_string(),
+            InferredType::StringLiteral => "*const c_char".to_string(),
+            InferredType::SymbolLookup { resolved_type, .. } => {
+                resolved_type.to_rust_string(interner)
+            }
+            InferredType::ThxDefault => "*mut PerlInterpreter".to_string(),
+            InferredType::BinaryOp { result_type, .. } => result_type.to_rust_string(interner),
+            InferredType::UnaryArithmetic { inner_type } => inner_type.to_rust_string(interner),
+            InferredType::LogicalNot => "c_int".to_string(),
+            InferredType::AddressOf { inner_type } => {
+                format!("*mut {}", inner_type.to_rust_string(interner))
+            }
+            InferredType::Dereference { pointer_type } => {
+                let s = pointer_type.to_rust_string(interner);
+                // *mut T → T
+                s.strip_prefix("*mut ").or_else(|| s.strip_prefix("*const "))
+                    .unwrap_or(&s).to_string()
+            }
+            InferredType::IncDec { inner_type } => inner_type.to_rust_string(interner),
+            InferredType::MemberAccess { field_type: Some(ft), .. } => {
+                ft.to_rust_string(interner)
+            }
+            InferredType::MemberAccess { base_type, member, .. } => {
+                format!("/* {}.{} */", base_type, interner.get(*member))
+            }
+            InferredType::PtrMemberAccess { field_type: Some(ft), .. } => {
+                ft.to_rust_string(interner)
+            }
+            InferredType::PtrMemberAccess { base_type, member, .. } => {
+                format!("/* {}->{} */", base_type, interner.get(*member))
+            }
+            InferredType::ArraySubscript { element_type, .. } => {
+                element_type.to_rust_string(interner)
+            }
+            InferredType::Conditional { result_type, .. } => {
+                result_type.to_rust_string(interner)
+            }
+            InferredType::Comma { rhs_type } => rhs_type.to_rust_string(interner),
+            InferredType::Assignment { lhs_type } => lhs_type.to_rust_string(interner),
+            InferredType::Cast { target_type } => target_type.to_rust_string(interner),
+            InferredType::Sizeof | InferredType::Alignof => "c_ulong".to_string(),
+            InferredType::CompoundLiteral { type_name } => type_name.to_rust_string(interner),
+            InferredType::StmtExpr { last_expr_type: Some(t) } => t.to_rust_string(interner),
+            InferredType::StmtExpr { last_expr_type: None } => "()".to_string(),
+            InferredType::Assert => "()".to_string(),
+            InferredType::FunctionReturn { func_name } => {
+                format!("/* {}() ret */", interner.get(*func_name))
             }
         }
     }
