@@ -339,13 +339,14 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// 戻り値の型を取得
+    ///
+    /// MacroInferInfo::get_return_type() を使用して、
+    /// return_constraints（apidoc由来）を expr_constraints より優先する
     fn get_return_type(&mut self, info: &MacroInferInfo) -> String {
         match &info.parse_result {
-            ParseResult::Expression(expr) => {
-                if let Some(constraints) = info.type_env.expr_constraints.get(&expr.id) {
-                    if let Some(first) = constraints.first() {
-                        return self.type_repr_to_rust(&first.ty);
-                    }
+            ParseResult::Expression(_) => {
+                if let Some(ty) = info.get_return_type() {
+                    return self.type_repr_to_rust(ty);
                 }
                 self.unknown_marker().to_string()
             }
@@ -355,8 +356,14 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// TypeRepr を Rust 型文字列に変換
-    fn type_repr_to_rust(&self, ty: &crate::type_repr::TypeRepr) -> String {
-        ty.to_rust_string(self.interner)
+    ///
+    /// 戻り値に `/*` が含まれていたら不完全型としてカウントする
+    fn type_repr_to_rust(&mut self, ty: &crate::type_repr::TypeRepr) -> String {
+        let result = ty.to_rust_string(self.interner);
+        if result.contains("/*") {
+            self.incomplete_count += 1;
+        }
+        result
     }
 
     /// 式がブール型を返すかどうかを判定
@@ -1473,13 +1480,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     }
 
     /// 戻り値の型を取得
+    ///
+    /// MacroInferInfo::get_return_type() を使用して、
+    /// return_constraints（apidoc由来）を expr_constraints より優先する
     fn get_return_type(&self, info: &MacroInferInfo) -> String {
         match &info.parse_result {
-            ParseResult::Expression(expr) => {
-                if let Some(constraints) = info.type_env.expr_constraints.get(&expr.id) {
-                    if let Some(first) = constraints.first() {
-                        return self.type_repr_to_rust(&first.ty);
-                    }
+            ParseResult::Expression(_) => {
+                if let Some(ty) = info.get_return_type() {
+                    return self.type_repr_to_rust(ty);
                 }
                 "/* unknown */".to_string()
             }
