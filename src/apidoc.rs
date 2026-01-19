@@ -408,6 +408,36 @@ impl ApidocEntry {
     pub fn is_inline(&self) -> bool {
         self.flags.inline || self.flags.force_inline
     }
+
+    /// 型パラメータキーワードかどうかを判定
+    ///
+    /// apidoc で `type` や `cast` は特殊な引数で、C の型名を表す。
+    /// Rust では generic 型パラメータとして扱う。
+    pub fn is_type_param_keyword(ty: &str) -> bool {
+        ty == "type" || ty == "cast"
+    }
+
+    /// `type`/`cast` パラメータのインデックスを返す
+    pub fn type_param_indices(&self) -> Vec<usize> {
+        self.args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| Self::is_type_param_keyword(&arg.ty))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// 戻り値型が `type` または `cast` かどうか
+    pub fn returns_type_param(&self) -> bool {
+        self.return_type
+            .as_ref()
+            .map_or(false, |t| Self::is_type_param_keyword(t))
+    }
+
+    /// ジェネリック関数として生成すべきか
+    pub fn is_generic(&self) -> bool {
+        self.returns_type_param() || !self.type_param_indices().is_empty()
+    }
 }
 
 impl ApidocDict {

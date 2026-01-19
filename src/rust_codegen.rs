@@ -245,7 +245,11 @@ impl<'a> RustCodegen<'a> {
     pub fn generate_macro(mut self, info: &MacroInferInfo) -> GeneratedCode {
         let name_str = self.interner.get(info.name);
 
+        // ジェネリック句を生成
+        let generic_clause = self.build_generic_clause(info);
+
         // パラメータリストを構築（型情報付き）
+        // type/cast パラメータは値引数ではないので除外
         let params_with_types = self.build_param_list(info);
 
         // 戻り値の型を取得
@@ -269,11 +273,12 @@ impl<'a> RustCodegen<'a> {
 
         // ドキュメントコメント
         let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
-        self.writeln(&format!("/// {}{} - macro function", name_str, thx_info));
+        let generic_info = if !generic_clause.is_empty() { " [generic]" } else { "" };
+        self.writeln(&format!("/// {}{}{} - macro function", name_str, thx_info, generic_info));
         self.writeln("#[inline]");
 
-        // 関数定義
-        self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
+        // 関数定義（ジェネリック句付き）
+        self.writeln(&format!("pub unsafe fn {}{}({}) -> {} {{", name_str, generic_clause, params_str, return_type));
 
         // 関数本体
         match &info.parse_result {
@@ -300,12 +305,32 @@ impl<'a> RustCodegen<'a> {
         self.into_generated_code()
     }
 
+    /// ジェネリック句を生成（例: "<T>" or "<T, U>"）
+    fn build_generic_clause(&self, info: &MacroInferInfo) -> String {
+        if info.generic_type_params.is_empty() {
+            return String::new();
+        }
+
+        // 型パラメータを収集（重複排除、ソート）
+        let mut params: Vec<&String> = info.generic_type_params.values().collect();
+        params.sort();
+        params.dedup();
+
+        format!("<{}>", params.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+    }
+
     /// パラメータリストを構築（型情報付き）
+    /// type/cast パラメータは型パラメータなので値引数からは除外する
     fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
         info.params.iter()
-            .map(|p| {
+            .enumerate()
+            .filter(|(i, _)| {
+                // type/cast パラメータは値引数ではないので除外
+                !info.generic_type_params.contains_key(&(*i as i32))
+            })
+            .map(|(i, p)| {
                 let name = escape_rust_keyword(self.interner.get(p.name));
-                let ty = self.get_param_type(p, info);
+                let ty = self.get_param_type(p, info, i);
                 format!("{}: {}", name, ty)
             })
             .collect::<Vec<_>>()
@@ -313,7 +338,12 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// パラメータの型を取得
-    fn get_param_type(&mut self, param: &MacroParam, info: &MacroInferInfo) -> String {
+    fn get_param_type(&mut self, param: &MacroParam, info: &MacroInferInfo, param_index: usize) -> String {
+        // ジェネリック型パラメータかチェック
+        if let Some(generic_name) = info.generic_type_params.get(&(param_index as i32)) {
+            return generic_name.clone();
+        }
+
         let param_name = param.name;
 
         // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
@@ -340,9 +370,15 @@ impl<'a> RustCodegen<'a> {
 
     /// 戻り値の型を取得
     ///
+    /// ジェネリック戻り値型を優先し、なければ
     /// MacroInferInfo::get_return_type() を使用して、
     /// return_constraints（apidoc由来）を expr_constraints より優先する
     fn get_return_type(&mut self, info: &MacroInferInfo) -> String {
+        // ジェネリック戻り値型かチェック（-1 = return type）
+        if let Some(generic_name) = info.generic_type_params.get(&-1) {
+            return generic_name.clone();
+        }
+
         match &info.parse_result {
             ParseResult::Expression(_) => {
                 if let Some(ty) = info.get_return_type() {

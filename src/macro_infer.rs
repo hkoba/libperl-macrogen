@@ -609,6 +609,41 @@ impl Default for InferStatus {
     }
 }
 
+/// apidoc からジェネリック型パラメータを収集
+///
+/// `type` や `cast` キーワードを持つパラメータをジェネリック型として扱う。
+fn collect_generic_params(entry: &crate::apidoc::ApidocEntry, info: &mut MacroInferInfo) {
+    use crate::apidoc::ApidocEntry;
+
+    const PARAM_NAMES: [char; 7] = ['T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+    let mut param_idx = 0;
+
+    // パラメータの type/cast を収集
+    for (i, arg) in entry.args.iter().enumerate() {
+        if ApidocEntry::is_type_param_keyword(&arg.ty) {
+            if param_idx < PARAM_NAMES.len() {
+                let name = PARAM_NAMES[param_idx].to_string();
+                info.generic_type_params.insert(i as i32, name);
+                param_idx += 1;
+            }
+        }
+    }
+
+    // 戻り値型の type/cast を収集
+    if entry.returns_type_param() {
+        // 最初のパラメータの type と同じ場合は同じ名前を使う
+        // （NUM2PTR のように戻り値型とパラメータの type が同じ場合）
+        let name = if let Some(first_name) = info.generic_type_params.get(&0) {
+            first_name.clone()
+        } else if param_idx < PARAM_NAMES.len() {
+            PARAM_NAMES[param_idx].to_string()
+        } else {
+            "T".to_string()
+        };
+        info.generic_type_params.insert(-1, name); // -1 = return type
+    }
+}
+
 /// マクロの型推論情報
 #[derive(Debug, Clone)]
 pub struct MacroInferInfo {
@@ -646,6 +681,14 @@ pub struct MacroInferInfo {
 
     /// 戻り値の型推論状態
     pub return_infer_status: InferStatus,
+
+    /// ジェネリック型パラメータ情報
+    ///
+    /// apidoc で `type` や `cast` として宣言されたパラメータは、
+    /// Rust のジェネリック型パラメータとして扱う。
+    /// key: パラメータインデックス（-1 は戻り値型）
+    /// value: 型パラメータ名 ("T", "U", etc.)
+    pub generic_type_params: HashMap<i32, String>,
 }
 
 impl MacroInferInfo {
@@ -665,6 +708,7 @@ impl MacroInferInfo {
             type_env: TypeEnv::new(),
             args_infer_status: InferStatus::Pending,
             return_infer_status: InferStatus::Pending,
+            generic_type_params: HashMap::new(),
         }
     }
 
@@ -1039,6 +1083,9 @@ impl MacroInferContext {
                             format!("return type of macro {}", macro_name_str),
                         ));
                     }
+
+                    // ジェネリック型パラメータを収集
+                    collect_generic_params(entry, info);
                 }
             }
         }
@@ -1356,6 +1403,9 @@ impl MacroInferContext {
                             format!("return type of macro {}", macro_name_str),
                         ));
                     }
+
+                    // ジェネリック型パラメータを収集
+                    collect_generic_params(entry, &mut info);
                 }
             }
         }
