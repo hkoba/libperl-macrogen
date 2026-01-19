@@ -1061,6 +1061,40 @@ impl<'a> RustCodegen<'a> {
                     AssertKind::AssertUnderscore => format!("{{ {}; }}", assert_expr),
                 }
             }
+            ExprKind::StmtExpr(compound) => {
+                // GCC Statement Expression: ({ decl; stmt; ...; expr })
+                //
+                // MUTABLE_PTR パターンを検出:
+                // ({ void *p_ = (expr); p_; }) => expr
+                if let Some(init_expr) = self.detect_mutable_ptr_pattern(compound) {
+                    return self.expr_to_rust_inline(init_expr);
+                }
+
+                // 通常の statement expression: Rust のブロック式として出力
+                let mut parts = Vec::new();
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
+                            parts.push(self.expr_to_rust_inline(e));
+                        }
+                        BlockItem::Stmt(stmt) => {
+                            parts.push(self.stmt_to_rust_inline(stmt, ""));
+                        }
+                        BlockItem::Decl(_) => {
+                            // 宣言はスキップ（MUTABLE_PTR パターン以外では無視）
+                        }
+                    }
+                }
+                if parts.is_empty() {
+                    "{ }".to_string()
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    let last = parts.pop().unwrap();
+                    let stmts = parts.join("; ");
+                    format!("{{ {}; {} }}", stmts, last)
+                }
+            }
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
         }
     }
