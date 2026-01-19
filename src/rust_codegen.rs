@@ -19,7 +19,7 @@ const RUST_KEYWORDS: &[&str] = &[
     "self", "Self", "static", "struct", "super", "trait", "true", "type",
     "unsafe", "use", "where", "while",
     // Reserved keywords
-    "abstract", "become", "box", "do", "final", "macro", "override",
+    "abstract", "become", "box", "do", "final", "gen", "macro", "override",
     "priv", "try", "typeof", "unsized", "virtual", "yield",
 ];
 

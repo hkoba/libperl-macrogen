@@ -128,6 +128,10 @@ struct Cli {
     /// rustfmt に渡す Rust edition (デフォルト: 2024)
     #[arg(long = "rust-edition", default_value = "2024")]
     rust_edition: String,
+
+    /// rustfmt 失敗時にエラー終了する
+    #[arg(long = "strict-rustfmt")]
+    strict_rustfmt: bool,
 }
 
 fn main() {
@@ -258,7 +262,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref(), &cli.rust_edition)?;
+        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref(), &cli.rust_edition, cli.strict_rustfmt)?;
     } else {
         // デフォルト: マクロ型推論（統計出力）
         // apidoc パスを解決（ライブラリ版を使用）
@@ -537,6 +541,7 @@ fn run_gen_rust(
     output_path: Option<&PathBuf>,
     debug_opts: Option<&DebugOptions>,
     rust_edition: &str,
+    strict_rustfmt: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ライブラリ API を呼び出して型推論を実行
     let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
@@ -556,7 +561,17 @@ fn run_gen_rust(
     };
 
     // rustfmt を適用
-    let formatted = apply_rustfmt(&buffer, rust_edition);
+    let formatted = match apply_rustfmt(&buffer, rust_edition) {
+        Ok(code) => code,
+        Err(e) => {
+            if strict_rustfmt {
+                return Err(format!("rustfmt failed: {}", e).into());
+            } else {
+                eprintln!("Warning: {}", e);
+                buffer
+            }
+        }
+    };
 
     // 出力先に書き込み
     if let Some(path) = output_path {
@@ -594,8 +609,11 @@ fn build_debug_options(cli: &Cli) -> Option<DebugOptions> {
     None
 }
 
-/// rustfmt を適用（失敗した場合は元のコードを返す）
-fn apply_rustfmt(code: &[u8], edition: &str) -> Vec<u8> {
+/// rustfmt を適用
+///
+/// 成功時はフォーマット済みコードを返す。
+/// 失敗時はエラーメッセージを返す。
+fn apply_rustfmt(code: &[u8], edition: &str) -> Result<Vec<u8>, String> {
     use std::process::{Command, Stdio};
 
     let mut child = match Command::new("rustfmt")
@@ -608,33 +626,31 @@ fn apply_rustfmt(code: &[u8], edition: &str) -> Vec<u8> {
     {
         Ok(child) => child,
         Err(_) => {
-            eprintln!("Warning: rustfmt not found, skipping formatting");
-            return code.to_vec();
+            return Err("rustfmt not found, skipping formatting".to_string());
         }
     };
 
     // stdin に書き込み
     if let Some(mut stdin) = child.stdin.take() {
-        if stdin.write_all(code).is_err() {
-            return code.to_vec();
+        if let Err(e) = stdin.write_all(code) {
+            return Err(format!("failed to write to rustfmt stdin: {}", e));
         }
     }
 
     // 結果を取得
     match child.wait_with_output() {
-        Ok(output) if output.status.success() => output.stdout,
+        Ok(output) if output.status.success() => Ok(output.stdout),
         Ok(output) => {
-            eprintln!("Warning: rustfmt failed, using unformatted output");
+            let mut msg = "rustfmt failed".to_string();
             if !output.stderr.is_empty() {
                 if let Ok(stderr_str) = std::str::from_utf8(&output.stderr) {
-                    eprintln!("rustfmt error: {}", stderr_str);
+                    msg = format!("rustfmt failed: {}", stderr_str.trim());
                 }
             }
-            code.to_vec()
+            Err(msg)
         }
         Err(e) => {
-            eprintln!("Warning: rustfmt failed: {}", e);
-            code.to_vec()
+            Err(format!("rustfmt failed: {}", e))
         }
     }
 }
