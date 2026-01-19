@@ -807,8 +807,17 @@ impl<'a> RustCodegen<'a> {
         // パラメータリストを取得
         let params_str = self.build_fn_param_list(&func_def.declarator.derived);
 
-        // 戻り値の型を取得
+        // 戻り値の型を取得（基本型）
         let return_type = self.decl_specs_to_rust(&func_def.specs);
+
+        // declarator の派生型（ポインタなど）を適用（Function を除く）
+        // 例: HEK * func(...) の場合、derived = [Pointer, Function]
+        //     戻り値型は HEK に Pointer を適用して *mut HEK になる
+        let return_derived: Vec<_> = func_def.declarator.derived.iter()
+            .filter(|d| !matches!(d, DerivedDecl::Function(_)))
+            .cloned()
+            .collect();
+        let return_type = self.apply_derived_to_type(&return_type, &return_derived);
 
         // ドキュメントコメント
         self.writeln(&format!("/// {} - inline function", name_str));
