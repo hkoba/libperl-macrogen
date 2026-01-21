@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -876,13 +876,50 @@ impl<'a> RustCodegen<'a> {
         format!("{}: {}", name, ty)
     }
 
+    /// Declaration を Rust の let 宣言に変換
+    fn decl_to_rust_let(&mut self, decl: &Declaration, indent: &str) -> String {
+        let mut result = String::new();
+
+        // 基本型を取得
+        let base_type = self.decl_specs_to_rust(&decl.specs);
+
+        // 各宣言子を処理
+        for init_decl in &decl.declarators {
+            let name = init_decl.declarator.name
+                .map(|n| escape_rust_keyword(self.interner.get(n)))
+                .unwrap_or_else(|| "_".to_string());
+
+            // 派生型（ポインタなど）を適用
+            let ty = self.apply_derived_to_type(&base_type, &init_decl.declarator.derived);
+
+            // 初期化子
+            if let Some(ref init) = init_decl.init {
+                match init {
+                    Initializer::Expr(expr) => {
+                        let init_expr = self.expr_to_rust_inline(expr);
+                        result.push_str(&format!("{}let {}: {} = {};\n", indent, name, ty, init_expr));
+                    }
+                    Initializer::List(_) => {
+                        // 初期化リストは複雑なので TODO
+                        result.push_str(&format!("{}let {}: {} = /* init list */;\n", indent, name, ty));
+                    }
+                }
+            } else {
+                // 初期化子なし（未初期化変数 - Rust では unsafe かデフォルト値が必要）
+                result.push_str(&format!("{}let {}: {}; // uninitialized\n", indent, name, ty));
+            }
+        }
+
+        result
+    }
+
     /// 複合文を文字列として生成
     fn compound_stmt_to_string(&mut self, stmt: &CompoundStmt, indent: &str) -> String {
         let mut result = String::new();
         for item in &stmt.items {
             match item {
                 BlockItem::Decl(decl) => {
-                    result.push_str(&format!("{}// local decl: {:?}\n", indent, decl.specs));
+                    result.push_str(&self.decl_to_rust_let(decl, indent));
                 }
                 BlockItem::Stmt(s) => {
                     let rust_stmt = self.stmt_to_rust_inline(s, indent);
@@ -929,8 +966,9 @@ impl<'a> RustCodegen<'a> {
                             result.push_str(&self.stmt_to_rust_inline(s, &nested_indent));
                             result.push_str("\n");
                         }
-                        BlockItem::Decl(_) => {
-                            result.push_str(&format!("{}    // local decl\n", indent));
+                        BlockItem::Decl(decl) => {
+                            let nested_indent = format!("{}    ", indent);
+                            result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
                         }
                     }
                 }
@@ -1355,12 +1393,49 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         result
     }
 
+    /// Declaration を Rust の let 宣言に変換
+    fn decl_to_rust_let(&self, decl: &Declaration, indent: &str) -> String {
+        let mut result = String::new();
+
+        // 基本型を取得
+        let base_type = self.decl_specs_to_rust(&decl.specs);
+
+        // 各宣言子を処理
+        for init_decl in &decl.declarators {
+            let name = init_decl.declarator.name
+                .map(|n| escape_rust_keyword(self.interner.get(n)))
+                .unwrap_or_else(|| "_".to_string());
+
+            // 派生型（ポインタなど）を適用
+            let ty = self.apply_derived_to_type(&base_type, &init_decl.declarator.derived);
+
+            // 初期化子
+            if let Some(ref init) = init_decl.init {
+                match init {
+                    Initializer::Expr(expr) => {
+                        let init_expr = self.expr_to_rust_inline(expr);
+                        result.push_str(&format!("{}let {}: {} = {};\n", indent, name, ty, init_expr));
+                    }
+                    Initializer::List(_) => {
+                        // 初期化リストは複雑なので TODO
+                        result.push_str(&format!("{}let {}: {} = /* init list */;\n", indent, name, ty));
+                    }
+                }
+            } else {
+                // 初期化子なし（未初期化変数 - Rust では unsafe かデフォルト値が必要）
+                result.push_str(&format!("{}let {}: {}; // uninitialized\n", indent, name, ty));
+            }
+        }
+
+        result
+    }
+
     /// CompoundStmt を出力
     fn generate_compound_stmt(&mut self, stmt: &CompoundStmt, indent: &str) -> io::Result<()> {
         for item in &stmt.items {
             match item {
                 BlockItem::Decl(decl) => {
-                    writeln!(self.writer, "{}// local decl: {:?}", indent, decl.specs)?;
+                    write!(self.writer, "{}", self.decl_to_rust_let(decl, indent))?;
                 }
                 BlockItem::Stmt(s) => {
                     let rust_stmt = self.stmt_to_rust_inline(s, indent);
@@ -1406,8 +1481,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             result.push_str(&self.stmt_to_rust_inline(s, &nested_indent));
                             result.push_str("\n");
                         }
-                        BlockItem::Decl(_) => {
-                            result.push_str(&format!("{}    // local decl\n", indent));
+                        BlockItem::Decl(decl) => {
+                            let nested_indent = format!("{}    ", indent);
+                            result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
                         }
                     }
                 }
