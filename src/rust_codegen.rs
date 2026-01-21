@@ -1122,6 +1122,19 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::Goto(label, _) => {
+                let label_str = self.interner.get(*label);
+                format!("{}break '{}; // goto", indent, label_str)
+            }
+            Stmt::Label { name, stmt: label_stmt, .. } => {
+                let label_str = self.interner.get(*name);
+                let mut result = format!("{}'{}: {{\n", indent, label_str);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(label_stmt, &nested_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             Stmt::Break(_) => format!("{}break;", indent),
             Stmt::Continue(_) => format!("{}continue;", indent),
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(stmt)))
@@ -1822,6 +1835,19 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 let mut result = format!("{}_ => {{\n", indent);
                 let body_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::Goto(label, _) => {
+                let label_str = self.interner.get(*label);
+                format!("{}break '{}; // goto", indent, label_str)
+            }
+            Stmt::Label { name, stmt: label_stmt, .. } => {
+                let label_str = self.interner.get(*name);
+                let mut result = format!("{}'{}: {{\n", indent, label_str);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(label_stmt, &nested_indent));
                 result.push_str("\n");
                 result.push_str(&format!("{}}}", indent));
                 result
