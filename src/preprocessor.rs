@@ -456,6 +456,8 @@ pub struct Preprocessor {
     wrapped_macros: HashSet<InternedStr>,
     /// コメント読み込み時のコールバック
     comment_callback: Option<Box<dyn CommentCallback>>,
+    /// グローバルな展開抑制マクロ名（bindings.rs の定数など）
+    skip_expand_macros: HashSet<InternedStr>,
 }
 
 impl Preprocessor {
@@ -478,6 +480,7 @@ impl Preprocessor {
             macro_called_callbacks: HashMap::new(),
             wrapped_macros: HashSet::new(),
             comment_callback: None,
+            skip_expand_macros: HashSet::new(),
         };
 
         // 事前定義マクロを登録
@@ -548,6 +551,20 @@ impl Preprocessor {
     pub fn add_wrapped_macro(&mut self, macro_name: &str) {
         let id = self.interner.intern(macro_name);
         self.wrapped_macros.insert(id);
+    }
+
+    /// 展開抑制マクロを追加
+    ///
+    /// 登録されたマクロは展開されず、識別子としてそのまま出力される。
+    /// bindings.rs に存在する定数名を登録することで、コード生成時に
+    /// 定数名を保持できる。
+    pub fn add_skip_expand_macro(&mut self, name: InternedStr) {
+        self.skip_expand_macros.insert(name);
+    }
+
+    /// 複数の展開抑制マクロを追加
+    pub fn add_skip_expand_macros(&mut self, names: impl IntoIterator<Item = InternedStr>) {
+        self.skip_expand_macros.extend(names);
     }
 
     /// 事前定義マクロを登録
@@ -2480,6 +2497,11 @@ impl Preprocessor {
 
     /// マクロ展開を試みる
     fn try_expand_macro(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
+        // グローバルな展開抑制リストをチェック（bindings.rs の定数など）
+        if self.skip_expand_macros.contains(&id) {
+            return Ok(None);
+        }
+
         // トークンが展開禁止リストにこのマクロを持っている場合は展開しない
         if self.no_expand_registry.is_blocked(token.id, id) {
             return Ok(None);

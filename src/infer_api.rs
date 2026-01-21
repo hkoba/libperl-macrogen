@@ -254,6 +254,21 @@ pub fn run_inference_with_preprocessor(
     bindings_path: Option<&Path>,
     debug_opts: Option<&DebugOptions>,
 ) -> Result<Option<InferResult>, InferError> {
+    // RustDeclDict をロード（パーサー作成前に行い、展開抑制を設定）
+    let rust_decl_dict = if let Some(path) = bindings_path {
+        Some(RustDeclDict::parse_file(path)?)
+    } else {
+        None
+    };
+
+    // bindings.rs の定数名を展開抑制に登録
+    if let Some(ref dict) = rust_decl_dict {
+        for name in dict.consts.keys() {
+            let interned = pp.interner_mut().intern(name);
+            pp.add_skip_expand_macro(interned);
+        }
+    }
+
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
@@ -339,13 +354,6 @@ pub fn run_inference_with_preprocessor(
             return Ok(None);
         }
     }
-
-    // RustDeclDict をロード
-    let rust_decl_dict = if let Some(path) = bindings_path {
-        Some(RustDeclDict::parse_file(path)?)
-    } else {
-        None
-    };
 
     // MacroInferContext を作成して解析
     let mut infer_ctx = MacroInferContext::new();
