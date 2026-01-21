@@ -2603,11 +2603,26 @@ impl Preprocessor {
                     self.macro_called_callbacks.insert(id, cb);
                 }
                 // マーカーで囲む（emit_markers が有効な場合のみ）
+                // wrapped マクロ（assert 等）の場合、引数内のマクロも展開する
+                let kind = if self.wrapped_macros.contains(&id) {
+                    let expanded_args: Result<Vec<_>, _> = args.into_iter()
+                        .map(|arg_tokens| {
+                            let expanded = self.expand_token_list(&arg_tokens)?;
+                            // 展開結果からマーカーを除去（入れ子 assert エラー防止）
+                            Ok(expanded.into_iter()
+                                .filter(|t| !matches!(t.kind, TokenKind::MacroBegin(_) | TokenKind::MacroEnd(_)))
+                                .collect())
+                        })
+                        .collect();
+                    MacroInvocationKind::Function { args: expanded_args? }
+                } else {
+                    MacroInvocationKind::Function { args }
+                };
                 let wrapped = self.wrap_with_markers(
                     marked,
                     id,
                     token,
-                    MacroInvocationKind::Function { args },
+                    kind,
                     &call_loc,
                 );
                 Ok(Some(wrapped))
