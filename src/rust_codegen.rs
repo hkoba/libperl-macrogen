@@ -1093,6 +1093,8 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::Break(_) => format!("{}break;", indent),
+            Stmt::Continue(_) => format!("{}continue;", indent),
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(stmt)))
         }
     }
@@ -1731,6 +1733,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::Break(_) => format!("{}break;", indent),
+            Stmt::Continue(_) => format!("{}continue;", indent),
             _ => format!("{}/* TODO: {:?} */", indent, std::mem::discriminant(stmt))
         }
     }
