@@ -767,8 +767,50 @@ impl<'a> RustCodegen<'a> {
         self.type_marker().to_string()
     }
 
-    /// 派生型を型に適用
-    fn apply_derived_to_type(&self, base: &str, derived: &[DerivedDecl]) -> String {
+    /// 派生型を型に適用（関数ポインタを含む完全な処理）
+    fn apply_derived_to_type(&mut self, base: &str, derived: &[DerivedDecl]) -> String {
+        // Function を探す
+        let fn_idx = derived
+            .iter()
+            .position(|d| matches!(d, DerivedDecl::Function(_)));
+
+        if let Some(idx) = fn_idx {
+            if let DerivedDecl::Function(param_list) = &derived[idx] {
+                // Function の直前が Pointer なら関数ポインタ
+                let is_fn_pointer =
+                    idx > 0 && matches!(derived[idx - 1], DerivedDecl::Pointer(_));
+
+                // 戻り値型の派生（Function と fn ptr Pointer を除く）
+                let return_end = if is_fn_pointer { idx - 1 } else { idx };
+                let return_derived = &derived[..return_end];
+                let return_type = self.apply_simple_derived(base, return_derived);
+
+                // パラメータリストを生成（型のみ、名前なし）
+                let params: Vec<_> = param_list
+                    .params
+                    .iter()
+                    .map(|p| self.param_type_only(p))
+                    .collect();
+                let params_str = params.join(", ");
+
+                // 関数型を生成
+                let fn_type =
+                    format!("unsafe extern \"C\" fn({}) -> {}", params_str, return_type);
+
+                // 関数ポインタの場合は Option でラップ（NULL 許容）
+                if is_fn_pointer {
+                    return format!("Option<{}>", fn_type);
+                }
+                return fn_type;
+            }
+        }
+
+        // 通常の型変換（Function を含まない場合）
+        self.apply_simple_derived(base, derived)
+    }
+
+    /// 単純な派生型の適用（Pointer と Array のみ）
+    fn apply_simple_derived(&self, base: &str, derived: &[DerivedDecl]) -> String {
         let mut result = base.to_string();
         for d in derived.iter().rev() {
             match d {
@@ -792,12 +834,21 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 DerivedDecl::Function(_) => {
-                    // 関数ポインタは複雑なので簡易実装
-                    result = format!("/* fn */ {}", result);
+                    // この関数では Function は処理しない（apply_derived_to_type で処理）
                 }
             }
         }
         result
+    }
+
+    /// ParamDecl から型のみを取得（名前なし）
+    fn param_type_only(&mut self, param: &ParamDecl) -> String {
+        let ty = self.decl_specs_to_rust(&param.specs);
+        if let Some(ref declarator) = param.declarator {
+            self.apply_derived_to_type(&ty, &declarator.derived)
+        } else {
+            ty
+        }
     }
 
     /// inline 関数を生成（self を消費）
@@ -1360,8 +1411,50 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
     }
 
-    /// 派生型を型に適用
+    /// 派生型を型に適用（関数ポインタを含む完全な処理）
     fn apply_derived_to_type(&self, base: &str, derived: &[DerivedDecl]) -> String {
+        // Function を探す
+        let fn_idx = derived
+            .iter()
+            .position(|d| matches!(d, DerivedDecl::Function(_)));
+
+        if let Some(idx) = fn_idx {
+            if let DerivedDecl::Function(param_list) = &derived[idx] {
+                // Function の直前が Pointer なら関数ポインタ
+                let is_fn_pointer =
+                    idx > 0 && matches!(derived[idx - 1], DerivedDecl::Pointer(_));
+
+                // 戻り値型の派生（Function と fn ptr Pointer を除く）
+                let return_end = if is_fn_pointer { idx - 1 } else { idx };
+                let return_derived = &derived[..return_end];
+                let return_type = self.apply_simple_derived(base, return_derived);
+
+                // パラメータリストを生成（型のみ、名前なし）
+                let params: Vec<_> = param_list
+                    .params
+                    .iter()
+                    .map(|p| self.param_type_only(p))
+                    .collect();
+                let params_str = params.join(", ");
+
+                // 関数型を生成
+                let fn_type =
+                    format!("unsafe extern \"C\" fn({}) -> {}", params_str, return_type);
+
+                // 関数ポインタの場合は Option でラップ（NULL 許容）
+                if is_fn_pointer {
+                    return format!("Option<{}>", fn_type);
+                }
+                return fn_type;
+            }
+        }
+
+        // 通常の型変換（Function を含まない場合）
+        self.apply_simple_derived(base, derived)
+    }
+
+    /// 単純な派生型の適用（Pointer と Array のみ）
+    fn apply_simple_derived(&self, base: &str, derived: &[DerivedDecl]) -> String {
         let mut result = base.to_string();
         for d in derived.iter().rev() {
             match d {
@@ -1385,12 +1478,21 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     }
                 }
                 DerivedDecl::Function(_) => {
-                    // 関数ポインタは複雑なので簡易実装
-                    result = format!("/* fn */ {}", result);
+                    // この関数では Function は処理しない（apply_derived_to_type で処理）
                 }
             }
         }
         result
+    }
+
+    /// ParamDecl から型のみを取得（名前なし）
+    fn param_type_only(&self, param: &ParamDecl) -> String {
+        let ty = self.decl_specs_to_rust(&param.specs);
+        if let Some(ref declarator) = param.declarator {
+            self.apply_derived_to_type(&ty, &declarator.derived)
+        } else {
+            ty
+        }
     }
 
     /// Declaration を Rust の let 宣言に変換
