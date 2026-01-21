@@ -1029,6 +1029,15 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::While { cond, body, .. } => {
+                let cond_str = self.expr_to_rust_inline(cond);
+                let mut result = format!("{}while {} != 0 {{\n", indent, cond_str);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             Stmt::DoWhile { body, cond, .. } => {
                 // do { ... } while (0) パターンは単純なブロックとして出力
                 if is_zero_constant(cond) {
@@ -1616,6 +1625,15 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         }
                     }
                 }
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::While { cond, body, .. } => {
+                let cond_str = self.expr_to_rust_inline(cond);
+                let mut result = format!("{}while {} != 0 {{\n", indent, cond_str);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                result.push_str("\n");
                 result.push_str(&format!("{}}}", indent));
                 result
             }
