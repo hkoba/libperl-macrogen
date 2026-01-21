@@ -989,7 +989,17 @@ impl<'a> RustCodegen<'a> {
     fn stmt_to_rust_inline(&mut self, stmt: &Stmt, indent: &str) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                format!("{}{};", indent, self.expr_to_rust_inline(expr))
+                // 代入式は値を返さない形式で出力
+                if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
+                    let l = self.expr_to_rust_inline(lhs);
+                    let r = self.expr_to_rust_inline(rhs);
+                    match op {
+                        AssignOp::Assign => format!("{}{} = {};", indent, l, r),
+                        _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
+                    }
+                } else {
+                    format!("{}{};", indent, self.expr_to_rust_inline(expr))
+                }
             }
             Stmt::Expr(None, _) => format!("{};", indent),
             Stmt::Return(Some(expr), _) => {
@@ -1143,37 +1153,116 @@ impl<'a> RustCodegen<'a> {
 
     /// Switch 文の body から Case/Default を収集して match アームを生成
     fn collect_switch_cases(&mut self, stmt: &Stmt, indent: &str, result: &mut String) {
-        match stmt {
-            Stmt::Compound(compound) => {
+        // パス1: case/default とそれに続く文を収集
+        struct SwitchCase {
+            patterns: Vec<String>,   // case 式のリスト（複数 case ラベル対応）、空 = default
+            body_stmts: Vec<String>,
+            is_default: bool,
+        }
+
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        let body_indent = format!("{}    ", indent);
+
+        // Compound の中身をフラット化して処理
+        fn collect_items<'a>(stmt: &'a Stmt, items: &mut Vec<&'a BlockItem>) {
+            if let Stmt::Compound(compound) = stmt {
                 for item in &compound.items {
-                    match item {
-                        BlockItem::Stmt(s) => self.collect_switch_cases(s, indent, result),
-                        BlockItem::Decl(decl) => {
-                            result.push_str(&self.decl_to_rust_let(decl, indent));
+                    items.push(item);
+                }
+            }
+        }
+
+        // ネストされた case/default を展開して patterns と最終的な stmt を取得
+        fn flatten_case_chain<'a>(stmt: &'a Stmt, patterns: &mut Vec<&'a Expr>) -> (&'a Stmt, bool) {
+            match stmt {
+                Stmt::Case { expr, stmt: inner_stmt, .. } => {
+                    patterns.push(expr);
+                    flatten_case_chain(inner_stmt, patterns)
+                }
+                Stmt::Default { stmt: inner_stmt, .. } => {
+                    // default に到達
+                    (inner_stmt, true)
+                }
+                other => (other, false)
+            }
+        }
+
+        let mut items: Vec<&BlockItem> = Vec::new();
+        collect_items(stmt, &mut items);
+
+        for item in items {
+            match item {
+                BlockItem::Stmt(s) => {
+                    match s {
+                        Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                            // ネストされた case をフラット化
+                            let mut patterns: Vec<&Expr> = vec![case_expr];
+                            let (final_stmt, has_default) = flatten_case_chain(case_stmt, &mut patterns);
+
+                            let pattern_strs: Vec<String> = patterns.iter()
+                                .map(|e| self.expr_to_rust_inline(e))
+                                .collect();
+
+                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            cases.push(SwitchCase {
+                                patterns: pattern_strs,
+                                body_stmts: vec![first_stmt],
+                                is_default: has_default,
+                            });
+                        }
+                        Stmt::Default { stmt: default_stmt, .. } => {
+                            // ネストされた case をフラット化
+                            let mut patterns: Vec<&Expr> = Vec::new();
+                            let (final_stmt, _) = flatten_case_chain(default_stmt, &mut patterns);
+
+                            let pattern_strs: Vec<String> = patterns.iter()
+                                .map(|e| self.expr_to_rust_inline(e))
+                                .collect();
+
+                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            cases.push(SwitchCase {
+                                patterns: pattern_strs,
+                                body_stmts: vec![first_stmt],
+                                is_default: true,
+                            });
+                        }
+                        other => {
+                            // 直前の case に追加
+                            if let Some(last) = cases.last_mut() {
+                                last.body_stmts.push(self.stmt_to_rust_inline(other, &body_indent));
+                            }
+                            // case がまだない場合は無視
                         }
                     }
                 }
+                BlockItem::Decl(decl) => {
+                    // 宣言は直前の case に追加
+                    if let Some(last) = cases.last_mut() {
+                        last.body_stmts.push(self.decl_to_rust_let(decl, &body_indent));
+                    }
+                }
             }
-            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
-                let case_val = self.expr_to_rust_inline(case_expr);
-                result.push_str(&format!("{}{} => {{\n", indent, case_val));
-                let body_indent = format!("{}    ", indent);
-                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+        }
+
+        // パス2: 収集した cases から match アームを生成
+        for case in cases {
+            let pattern = if case.is_default {
+                if case.patterns.is_empty() {
+                    "_".to_string()
+                } else {
+                    // case A: case B: default: ... のパターン
+                    format!("{} | _", case.patterns.join(" | "))
+                }
+            } else {
+                case.patterns.join(" | ")
+            };
+
+            result.push_str(&format!("{}{} => {{\n", indent, pattern));
+            for stmt in &case.body_stmts {
+                result.push_str(stmt);
                 result.push_str("\n");
-                result.push_str(&format!("{}}}\n", indent));
             }
-            Stmt::Default { stmt: default_stmt, .. } => {
-                result.push_str(&format!("{}_ => {{\n", indent));
-                let body_indent = format!("{}    ", indent);
-                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
-                result.push_str("\n");
-                result.push_str(&format!("{}}}\n", indent));
-            }
-            _ => {
-                // Case/Default 以外の文
-                result.push_str(&self.stmt_to_rust_inline(stmt, indent));
-                result.push_str("\n");
-            }
+            result.push_str(&format!("{}}}\n", indent));
         }
     }
 
@@ -1707,7 +1796,17 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     fn stmt_to_rust_inline(&self, stmt: &Stmt, indent: &str) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                format!("{}{};", indent, self.expr_to_rust_inline(expr))
+                // 代入式は値を返さない形式で出力
+                if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
+                    let l = self.expr_to_rust_inline(lhs);
+                    let r = self.expr_to_rust_inline(rhs);
+                    match op {
+                        AssignOp::Assign => format!("{}{} = {};", indent, l, r),
+                        _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
+                    }
+                } else {
+                    format!("{}{};", indent, self.expr_to_rust_inline(expr))
+                }
             }
             Stmt::Expr(None, _) => format!("{};", indent),
             Stmt::Return(Some(expr), _) => {
@@ -1860,37 +1959,116 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
     /// Switch 文の body から Case/Default を収集して match アームを生成
     fn collect_switch_cases(&self, stmt: &Stmt, indent: &str, result: &mut String) {
-        match stmt {
-            Stmt::Compound(compound) => {
+        // パス1: case/default とそれに続く文を収集
+        struct SwitchCase {
+            patterns: Vec<String>,   // case 式のリスト（複数の case が連続する場合）
+            body_stmts: Vec<String>,
+            is_default: bool,
+        }
+
+        let mut cases: Vec<SwitchCase> = Vec::new();
+        let body_indent = format!("{}    ", indent);
+
+        // Compound の中身をフラット化して処理
+        fn collect_items<'a>(stmt: &'a Stmt, items: &mut Vec<&'a BlockItem>) {
+            if let Stmt::Compound(compound) = stmt {
                 for item in &compound.items {
-                    match item {
-                        BlockItem::Stmt(s) => self.collect_switch_cases(s, indent, result),
-                        BlockItem::Decl(decl) => {
-                            result.push_str(&self.decl_to_rust_let(decl, indent));
+                    items.push(item);
+                }
+            }
+        }
+
+        // ネストされた case/default を展開して patterns と最終的な stmt を取得
+        fn flatten_case_chain<'a>(stmt: &'a Stmt, patterns: &mut Vec<&'a Expr>) -> (&'a Stmt, bool) {
+            match stmt {
+                Stmt::Case { expr, stmt: inner_stmt, .. } => {
+                    patterns.push(expr);
+                    flatten_case_chain(inner_stmt, patterns)
+                }
+                Stmt::Default { stmt: inner_stmt, .. } => {
+                    // default に到達
+                    (inner_stmt, true)
+                }
+                other => (other, false)
+            }
+        }
+
+        let mut items: Vec<&BlockItem> = Vec::new();
+        collect_items(stmt, &mut items);
+
+        for item in items {
+            match item {
+                BlockItem::Stmt(s) => {
+                    match s {
+                        Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                            // ネストされた case をフラット化
+                            let mut patterns: Vec<&Expr> = vec![case_expr];
+                            let (final_stmt, has_default) = flatten_case_chain(case_stmt, &mut patterns);
+
+                            let pattern_strs: Vec<String> = patterns.iter()
+                                .map(|e| self.expr_to_rust_inline(e))
+                                .collect();
+
+                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            cases.push(SwitchCase {
+                                patterns: pattern_strs,
+                                body_stmts: vec![first_stmt],
+                                is_default: has_default,
+                            });
+                        }
+                        Stmt::Default { stmt: default_stmt, .. } => {
+                            // ネストされた case をフラット化
+                            let mut patterns: Vec<&Expr> = Vec::new();
+                            let (final_stmt, _) = flatten_case_chain(default_stmt, &mut patterns);
+
+                            let pattern_strs: Vec<String> = patterns.iter()
+                                .map(|e| self.expr_to_rust_inline(e))
+                                .collect();
+
+                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            cases.push(SwitchCase {
+                                patterns: pattern_strs,
+                                body_stmts: vec![first_stmt],
+                                is_default: true,
+                            });
+                        }
+                        other => {
+                            // 直前の case に追加
+                            if let Some(last) = cases.last_mut() {
+                                last.body_stmts.push(self.stmt_to_rust_inline(other, &body_indent));
+                            }
+                            // case がまだない場合は無視
                         }
                     }
                 }
+                BlockItem::Decl(decl) => {
+                    // 宣言は直前の case に追加
+                    if let Some(last) = cases.last_mut() {
+                        last.body_stmts.push(self.decl_to_rust_let(decl, &body_indent));
+                    }
+                }
             }
-            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
-                let case_val = self.expr_to_rust_inline(case_expr);
-                result.push_str(&format!("{}{} => {{\n", indent, case_val));
-                let body_indent = format!("{}    ", indent);
-                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+        }
+
+        // パス2: 収集した cases から match アームを生成
+        for case in cases {
+            let pattern = if case.is_default {
+                if case.patterns.is_empty() {
+                    "_".to_string()
+                } else {
+                    // case A: case B: default: ... のパターン
+                    format!("{} | _", case.patterns.join(" | "))
+                }
+            } else {
+                case.patterns.join(" | ")
+            };
+
+            result.push_str(&format!("{}{} => {{\n", indent, pattern));
+            for stmt in &case.body_stmts {
+                result.push_str(stmt);
                 result.push_str("\n");
-                result.push_str(&format!("{}}}\n", indent));
             }
-            Stmt::Default { stmt: default_stmt, .. } => {
-                result.push_str(&format!("{}_ => {{\n", indent));
-                let body_indent = format!("{}    ", indent);
-                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
-                result.push_str("\n");
-                result.push_str(&format!("{}}}\n", indent));
-            }
-            _ => {
-                // Case/Default 以外の文
-                result.push_str(&self.stmt_to_rust_inline(stmt, indent));
-                result.push_str("\n");
-            }
+            result.push_str(&format!("{}}}\n", indent));
         }
     }
 
