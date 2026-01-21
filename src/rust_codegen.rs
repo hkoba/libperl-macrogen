@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -1038,6 +1038,45 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::For { init, cond, step, body, .. } => {
+                let mut result = format!("{}{{\n", indent);
+                let nested_indent = format!("{}    ", indent);
+
+                // 初期化部分
+                if let Some(for_init) = init {
+                    match for_init {
+                        ForInit::Expr(expr) => {
+                            result.push_str(&format!("{}{};\n", nested_indent, self.expr_to_rust_inline(expr)));
+                        }
+                        ForInit::Decl(decl) => {
+                            result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
+                        }
+                    }
+                }
+
+                // ループ部分
+                if let Some(cond_expr) = cond {
+                    let cond_str = self.expr_to_rust_inline(cond_expr);
+                    result.push_str(&format!("{}while {} != 0 {{\n", nested_indent, cond_str));
+                } else {
+                    result.push_str(&format!("{}loop {{\n", nested_indent));
+                }
+
+                let body_indent = format!("{}    ", nested_indent);
+
+                // ループ本体
+                result.push_str(&self.stmt_to_rust_inline(body, &body_indent));
+                result.push_str("\n");
+
+                // ステップ部分
+                if let Some(step_expr) = step {
+                    result.push_str(&format!("{}{};\n", body_indent, self.expr_to_rust_inline(step_expr)));
+                }
+
+                result.push_str(&format!("{}}}\n", nested_indent));
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             Stmt::DoWhile { body, cond, .. } => {
                 // do { ... } while (0) パターンは単純なブロックとして出力
                 if is_zero_constant(cond) {
@@ -1634,6 +1673,45 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                let mut result = format!("{}{{\n", indent);
+                let nested_indent = format!("{}    ", indent);
+
+                // 初期化部分
+                if let Some(for_init) = init {
+                    match for_init {
+                        ForInit::Expr(expr) => {
+                            result.push_str(&format!("{}{};\n", nested_indent, self.expr_to_rust_inline(expr)));
+                        }
+                        ForInit::Decl(decl) => {
+                            result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
+                        }
+                    }
+                }
+
+                // ループ部分
+                if let Some(cond_expr) = cond {
+                    let cond_str = self.expr_to_rust_inline(cond_expr);
+                    result.push_str(&format!("{}while {} != 0 {{\n", nested_indent, cond_str));
+                } else {
+                    result.push_str(&format!("{}loop {{\n", nested_indent));
+                }
+
+                let body_indent = format!("{}    ", nested_indent);
+
+                // ループ本体
+                result.push_str(&self.stmt_to_rust_inline(body, &body_indent));
+                result.push_str("\n");
+
+                // ステップ部分
+                if let Some(step_expr) = step {
+                    result.push_str(&format!("{}{};\n", body_indent, self.expr_to_rust_inline(step_expr)));
+                }
+
+                result.push_str(&format!("{}}}\n", nested_indent));
                 result.push_str(&format!("{}}}", indent));
                 result
             }
