@@ -105,6 +105,15 @@ fn is_boolean_expr_kind(kind: &ExprKind) -> bool {
     }
 }
 
+/// 式がゼロ定数かどうかを判定
+fn is_zero_constant(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::IntLit(0) => true,
+        ExprKind::UIntLit(0) => true,
+        _ => false,
+    }
+}
+
 /// コード生成の設定
 #[derive(Debug, Clone)]
 pub struct CodegenConfig {
@@ -1020,6 +1029,22 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::DoWhile { body, cond, .. } => {
+                // do { ... } while (0) パターンは単純なブロックとして出力
+                if is_zero_constant(cond) {
+                    return self.stmt_to_rust_inline(body, indent);
+                }
+
+                // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
+                let mut result = format!("{}loop {{\n", indent);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                result.push_str("\n");
+                let cond_str = self.expr_to_rust_inline(cond);
+                result.push_str(&format!("{}    if {} == 0 {{ break; }}\n", indent, cond_str));
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(stmt)))
         }
     }
@@ -1591,6 +1616,22 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         }
                     }
                 }
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                // do { ... } while (0) パターンは単純なブロックとして出力
+                if is_zero_constant(cond) {
+                    return self.stmt_to_rust_inline(body, indent);
+                }
+
+                // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
+                let mut result = format!("{}loop {{\n", indent);
+                let nested_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                result.push_str("\n");
+                let cond_str = self.expr_to_rust_inline(cond);
+                result.push_str(&format!("{}    if {} == 0 {{ break; }}\n", indent, cond_str));
                 result.push_str(&format!("{}}}", indent));
                 result
             }
