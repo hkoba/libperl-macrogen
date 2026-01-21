@@ -641,39 +641,25 @@ impl<'a> RustCodegen<'a> {
 
     /// TypeName を Rust 型文字列に変換
     fn type_name_to_rust(&mut self, type_name: &crate::ast::TypeName) -> String {
-        // ベース型を取得（typedef 名があればそれを使用、なければ不完全マーカー）
-        let mut base_type: Option<String> = None;
-        for spec in &type_name.specs.type_specs {
-            if let crate::ast::TypeSpec::TypedefName(name) = spec {
-                base_type = Some(self.interner.get(*name).to_string());
-                break;
-            }
-        }
-        let mut base_type = base_type.unwrap_or_else(|| self.type_marker().to_string());
+        // decl_specs_to_rust でベース型を取得（プリミティブ型も正しく変換）
+        let base_type = self.decl_specs_to_rust(&type_name.specs);
 
-        // 宣言子からポインタ/配列を適用
-        if let Some(ref decl) = type_name.declarator {
-            for derived in &decl.derived {
-                match derived {
-                    DerivedDecl::Pointer(quals) => {
-                        if quals.is_const {
-                            base_type = format!("*const {}", base_type);
-                        } else {
-                            base_type = format!("*mut {}", base_type);
-                        }
-                    }
-                    DerivedDecl::Array(_) => {
-                        // 配列は簡易的にポインタとして扱う
-                        base_type = format!("*mut {}", base_type);
-                    }
-                    DerivedDecl::Function(_) => {
-                        // 関数ポインタは複雑なのでスキップ
-                    }
-                }
+        // 宣言子からポインタ/配列/関数を適用
+        let mut result = if let Some(ref decl) = type_name.declarator {
+            self.apply_derived_to_type(&base_type, &decl.derived)
+        } else {
+            base_type
+        };
+
+        // C の const 修飾子（例: const char*）を Rust の *const に反映
+        // 最も内側のポインタを *const にする
+        if type_name.specs.qualifiers.is_const {
+            if let Some(pos) = result.rfind("*mut ") {
+                result.replace_range(pos..pos + 5, "*const ");
             }
         }
 
-        base_type
+        result
     }
 
     /// DeclSpecs を Rust 型文字列に変換
@@ -815,6 +801,10 @@ impl<'a> RustCodegen<'a> {
         for d in derived.iter().rev() {
             match d {
                 DerivedDecl::Pointer(quals) => {
+                    // void ポインタの場合は c_void を使用
+                    if result == "()" {
+                        result = "c_void".to_string();
+                    }
                     if quals.is_const {
                         result = format!("*const {}", result);
                     } else {
@@ -822,6 +812,10 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 DerivedDecl::Array(arr) => {
+                    // void 配列の場合は c_void を使用
+                    if result == "()" {
+                        result = "c_void".to_string();
+                    }
                     if let Some(ref size_expr) = arr.size {
                         // 定数サイズ配列
                         if let ExprKind::IntLit(n) = &size_expr.kind {
@@ -1459,6 +1453,10 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         for d in derived.iter().rev() {
             match d {
                 DerivedDecl::Pointer(quals) => {
+                    // void ポインタの場合は c_void を使用
+                    if result == "()" {
+                        result = "c_void".to_string();
+                    }
                     if quals.is_const {
                         result = format!("*const {}", result);
                     } else {
@@ -1466,6 +1464,10 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     }
                 }
                 DerivedDecl::Array(arr) => {
+                    // void 配列の場合は c_void を使用
+                    if result == "()" {
+                        result = "c_void".to_string();
+                    }
                     if let Some(ref size_expr) = arr.size {
                         // 定数サイズ配列
                         if let ExprKind::IntLit(n) = &size_expr.kind {
@@ -2054,37 +2056,25 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
     /// TypeName を Rust 型文字列に変換
     fn type_name_to_rust(&self, type_name: &crate::ast::TypeName) -> String {
-        // ベース型を取得
-        let mut base_type = "/* type */".to_string();
-        for spec in &type_name.specs.type_specs {
-            if let crate::ast::TypeSpec::TypedefName(name) = spec {
-                base_type = self.interner.get(*name).to_string();
-                break;
+        // decl_specs_to_rust でベース型を取得（プリミティブ型も正しく変換）
+        let base_type = self.decl_specs_to_rust(&type_name.specs);
+
+        // 宣言子からポインタ/配列/関数を適用
+        let mut result = if let Some(ref decl) = type_name.declarator {
+            self.apply_derived_to_type(&base_type, &decl.derived)
+        } else {
+            base_type
+        };
+
+        // C の const 修飾子（例: const char*）を Rust の *const に反映
+        // 最も内側のポインタを *const にする
+        if type_name.specs.qualifiers.is_const {
+            if let Some(pos) = result.rfind("*mut ") {
+                result.replace_range(pos..pos + 5, "*const ");
             }
         }
 
-        // 宣言子からポインタ/配列を適用
-        if let Some(ref decl) = type_name.declarator {
-            for derived in &decl.derived {
-                match derived {
-                    DerivedDecl::Pointer(quals) => {
-                        if quals.is_const {
-                            base_type = format!("*const {}", base_type);
-                        } else {
-                            base_type = format!("*mut {}", base_type);
-                        }
-                    }
-                    DerivedDecl::Array(_) => {
-                        base_type = format!("*mut {}", base_type);
-                    }
-                    DerivedDecl::Function(_) => {
-                        // 関数ポインタは複雑なのでスキップ
-                    }
-                }
-            }
-        }
-
-        base_type
+        result
     }
 
     /// パース失敗マクロをコメント出力
