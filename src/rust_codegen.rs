@@ -1093,9 +1093,74 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::Switch { expr, body, .. } => {
+                let expr_str = self.expr_to_rust_inline(expr);
+                let mut result = format!("{}match {} {{\n", indent, expr_str);
+                let nested_indent = format!("{}    ", indent);
+
+                // body から Case/Default を収集
+                self.collect_switch_cases(body, &nested_indent, &mut result);
+
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                // Switch 外で Case が出現した場合（通常は Switch 内で処理される）
+                let case_val = self.expr_to_rust_inline(case_expr);
+                let mut result = format!("{}{} => {{\n", indent, case_val);
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::Default { stmt: default_stmt, .. } => {
+                let mut result = format!("{}_ => {{\n", indent);
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             Stmt::Break(_) => format!("{}break;", indent),
             Stmt::Continue(_) => format!("{}continue;", indent),
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(stmt)))
+        }
+    }
+
+    /// Switch 文の body から Case/Default を収集して match アームを生成
+    fn collect_switch_cases(&mut self, stmt: &Stmt, indent: &str, result: &mut String) {
+        match stmt {
+            Stmt::Compound(compound) => {
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(s) => self.collect_switch_cases(s, indent, result),
+                        BlockItem::Decl(decl) => {
+                            result.push_str(&self.decl_to_rust_let(decl, indent));
+                        }
+                    }
+                }
+            }
+            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                let case_val = self.expr_to_rust_inline(case_expr);
+                result.push_str(&format!("{}{} => {{\n", indent, case_val));
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}\n", indent));
+            }
+            Stmt::Default { stmt: default_stmt, .. } => {
+                result.push_str(&format!("{}_ => {{\n", indent));
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}\n", indent));
+            }
+            _ => {
+                // Case/Default 以外の文
+                result.push_str(&self.stmt_to_rust_inline(stmt, indent));
+                result.push_str("\n");
+            }
         }
     }
 
@@ -1733,9 +1798,73 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 result.push_str(&format!("{}}}", indent));
                 result
             }
+            Stmt::Switch { expr, body, .. } => {
+                let expr_str = self.expr_to_rust_inline(expr);
+                let mut result = format!("{}match {} {{\n", indent, expr_str);
+                let nested_indent = format!("{}    ", indent);
+
+                // body から Case/Default を収集
+                self.collect_switch_cases(body, &nested_indent, &mut result);
+
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                let case_val = self.expr_to_rust_inline(case_expr);
+                let mut result = format!("{}{} => {{\n", indent, case_val);
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
+            Stmt::Default { stmt: default_stmt, .. } => {
+                let mut result = format!("{}_ => {{\n", indent);
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}", indent));
+                result
+            }
             Stmt::Break(_) => format!("{}break;", indent),
             Stmt::Continue(_) => format!("{}continue;", indent),
             _ => format!("{}/* TODO: {:?} */", indent, std::mem::discriminant(stmt))
+        }
+    }
+
+    /// Switch 文の body から Case/Default を収集して match アームを生成
+    fn collect_switch_cases(&self, stmt: &Stmt, indent: &str, result: &mut String) {
+        match stmt {
+            Stmt::Compound(compound) => {
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(s) => self.collect_switch_cases(s, indent, result),
+                        BlockItem::Decl(decl) => {
+                            result.push_str(&self.decl_to_rust_let(decl, indent));
+                        }
+                    }
+                }
+            }
+            Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
+                let case_val = self.expr_to_rust_inline(case_expr);
+                result.push_str(&format!("{}{} => {{\n", indent, case_val));
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}\n", indent));
+            }
+            Stmt::Default { stmt: default_stmt, .. } => {
+                result.push_str(&format!("{}_ => {{\n", indent));
+                let body_indent = format!("{}    ", indent);
+                result.push_str(&self.stmt_to_rust_inline(default_stmt, &body_indent));
+                result.push_str("\n");
+                result.push_str(&format!("{}}}\n", indent));
+            }
+            _ => {
+                // Case/Default 以外の文
+                result.push_str(&self.stmt_to_rust_inline(stmt, indent));
+                result.push_str("\n");
+            }
         }
     }
 
