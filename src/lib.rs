@@ -4,6 +4,7 @@
 //! Rustコードに変換するツール。
 
 pub mod apidoc;
+pub mod apidoc_data;
 pub mod ast;
 pub mod error;
 pub mod fields_dict;

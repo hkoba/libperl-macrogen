@@ -774,9 +774,10 @@ impl From<PerlConfigError> for ApidocResolveError {
 ///
 /// 検索順序:
 /// 1. 指定されたベースディレクトリの apidoc/（base_dir が Some の場合）
-/// 2. 実行ファイルと同じディレクトリの apidoc/
-/// 3. 実行ファイルの親ディレクトリの apidoc/ (開発時: target/debug/../apidoc)
-/// 4. カレントディレクトリの apidoc/
+/// 2. 埋め込みデータのキャッシュディレクトリ（ライブラリ配布時）
+/// 3. 実行ファイルと同じディレクトリの apidoc/
+/// 4. 実行ファイルの親ディレクトリの apidoc/ (開発時: target/debug/../apidoc)
+/// 5. カレントディレクトリの apidoc/
 pub fn find_apidoc_dir_from(base_dir: Option<&Path>) -> Option<PathBuf> {
     // 1. 指定されたベースディレクトリ
     if let Some(base) = base_dir {
@@ -790,7 +791,14 @@ pub fn find_apidoc_dir_from(base_dir: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
-    // 2. 実行ファイルと同じディレクトリ
+    // 2. 埋め込みデータのキャッシュディレクトリ
+    if let Some(embedded_dir) = crate::apidoc_data::get_apidoc_dir() {
+        if embedded_dir.is_dir() {
+            return Some(embedded_dir);
+        }
+    }
+
+    // 3. 実行ファイルと同じディレクトリ
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let apidoc_dir = exe_dir.join("apidoc");
@@ -798,7 +806,7 @@ pub fn find_apidoc_dir_from(base_dir: Option<&Path>) -> Option<PathBuf> {
                 return Some(apidoc_dir);
             }
 
-            // 3. 実行ファイルの親ディレクトリ (開発時: target/debug/../apidoc -> project/apidoc)
+            // 4. 実行ファイルの親ディレクトリ (開発時: target/debug/../apidoc -> project/apidoc)
             if let Some(parent_dir) = exe_dir.parent() {
                 let apidoc_dir = parent_dir.join("apidoc");
                 if apidoc_dir.is_dir() {
@@ -816,7 +824,7 @@ pub fn find_apidoc_dir_from(base_dir: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
-    // 4. カレントディレクトリ
+    // 5. カレントディレクトリ
     if let Ok(cwd) = std::env::current_dir() {
         let apidoc_dir = cwd.join("apidoc");
         if apidoc_dir.is_dir() {
