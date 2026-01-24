@@ -1244,10 +1244,15 @@ impl<'a> RustCodegen<'a> {
                                 .map(|e| self.expr_to_rust_inline(e))
                                 .collect();
 
-                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
+                            let body_stmts = if matches!(final_stmt, Stmt::Break(_)) {
+                                vec![]
+                            } else {
+                                vec![self.stmt_to_rust_inline(final_stmt, &body_indent)]
+                            };
                             cases.push(SwitchCase {
                                 patterns: pattern_strs,
-                                body_stmts: vec![first_stmt],
+                                body_stmts,
                                 is_default: has_default,
                             });
                         }
@@ -1260,10 +1265,15 @@ impl<'a> RustCodegen<'a> {
                                 .map(|e| self.expr_to_rust_inline(e))
                                 .collect();
 
-                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
+                            let body_stmts = if matches!(final_stmt, Stmt::Break(_)) {
+                                vec![]
+                            } else {
+                                vec![self.stmt_to_rust_inline(final_stmt, &body_indent)]
+                            };
                             cases.push(SwitchCase {
                                 patterns: pattern_strs,
-                                body_stmts: vec![first_stmt],
+                                body_stmts,
                                 is_default: true,
                             });
                         }
@@ -2088,10 +2098,15 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                                 .map(|e| self.expr_to_rust_inline(e))
                                 .collect();
 
-                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
+                            let body_stmts = if matches!(final_stmt, Stmt::Break(_)) {
+                                vec![]
+                            } else {
+                                vec![self.stmt_to_rust_inline(final_stmt, &body_indent)]
+                            };
                             cases.push(SwitchCase {
                                 patterns: pattern_strs,
-                                body_stmts: vec![first_stmt],
+                                body_stmts,
                                 is_default: has_default,
                             });
                         }
@@ -2104,10 +2119,15 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                                 .map(|e| self.expr_to_rust_inline(e))
                                 .collect();
 
-                            let first_stmt = self.stmt_to_rust_inline(final_stmt, &body_indent);
+                            // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
+                            let body_stmts = if matches!(final_stmt, Stmt::Break(_)) {
+                                vec![]
+                            } else {
+                                vec![self.stmt_to_rust_inline(final_stmt, &body_indent)]
+                            };
                             cases.push(SwitchCase {
                                 patterns: pattern_strs,
-                                body_stmts: vec![first_stmt],
+                                body_stmts,
                                 is_default: true,
                             });
                         }
