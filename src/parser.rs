@@ -97,6 +97,8 @@ pub struct Parser<'a, S: TokenSource> {
     allow_missing_semi: bool,
     /// パース中に検出した関数呼び出しの数
     pub function_call_count: usize,
+    /// パース中に検出したポインタデリファレンスの数
+    pub deref_count: usize,
 }
 
 /// Preprocessor 専用の後方互換コンストラクタ
@@ -164,6 +166,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             handle_macro_markers: false,
             allow_missing_semi: false,
             function_call_count: 0,
+            deref_count: 0,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -181,6 +184,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             handle_macro_markers: false,
             allow_missing_semi: false,
             function_call_count: 0,
+            deref_count: 0,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -285,7 +289,16 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         // 関数定義かどうかを判定
         // 関数定義: 宣言子の後に { が来る
         if self.check(&TokenKind::LBrace) {
+            // 本体パース前のカウントを記録
+            let call_count_before = self.function_call_count;
+            let deref_count_before = self.deref_count;
+
             let body = self.parse_compound_stmt()?;
+
+            // 差分が関数本体のカウント
+            let function_call_count = self.function_call_count - call_count_before;
+            let deref_count = self.deref_count - deref_count_before;
+
             return Ok(ExternalDecl::FunctionDef(FunctionDef {
                 specs,
                 declarator,
@@ -293,6 +306,8 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 info: NodeInfo::new(loc),
                 comments,
                 is_target,
+                function_call_count,
+                deref_count,
             }));
         }
 
@@ -1740,6 +1755,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 TokenKind::Arrow => {
                     self.advance()?;
                     let member = self.expect_ident()?;
+                    self.deref_count += 1;
                     expr = Expr::new(
                         ExprKind::PtrMember {
                             expr: Box::new(expr),
@@ -1785,6 +1801,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             TokenKind::Star => {
                 self.advance()?;
                 let expr = self.parse_cast_expr()?;
+                self.deref_count += 1;
                 Ok(Expr::new(ExprKind::Deref(Box::new(expr)), loc))
             }
             TokenKind::Plus => {
@@ -1898,6 +1915,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 TokenKind::Arrow => {
                     self.advance()?;
                     let member = self.expect_ident()?;
+                    self.deref_count += 1;
                     expr = Expr::new(
                         ExprKind::PtrMember {
                             expr: Box::new(expr),
@@ -2474,6 +2492,15 @@ pub fn parse_statement_from_tokens_ref(
 pub struct ParseStats {
     /// 関数呼び出しの数
     pub function_call_count: usize,
+    /// ポインタデリファレンスの数
+    pub deref_count: usize,
+}
+
+impl ParseStats {
+    /// unsafe 操作を含むか
+    pub fn has_unsafe_ops(&self) -> bool {
+        self.function_call_count > 0 || self.deref_count > 0
+    }
 }
 
 /// トークン列から式をパース（統計情報付き・参照ベース版）
@@ -2500,6 +2527,7 @@ pub fn parse_expression_from_tokens_ref_with_stats(
     let expr = parser.parse_expr_only()?;
     let stats = ParseStats {
         function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
     };
     Ok((expr, stats))
 }
@@ -2529,6 +2557,7 @@ pub fn parse_statement_from_tokens_ref_with_stats(
     let stmt = parser.parse_stmt_allow_missing_semi()?;
     let stats = ParseStats {
         function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
     };
     Ok((stmt, stats))
 }

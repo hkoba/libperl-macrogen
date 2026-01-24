@@ -14,6 +14,7 @@ use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::parser::{
     parse_expression_from_tokens_ref_with_stats,
     parse_statement_from_tokens_ref_with_stats,
+    ParseStats,
 };
 use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
@@ -693,8 +694,10 @@ pub struct MacroInferInfo {
     /// value: 型パラメータ名 ("T", "U", etc.)
     pub generic_type_params: HashMap<i32, String>,
 
-    /// 関数呼び出しを含むかどうか（パース時に検出）
-    pub has_function_calls: bool,
+    /// 関数呼び出しの数（パース時に検出）
+    pub function_call_count: usize,
+    /// ポインタデリファレンスの数（パース時に検出）
+    pub deref_count: usize,
 }
 
 impl MacroInferInfo {
@@ -715,8 +718,14 @@ impl MacroInferInfo {
             args_infer_status: InferStatus::Pending,
             return_infer_status: InferStatus::Pending,
             generic_type_params: HashMap::new(),
-            has_function_calls: false,
+            function_call_count: 0,
+            deref_count: 0,
         }
+    }
+
+    /// unsafe 操作を含むか
+    pub fn has_unsafe_ops(&self) -> bool {
+        self.function_call_count > 0 || self.deref_count > 0
     }
 
     /// パラメータ名から対応する ExprId を検索
@@ -1007,9 +1016,10 @@ impl MacroInferContext {
         info.is_thx_dependent = has_thx;
 
         // パースを試行
-        let (parse_result, has_function_calls) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        let (parse_result, stats) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
         info.parse_result = parse_result;
-        info.has_function_calls = has_function_calls;
+        info.function_call_count = stats.function_call_count;
+        info.deref_count = stats.deref_count;
 
         // パース成功した場合、assert 呼び出しを Assert 式に変換
         match &mut info.parse_result {
@@ -1382,9 +1392,10 @@ impl MacroInferContext {
         self.collect_uses_from_called(expander.called_macros(), &mut info);
 
         // パースを試行
-        let (parse_result, has_function_calls) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        let (parse_result, stats) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
         info.parse_result = parse_result;
-        info.has_function_calls = has_function_calls;
+        info.function_call_count = stats.function_call_count;
+        info.deref_count = stats.deref_count;
 
         // パース成功した場合、型制約を収集
         if let ParseResult::Expression(ref expr) = info.parse_result {
@@ -1471,9 +1482,9 @@ impl MacroInferContext {
         interner: &StringInterner,
         files: &FileRegistry,
         typedefs: &HashSet<InternedStr>,
-    ) -> (ParseResult, bool) {
+    ) -> (ParseResult, ParseStats) {
         if tokens.is_empty() {
-            return (ParseResult::Unparseable(Some("empty token sequence".to_string())), false);
+            return (ParseResult::Unparseable(Some("empty token sequence".to_string())), ParseStats::default());
         }
 
         // 空白・改行をスキップして最初の有効なトークンを探す
@@ -1489,7 +1500,7 @@ impl MacroInferContext {
                 Ok((stmt, stats)) => {
                     return (
                         ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
-                        stats.function_call_count > 0,
+                        stats,
                     );
                 }
                 Err(_) => {} // フォールスルーして式としてパース
@@ -1500,9 +1511,9 @@ impl MacroInferContext {
         match parse_expression_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
             Ok((expr, stats)) => (
                 ParseResult::Expression(Box::new(expr)),
-                stats.function_call_count > 0,
+                stats,
             ),
-            Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), false),
+            Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), ParseStats::default()),
         }
     }
 

@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec, count_function_calls_in_compound_stmt};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -315,8 +315,8 @@ impl<'a> RustCodegen<'a> {
         // 関数定義（ジェネリック句付き）
         self.writeln(&format!("pub unsafe fn {}{}({}) -> {} {{", name_str, generic_clause, params_str, return_type));
 
-        // 関数呼び出しを含む場合のみ unsafe ブロックを生成
-        let needs_unsafe = info.has_function_calls;
+        // unsafe 操作（関数呼び出し or デリファレンス）を含む場合のみ unsafe ブロックを生成
+        let needs_unsafe = info.has_unsafe_ops();
         let body_indent = if needs_unsafe { "        " } else { "    " };
 
         if needs_unsafe {
@@ -925,8 +925,8 @@ impl<'a> RustCodegen<'a> {
         // 関数定義
         self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
 
-        // 関数呼び出しを含む場合のみ unsafe ブロックを生成
-        let needs_unsafe = count_function_calls_in_compound_stmt(&func_def.body) > 0;
+        // unsafe 操作（関数呼び出し or デリファレンス）を含む場合のみ unsafe ブロックを生成
+        let needs_unsafe = func_def.function_call_count > 0 || func_def.deref_count > 0;
 
         if needs_unsafe {
             self.writeln("    unsafe {");

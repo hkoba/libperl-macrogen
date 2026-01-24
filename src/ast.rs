@@ -204,6 +204,10 @@ pub struct FunctionDef {
     pub comments: Vec<Comment>,
     /// ターゲットディレクトリで定義されたかどうか
     pub is_target: bool,
+    /// 関数本体に含まれる関数呼び出しの数（パース時に検出）
+    pub function_call_count: usize,
+    /// 関数本体に含まれるポインタデリファレンスの数（パース時に検出）
+    pub deref_count: usize,
 }
 
 impl FunctionDef {
@@ -683,134 +687,6 @@ pub enum AssertKind {
     /// assert_(condition) - 末尾カンマ付き
     AssertUnderscore,
 }
-
-// ============================================================================
-// 関数呼び出しカウント
-// ============================================================================
-
-/// 式に含まれる関数呼び出しの数を数える
-pub fn count_function_calls_in_expr(expr: &Expr) -> usize {
-    match &expr.kind {
-        ExprKind::Call { func, args } => {
-            1 + count_function_calls_in_expr(func)
-                + args.iter().map(count_function_calls_in_expr).sum::<usize>()
-        }
-        ExprKind::Index { expr, index } => {
-            count_function_calls_in_expr(expr) + count_function_calls_in_expr(index)
-        }
-        ExprKind::Member { expr, .. } | ExprKind::PtrMember { expr, .. } => {
-            count_function_calls_in_expr(expr)
-        }
-        ExprKind::PostInc(e) | ExprKind::PostDec(e) => count_function_calls_in_expr(e),
-        ExprKind::PreInc(e) | ExprKind::PreDec(e) => count_function_calls_in_expr(e),
-        ExprKind::AddrOf(e) | ExprKind::Deref(e) => count_function_calls_in_expr(e),
-        ExprKind::UnaryPlus(e) | ExprKind::UnaryMinus(e) => count_function_calls_in_expr(e),
-        ExprKind::BitNot(e) | ExprKind::LogNot(e) => count_function_calls_in_expr(e),
-        ExprKind::Sizeof(e) => count_function_calls_in_expr(e),
-        ExprKind::Cast { expr, .. } => count_function_calls_in_expr(expr),
-        ExprKind::Binary { lhs, rhs, .. } => {
-            count_function_calls_in_expr(lhs) + count_function_calls_in_expr(rhs)
-        }
-        ExprKind::Conditional { cond, then_expr, else_expr } => {
-            count_function_calls_in_expr(cond)
-                + count_function_calls_in_expr(then_expr)
-                + count_function_calls_in_expr(else_expr)
-        }
-        ExprKind::Assign { lhs, rhs, .. } => {
-            count_function_calls_in_expr(lhs) + count_function_calls_in_expr(rhs)
-        }
-        ExprKind::Comma { lhs, rhs } => {
-            count_function_calls_in_expr(lhs) + count_function_calls_in_expr(rhs)
-        }
-        ExprKind::StmtExpr(compound) => count_function_calls_in_compound_stmt(compound),
-        ExprKind::CompoundLit { init, .. } => {
-            init.iter().map(|item| {
-                count_function_calls_in_initializer(&item.init)
-            }).sum()
-        }
-        ExprKind::Assert { condition, .. } => count_function_calls_in_expr(condition),
-        // リテラルや識別子は関数呼び出しを含まない
-        ExprKind::Ident(_)
-        | ExprKind::IntLit(_)
-        | ExprKind::UIntLit(_)
-        | ExprKind::FloatLit(_)
-        | ExprKind::CharLit(_)
-        | ExprKind::StringLit(_)
-        | ExprKind::SizeofType(_)
-        | ExprKind::Alignof(_) => 0,
-    }
-}
-
-/// 初期化子に含まれる関数呼び出しの数を数える
-fn count_function_calls_in_initializer(init: &Initializer) -> usize {
-    match init {
-        Initializer::Expr(expr) => count_function_calls_in_expr(expr),
-        Initializer::List(items) => {
-            items.iter().map(|item| {
-                count_function_calls_in_initializer(&item.init)
-            }).sum()
-        }
-    }
-}
-
-/// 文に含まれる関数呼び出しの数を数える
-pub fn count_function_calls_in_stmt(stmt: &Stmt) -> usize {
-    match stmt {
-        Stmt::Compound(compound) => count_function_calls_in_compound_stmt(compound),
-        Stmt::Expr(Some(expr), _) => count_function_calls_in_expr(expr),
-        Stmt::Expr(None, _) => 0,
-        Stmt::If { cond, then_stmt, else_stmt, .. } => {
-            count_function_calls_in_expr(cond)
-                + count_function_calls_in_stmt(then_stmt)
-                + else_stmt.as_ref().map_or(0, |s| count_function_calls_in_stmt(s))
-        }
-        Stmt::Switch { expr, body, .. } => {
-            count_function_calls_in_expr(expr) + count_function_calls_in_stmt(body)
-        }
-        Stmt::While { cond, body, .. } => {
-            count_function_calls_in_expr(cond) + count_function_calls_in_stmt(body)
-        }
-        Stmt::DoWhile { body, cond, .. } => {
-            count_function_calls_in_stmt(body) + count_function_calls_in_expr(cond)
-        }
-        Stmt::For { init, cond, step, body, .. } => {
-            let init_count = match init {
-                Some(ForInit::Expr(expr)) => count_function_calls_in_expr(expr),
-                Some(ForInit::Decl(decl)) => count_function_calls_in_decl(decl),
-                None => 0,
-            };
-            let cond_count = cond.as_ref().map_or(0, |e| count_function_calls_in_expr(e));
-            let step_count = step.as_ref().map_or(0, |e| count_function_calls_in_expr(e));
-            init_count + cond_count + step_count + count_function_calls_in_stmt(body)
-        }
-        Stmt::Return(Some(expr), _) => count_function_calls_in_expr(expr),
-        Stmt::Return(None, _) => 0,
-        Stmt::Label { stmt, .. } => count_function_calls_in_stmt(stmt),
-        Stmt::Case { stmt, expr, .. } => {
-            count_function_calls_in_expr(expr) + count_function_calls_in_stmt(stmt)
-        }
-        Stmt::Default { stmt, .. } => count_function_calls_in_stmt(stmt),
-        Stmt::Goto(_, _) | Stmt::Continue(_) | Stmt::Break(_) | Stmt::Asm { .. } => 0,
-    }
-}
-
-/// 宣言に含まれる関数呼び出しの数を数える
-fn count_function_calls_in_decl(decl: &Declaration) -> usize {
-    decl.declarators.iter().map(|id| {
-        id.init.as_ref().map_or(0, count_function_calls_in_initializer)
-    }).sum()
-}
-
-/// 複合文に含まれる関数呼び出しの数を数える
-pub fn count_function_calls_in_compound_stmt(compound: &CompoundStmt) -> usize {
-    compound.items.iter().map(|item| {
-        match item {
-            BlockItem::Stmt(stmt) => count_function_calls_in_stmt(stmt),
-            BlockItem::Decl(decl) => count_function_calls_in_decl(decl),
-        }
-    }).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
