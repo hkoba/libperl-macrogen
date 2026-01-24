@@ -515,6 +515,14 @@ impl<'a> RustCodegen<'a> {
                 format!("({} {} {})", l, bin_op_to_rust(*op), r)
             }
             ExprKind::Call { func, args } => {
+                // __builtin_expect(cond, expected) -> cond
+                // GCC の分岐予測ヒントは Rust では無視
+                if let ExprKind::Ident(name) = &func.kind {
+                    let func_name = self.interner.get(*name);
+                    if func_name == "__builtin_expect" && args.len() >= 1 {
+                        return self.expr_to_rust(&args[0], info);
+                    }
+                }
                 let f = self.expr_to_rust(func, info);
                 let a: Vec<_> = args.iter()
                     .map(|a| self.expr_to_rust(a, info))
@@ -1319,6 +1327,13 @@ impl<'a> RustCodegen<'a> {
                 format!("({} {} {})", l, bin_op_to_rust(*op), r)
             }
             ExprKind::Call { func, args } => {
+                // __builtin_expect(cond, expected) -> cond
+                if let ExprKind::Ident(name) = &func.kind {
+                    let func_name = self.interner.get(*name);
+                    if func_name == "__builtin_expect" && args.len() >= 1 {
+                        return self.expr_to_rust_inline(&args[0]);
+                    }
+                }
                 let f = self.expr_to_rust_inline(func);
                 let a: Vec<_> = args.iter()
                     .map(|a| self.expr_to_rust_inline(a))
@@ -2135,6 +2150,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 format!("({} {} {})", l, bin_op_to_rust(*op), r)
             }
             ExprKind::Call { func, args } => {
+                // __builtin_expect(cond, expected) -> cond
+                if let ExprKind::Ident(name) = &func.kind {
+                    let func_name = self.interner.get(*name);
+                    if func_name == "__builtin_expect" && args.len() >= 1 {
+                        return self.expr_to_rust_inline(&args[0]);
+                    }
+                }
                 let f = self.expr_to_rust_inline(func);
                 let a: Vec<_> = args.iter()
                     .map(|a| self.expr_to_rust_inline(a))
