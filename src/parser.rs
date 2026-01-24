@@ -95,6 +95,8 @@ pub struct Parser<'a, S: TokenSource> {
     handle_macro_markers: bool,
     /// do-while 文の末尾セミコロンを省略可能にするフラグ
     allow_missing_semi: bool,
+    /// パース中に検出した関数呼び出しの数
+    pub function_call_count: usize,
 }
 
 /// Preprocessor 専用の後方互換コンストラクタ
@@ -161,6 +163,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             macro_ctx: MacroContext::new(),
             handle_macro_markers: false,
             allow_missing_semi: false,
+            function_call_count: 0,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -177,6 +180,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             macro_ctx: MacroContext::new(),
             handle_macro_markers: false,
             allow_missing_semi: false,
+            function_call_count: 0,
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -1713,6 +1717,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         self.advance()?;
                     }
                     self.expect(&TokenKind::RParen)?;
+                    self.function_call_count += 1;
                     expr = Expr::new(
                         ExprKind::Call {
                             func: Box::new(expr),
@@ -1870,6 +1875,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                         }
                     }
                     self.expect(&TokenKind::RParen)?;
+                    self.function_call_count += 1;
                     expr = Expr::new(
                         ExprKind::Call {
                             func: Box::new(expr),
@@ -2461,6 +2467,70 @@ pub fn parse_statement_from_tokens_ref(
     let mut source = TokenSliceRef::new(tokens, interner, files);
     let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
     parser.parse_stmt_allow_missing_semi()
+}
+
+/// パース結果に付随する統計情報
+#[derive(Debug, Clone, Default)]
+pub struct ParseStats {
+    /// 関数呼び出しの数
+    pub function_call_count: usize,
+}
+
+/// トークン列から式をパース（統計情報付き・参照ベース版）
+///
+/// `parse_expression_from_tokens_ref` と同様だが、
+/// パース統計（関数呼び出し数など）も返す。
+///
+/// # Arguments
+/// * `tokens` - パースするトークン列
+/// * `interner` - 文字列インターナーへの参照
+/// * `files` - ファイルレジストリへの参照
+/// * `typedefs` - typedef名のセットへの参照
+///
+/// # Returns
+/// (パースされた式, 統計情報)
+pub fn parse_expression_from_tokens_ref_with_stats(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<(Expr, ParseStats)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    let expr = parser.parse_expr_only()?;
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+    };
+    Ok((expr, stats))
+}
+
+/// トークン列を文としてパース（統計情報付き・参照ベース版）
+///
+/// `parse_statement_from_tokens_ref` と同様だが、
+/// パース統計（関数呼び出し数など）も返す。
+/// do-while の末尾セミコロンは省略可能。
+///
+/// # Arguments
+/// * `tokens` - パースするトークン列
+/// * `interner` - 文字列インターナーへの参照
+/// * `files` - ファイルレジストリへの参照
+/// * `typedefs` - typedef名のセットへの参照
+///
+/// # Returns
+/// (パースされた文, 統計情報)
+pub fn parse_statement_from_tokens_ref_with_stats(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<(Stmt, ParseStats)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    let stmt = parser.parse_stmt_allow_missing_semi()?;
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+    };
+    Ok((stmt, stats))
 }
 
 /// 型文字列から TypeName をパース

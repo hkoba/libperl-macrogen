@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec, count_function_calls_in_compound_stmt};
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -315,26 +315,35 @@ impl<'a> RustCodegen<'a> {
         // 関数定義（ジェネリック句付き）
         self.writeln(&format!("pub unsafe fn {}{}({}) -> {} {{", name_str, generic_clause, params_str, return_type));
 
-        // 関数本体（unsafe ブロックで囲む - Rust 2024 edition 対応）
-        self.writeln("    unsafe {");
+        // 関数呼び出しを含む場合のみ unsafe ブロックを生成
+        let needs_unsafe = info.has_function_calls;
+        let body_indent = if needs_unsafe { "        " } else { "    " };
+
+        if needs_unsafe {
+            self.writeln("    unsafe {");
+        }
+
         match &info.parse_result {
             ParseResult::Expression(expr) => {
                 let rust_expr = self.expr_to_rust(expr, info);
-                self.writeln(&format!("        {}", rust_expr));
+                self.writeln(&format!("{}{}", body_indent, rust_expr));
             }
             ParseResult::Statement(block_items) => {
                 for item in block_items {
                     if let BlockItem::Stmt(stmt) = item {
                         let rust_stmt = self.stmt_to_rust(stmt, info);
-                        self.writeln(&format!("        {}", rust_stmt));
+                        self.writeln(&format!("{}{}", body_indent, rust_stmt));
                     }
                 }
             }
             ParseResult::Unparseable(_) => {
-                self.writeln("        unimplemented!()");
+                self.writeln(&format!("{}unimplemented!()", body_indent));
             }
         }
-        self.writeln("    }");
+
+        if needs_unsafe {
+            self.writeln("    }");
+        }
 
         self.writeln("}");
         self.writeln("");
@@ -916,11 +925,18 @@ impl<'a> RustCodegen<'a> {
         // 関数定義
         self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
 
-        // 関数本体（unsafe ブロックで囲む - Rust 2024 edition 対応）
-        self.writeln("    unsafe {");
-        let body_str = self.compound_stmt_to_string(&func_def.body, "        ");
-        self.buffer.push_str(&body_str);
-        self.writeln("    }");
+        // 関数呼び出しを含む場合のみ unsafe ブロックを生成
+        let needs_unsafe = count_function_calls_in_compound_stmt(&func_def.body) > 0;
+
+        if needs_unsafe {
+            self.writeln("    unsafe {");
+            let body_str = self.compound_stmt_to_string(&func_def.body, "        ");
+            self.buffer.push_str(&body_str);
+            self.writeln("    }");
+        } else {
+            let body_str = self.compound_stmt_to_string(&func_def.body, "    ");
+            self.buffer.push_str(&body_str);
+        }
 
         self.writeln("}");
         self.writeln("");

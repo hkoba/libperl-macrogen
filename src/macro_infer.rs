@@ -11,7 +11,10 @@ use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
-use crate::parser::{parse_expression_from_tokens_ref, parse_statement_from_tokens_ref};
+use crate::parser::{
+    parse_expression_from_tokens_ref_with_stats,
+    parse_statement_from_tokens_ref_with_stats,
+};
 use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
 use crate::source::FileRegistry;
@@ -689,6 +692,9 @@ pub struct MacroInferInfo {
     /// key: パラメータインデックス（-1 は戻り値型）
     /// value: 型パラメータ名 ("T", "U", etc.)
     pub generic_type_params: HashMap<i32, String>,
+
+    /// 関数呼び出しを含むかどうか（パース時に検出）
+    pub has_function_calls: bool,
 }
 
 impl MacroInferInfo {
@@ -709,6 +715,7 @@ impl MacroInferInfo {
             args_infer_status: InferStatus::Pending,
             return_infer_status: InferStatus::Pending,
             generic_type_params: HashMap::new(),
+            has_function_calls: false,
         }
     }
 
@@ -1000,7 +1007,9 @@ impl MacroInferContext {
         info.is_thx_dependent = has_thx;
 
         // パースを試行
-        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        let (parse_result, has_function_calls) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        info.parse_result = parse_result;
+        info.has_function_calls = has_function_calls;
 
         // パース成功した場合、assert 呼び出しを Assert 式に変換
         match &mut info.parse_result {
@@ -1373,7 +1382,9 @@ impl MacroInferContext {
         self.collect_uses_from_called(expander.called_macros(), &mut info);
 
         // パースを試行
-        info.parse_result = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        let (parse_result, has_function_calls) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+        info.parse_result = parse_result;
+        info.has_function_calls = has_function_calls;
 
         // パース成功した場合、型制約を収集
         if let ParseResult::Expression(ref expr) = info.parse_result {
@@ -1451,15 +1462,18 @@ impl MacroInferContext {
     }
 
     /// トークン列を式または文としてパース試行
+    ///
+    /// # Returns
+    /// (パース結果, 関数呼び出しを含むか)
     fn try_parse_tokens(
         &self,
         tokens: &[crate::token::Token],
         interner: &StringInterner,
         files: &FileRegistry,
         typedefs: &HashSet<InternedStr>,
-    ) -> ParseResult {
+    ) -> (ParseResult, bool) {
         if tokens.is_empty() {
-            return ParseResult::Unparseable(Some("empty token sequence".to_string()));
+            return (ParseResult::Unparseable(Some("empty token sequence".to_string())), false);
         }
 
         // 空白・改行をスキップして最初の有効なトークンを探す
@@ -1471,16 +1485,24 @@ impl MacroInferContext {
         let is_statement_start = first_significant
             .is_some_and(|t| matches!(t.kind, TokenKind::KwDo | TokenKind::KwIf));
         if is_statement_start {
-            match parse_statement_from_tokens_ref(tokens.to_vec(), interner, files, typedefs) {
-                Ok(stmt) => return ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+            match parse_statement_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
+                Ok((stmt, stats)) => {
+                    return (
+                        ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+                        stats.function_call_count > 0,
+                    );
+                }
                 Err(_) => {} // フォールスルーして式としてパース
             }
         }
 
         // 式としてパースを試行
-        match parse_expression_from_tokens_ref(tokens.to_vec(), interner, files, typedefs) {
-            Ok(expr) => ParseResult::Expression(Box::new(expr)),
-            Err(err) => ParseResult::Unparseable(Some(err.format_with_files(files))),
+        match parse_expression_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
+            Ok((expr, stats)) => (
+                ParseResult::Expression(Box::new(expr)),
+                stats.function_call_count > 0,
+            ),
+            Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), false),
         }
     }
 
