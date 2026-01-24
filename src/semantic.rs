@@ -2050,7 +2050,7 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         // 確定済みマクロの戻り値型を参照
-        if let Some(return_type) = self.get_macro_return_type(func_name_str) {
+        if self.get_macro_return_type(func_name_str).is_some() {
             let return_constraint = TypeEnvConstraint::new(
                 call_expr_id,
                 TypeRepr::Inferred(InferredType::FunctionReturn { func_name }),

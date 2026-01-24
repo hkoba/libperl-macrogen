@@ -231,11 +231,6 @@ impl<'a> RustCodegen<'a> {
         "/* type */"
     }
 
-    /// バッファに書き込み
-    fn write(&mut self, s: &str) {
-        self.buffer.push_str(s);
-    }
-
     /// バッファに行を書き込み
     fn writeln(&mut self, s: &str) {
         self.buffer.push_str(s);
@@ -1590,7 +1585,6 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         let mut is_int = false;
         let mut is_float = false;
         let mut is_double = false;
-        let mut is_signed = true;
         let mut is_short = false;
         let mut is_long = 0i32;
         let mut is_unsigned = false;
@@ -1604,8 +1598,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 TypeSpec::Long => is_long += 1,
                 TypeSpec::Float => is_float = true,
                 TypeSpec::Double => is_double = true,
-                TypeSpec::Signed => is_signed = true,
-                TypeSpec::Unsigned => { is_signed = false; is_unsigned = true; }
+                TypeSpec::Signed => {} // signed is default, no action needed
+                TypeSpec::Unsigned => is_unsigned = true,
                 TypeSpec::Bool => return "bool".to_string(),
                 TypeSpec::Struct(spec) => {
                     if let Some(n) = spec.name {
@@ -2301,230 +2295,6 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     GenerateStatus::TypeIncomplete
                 }
             }
-        }
-    }
-
-    /// パラメータリストを構築（型情報付き）
-    fn build_param_list(&self, info: &MacroInferInfo) -> String {
-        info.params.iter()
-            .map(|p| {
-                let name = escape_rust_keyword(self.interner.get(p.name));
-                let ty = self.get_param_type(p, info);
-                format!("{}: {}", name, ty)
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// パラメータの型を取得
-    fn get_param_type(&self, param: &MacroParam, info: &MacroInferInfo) -> String {
-        let param_name = param.name;
-
-        // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
-        if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param_name) {
-            for expr_id in expr_ids {
-                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    if let Some(first) = constraints.first() {
-                        return self.type_repr_to_rust(&first.ty);
-                    }
-                }
-            }
-        }
-
-        // 方法2: 従来の方法（MacroParam の ExprId）- フォールバック
-        let expr_id = param.expr_id();
-        if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
-            if let Some(first) = constraints.first() {
-                return self.type_repr_to_rust(&first.ty);
-            }
-        }
-
-        "/* unknown */".to_string()
-    }
-
-    /// 戻り値の型を取得
-    ///
-    /// MacroInferInfo::get_return_type() を使用して、
-    /// return_constraints（apidoc由来）を expr_constraints より優先する
-    fn get_return_type(&self, info: &MacroInferInfo) -> String {
-        match &info.parse_result {
-            ParseResult::Expression(_) => {
-                if let Some(ty) = info.get_return_type() {
-                    return self.type_repr_to_rust(ty);
-                }
-                "/* unknown */".to_string()
-            }
-            ParseResult::Statement(_) => "()".to_string(),
-            ParseResult::Unparseable(_) => "()".to_string(),
-        }
-    }
-
-    /// TypeRepr を Rust 型文字列に変換
-    fn type_repr_to_rust(&self, ty: &crate::type_repr::TypeRepr) -> String {
-        ty.to_rust_string(self.interner)
-    }
-
-    /// 式を Rust コードに変換
-    fn expr_to_rust(&self, expr: &Expr, info: &MacroInferInfo) -> String {
-        match &expr.kind {
-            ExprKind::Ident(name) => {
-                escape_rust_keyword(self.interner.get(*name))
-            }
-            ExprKind::IntLit(n) => {
-                format!("{}", n)
-            }
-            ExprKind::UIntLit(n) => {
-                format!("{}u64", n)
-            }
-            ExprKind::FloatLit(f) => {
-                format!("{}", f)
-            }
-            ExprKind::CharLit(c) => {
-                format!("'{}'", escape_char(*c))
-            }
-            ExprKind::StringLit(s) => {
-                format!("c\"{}\"", escape_string(s))
-            }
-            ExprKind::Binary { op, lhs, rhs } => {
-                let l = self.expr_to_rust(lhs, info);
-                let r = self.expr_to_rust(rhs, info);
-                format!("({} {} {})", l, bin_op_to_rust(*op), r)
-            }
-            ExprKind::Call { func, args } => {
-                let f = self.expr_to_rust(func, info);
-                let a: Vec<_> = args.iter()
-                    .map(|a| self.expr_to_rust(a, info))
-                    .collect();
-                format!("{}({})", f, a.join(", "))
-            }
-            ExprKind::Member { expr: base, member } => {
-                let e = self.expr_to_rust(base, info);
-                let m = self.interner.get(*member);
-                format!("({}).{}", e, m)
-            }
-            ExprKind::PtrMember { expr: base, member } => {
-                let e = self.expr_to_rust(base, info);
-                let m = self.interner.get(*member);
-                format!("(*{}).{}", e, m)
-            }
-            ExprKind::Index { expr: base, index } => {
-                let b = self.expr_to_rust(base, info);
-                let i = self.expr_to_rust(index, info);
-                format!("(*{}.offset({} as isize))", b, i)
-            }
-            ExprKind::Cast { type_name, expr: inner } => {
-                let e = self.expr_to_rust(inner, info);
-                let t = self.type_name_to_rust(type_name);
-                format!("({} as {})", e, t)
-            }
-            ExprKind::Deref(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("(*{})", e)
-            }
-            ExprKind::AddrOf(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("(&mut {})", e)
-            }
-            ExprKind::PreInc(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("{{ {} += 1; {} }}", e, e)
-            }
-            ExprKind::PreDec(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("{{ {} -= 1; {} }}", e, e)
-            }
-            ExprKind::PostInc(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("{{ let _t = {}; {} += 1; _t }}", e, e)
-            }
-            ExprKind::PostDec(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
-            }
-            ExprKind::UnaryPlus(inner) => {
-                self.expr_to_rust(inner, info)
-            }
-            ExprKind::UnaryMinus(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("(-{})", e)
-            }
-            ExprKind::BitNot(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("(!{})", e)
-            }
-            ExprKind::LogNot(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("(if {} {{ 0 }} else {{ 1 }})", e)
-            }
-            ExprKind::Sizeof(inner) => {
-                let e = self.expr_to_rust(inner, info);
-                format!("std::mem::size_of_val(&{})", e)
-            }
-            ExprKind::SizeofType(type_name) => {
-                let t = self.type_name_to_rust(type_name);
-                format!("std::mem::size_of::<{}>()", t)
-            }
-            ExprKind::Conditional { cond, then_expr, else_expr } => {
-                let c = self.expr_to_rust(cond, info);
-                let t = self.expr_to_rust(then_expr, info);
-                let e = self.expr_to_rust(else_expr, info);
-                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
-            }
-            ExprKind::Comma { lhs, rhs } => {
-                let l = self.expr_to_rust(lhs, info);
-                let r = self.expr_to_rust(rhs, info);
-                format!("{{ {}; {} }}", l, r)
-            }
-            ExprKind::Assign { op, lhs, rhs } => {
-                let l = self.expr_to_rust(lhs, info);
-                let r = self.expr_to_rust(rhs, info);
-                match op {
-                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
-                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
-                }
-            }
-            ExprKind::StmtExpr(compound) => {
-                // GCC Statement Expression: ({ decl; stmt; ...; expr })
-                let mut parts = Vec::new();
-                for item in &compound.items {
-                    match item {
-                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
-                            parts.push(self.expr_to_rust(e, info));
-                        }
-                        BlockItem::Stmt(stmt) => {
-                            parts.push(self.stmt_to_rust(stmt, info));
-                        }
-                        BlockItem::Decl(_) => {}
-                    }
-                }
-                if parts.is_empty() {
-                    "{ }".to_string()
-                } else if parts.len() == 1 {
-                    parts.pop().unwrap()
-                } else {
-                    let last = parts.pop().unwrap();
-                    let stmts = parts.join("; ");
-                    format!("{{ {}; {} }}", stmts, last)
-                }
-            }
-            _ => {
-                format!("/* TODO: {:?} */", std::mem::discriminant(&expr.kind))
-            }
-        }
-    }
-
-    /// 文を Rust コードに変換
-    fn stmt_to_rust(&self, stmt: &Stmt, info: &MacroInferInfo) -> String {
-        match stmt {
-            Stmt::Expr(Some(expr), _) => {
-                format!("{};", self.expr_to_rust(expr, info))
-            }
-            Stmt::Expr(None, _) => ";".to_string(),
-            Stmt::Return(Some(expr), _) => {
-                format!("return {};", self.expr_to_rust(expr, info))
-            }
-            Stmt::Return(None, _) => "return;".to_string(),
-            _ => format!("/* TODO: stmt */")
         }
     }
 

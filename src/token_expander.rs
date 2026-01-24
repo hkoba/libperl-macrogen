@@ -34,7 +34,8 @@ pub struct TokenExpander<'a> {
     macro_table: &'a MacroTable,
     /// 文字列インターナー
     interner: &'a StringInterner,
-    /// ファイルレジストリ
+    /// ファイルレジストリ（将来のエラーメッセージ改善用）
+    #[allow(dead_code)]
     files: &'a FileRegistry,
     /// 展開しないマクロ名（定数マクロ等）
     no_expand: HashSet<InternedStr>,
@@ -335,7 +336,8 @@ impl<'a> TokenExpander<'a> {
         )
     }
 
-    /// 関数マクロを展開
+    /// 関数マクロを展開（Preprocessor から独立したマクロ展開機能として保持）
+    #[allow(dead_code)]
     fn expand_function_macro(
         &self,
         def: &MacroDef,
@@ -461,7 +463,8 @@ impl<'a> TokenExpander<'a> {
         arg_map
     }
 
-    /// パラメータを置換しながら展開
+    /// パラメータを置換しながら展開（Preprocessor から独立したマクロ展開機能として保持）
+    #[allow(dead_code)]
     fn substitute_and_expand(
         &self,
         body: &[Token],

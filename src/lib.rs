@@ -70,7 +70,7 @@ pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
 pub use token_expander::TokenExpander;
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
-pub use type_env::{ConstraintSource, ParamLink, TypeConstraint, TypeEnv};
+pub use type_env::{ParamLink, TypeConstraint, TypeEnv};
 pub use type_registry::{TypeEquality, TypeRegistry, TypeRegistryStats};
 pub use type_repr::{
     CDerivedType, CPrimitiveKind, CTypeSource, CTypeSpecs, InferredType,

@@ -297,7 +297,8 @@ impl InputSource {
         }
     }
 
-    /// トークン列から作成（マクロ展開用）
+    /// トークン列から作成（マクロ展開用、テスト等で有用）
+    #[allow(dead_code)]
     fn from_tokens(tokens: Vec<Token>, loc: SourceLocation) -> Self {
         Self {
             source: Vec::new(),
@@ -2154,19 +2155,6 @@ impl Preprocessor {
     /// 条件アクティブ状態を更新
     fn update_cond_active(&mut self) {
         self.cond_active = self.cond_stack.iter().all(|s| s.active);
-    }
-
-    /// 行末までトークンを収集（マクロ展開なし）
-    fn collect_to_eol(&mut self) -> Result<Vec<Token>, CompileError> {
-        let mut tokens = Vec::new();
-        loop {
-            let token = self.next_raw_token()?;
-            match token.kind {
-                TokenKind::Newline | TokenKind::Eof => break,
-                _ => tokens.push(token),
-            }
-        }
-        Ok(tokens)
     }
 
     /// #if条件用：マクロ展開付きでトークン収集
