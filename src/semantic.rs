@@ -1466,9 +1466,6 @@ impl<'a> SemanticAnalyzer<'a> {
                 // シンボルテーブルから型を取得
                 if let Some(sym) = self.lookup_symbol(*name) {
                     let ty_str = sym.ty.display(self.interner);
-                    if name_str == "c" {
-                        eprintln!("DEBUG lookup 'c': found symbol with ty={:?}, ty_str='{}'", sym.ty, ty_str);
-                    }
                     // シンボル参照を示す TypeRepr を作成
                     // resolved_type は文字列からパースした C 型
                     let resolved = TypeRepr::from_apidoc_string(&ty_str, self.interner);
