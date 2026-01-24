@@ -1122,9 +1122,16 @@ impl<'a> RustCodegen<'a> {
                 result
             }
             Stmt::DoWhile { body, cond, .. } => {
-                // do { ... } while (0) パターンは単純なブロックとして出力
+                // do { ... } while (0) パターンは一度だけ実行される loop として出力
+                // これにより内部の break; が正しく動作する
                 if is_zero_constant(cond) {
-                    return self.stmt_to_rust_inline(body, indent);
+                    let mut result = format!("{}loop {{\n", indent);
+                    let nested_indent = format!("{}    ", indent);
+                    result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                    result.push_str("\n");
+                    result.push_str(&format!("{}    break;\n", indent));
+                    result.push_str(&format!("{}}}", indent));
+                    return result;
                 }
 
                 // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
@@ -1259,6 +1266,10 @@ impl<'a> RustCodegen<'a> {
                                 body_stmts: vec![first_stmt],
                                 is_default: true,
                             });
+                        }
+                        Stmt::Break(_) => {
+                            // Rust の match はフォールスルーしないので break は不要
+                            // スキップする
                         }
                         other => {
                             // 直前の case に追加
@@ -1956,9 +1967,16 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 result
             }
             Stmt::DoWhile { body, cond, .. } => {
-                // do { ... } while (0) パターンは単純なブロックとして出力
+                // do { ... } while (0) パターンは一度だけ実行される loop として出力
+                // これにより内部の break; が正しく動作する
                 if is_zero_constant(cond) {
-                    return self.stmt_to_rust_inline(body, indent);
+                    let mut result = format!("{}loop {{\n", indent);
+                    let nested_indent = format!("{}    ", indent);
+                    result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                    result.push_str("\n");
+                    result.push_str(&format!("{}    break;\n", indent));
+                    result.push_str(&format!("{}}}", indent));
+                    return result;
                 }
 
                 // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
@@ -2092,6 +2110,10 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                                 body_stmts: vec![first_stmt],
                                 is_default: true,
                             });
+                        }
+                        Stmt::Break(_) => {
+                            // Rust の match はフォールスルーしないので break は不要
+                            // スキップする
                         }
                         other => {
                             // 直前の case に追加
