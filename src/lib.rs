@@ -15,6 +15,7 @@ pub mod macro_def;
 pub mod macro_infer;
 pub mod parser;
 pub mod perl_config;
+pub mod pipeline;
 pub mod pp_expr;
 pub mod preprocessor;
 pub mod rust_codegen;
@@ -77,6 +78,11 @@ pub use type_repr::{
 };
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
 pub use rust_codegen::{CodegenConfig, CodegenDriver, CodegenStats, GeneratedCode, GenerateStatus, RustCodegen};
+pub use pipeline::{
+    Pipeline, PipelineBuilder, PipelineError,
+    PreprocessConfig, InferConfig as PipelineInferConfig, CodegenConfig as PipelineCodegenConfig,
+    PreprocessedPipeline, InferredPipeline, GeneratedPipeline,
+};
 
 #[cfg(test)]
 mod tests {
