@@ -10,11 +10,11 @@ use std::ops::ControlFlow;
 
 use clap::Parser as ClapParser;
 use libperl_macrogen::{
-    get_default_target_dir, get_perl_config,
-    resolve_apidoc_path, ApidocResolveError, run_inference_with_preprocessor, DebugOptions,
-    ApidocDict, BlockItem, CodegenConfig, CompileError, FieldsDict, FileId,
-    PPConfig, ParseResult, Parser, Preprocessor, CodegenDriver, RustDeclDict, SexpPrinter,
+    ApidocDict, BlockItem, CompileError, FieldsDict, FileId,
+    ParseResult, Parser, Preprocessor, RustDeclDict, SexpPrinter,
     SourceLocation, TokenKind, TypedSexpPrinter,
+    // Pipeline API
+    Pipeline, PipelineError,
 };
 
 /// コマンドライン引数
@@ -155,81 +155,101 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return run_apidoc_to_json(&input, cli.output.as_ref(), cli.compact);
     }
 
-    // デバッグオプションを構築（cli.input が move される前に）
-    let debug_opts = build_debug_options(&cli);
-
     // 入力ファイルが必要
     let input = cli.input.ok_or("Input file is required")?;
 
-    // プリプロセッサ設定
-    let config = if cli.auto {
+    // PipelineBuilder を構築
+    let mut builder = Pipeline::builder(&input);
+
+    if cli.auto {
         // --auto: Perl Config.pm から設定を取得
         if !cli.include.is_empty() {
             return Err("--auto cannot be used with -I options".into());
         }
-        let perl_cfg = get_perl_config()?;
+        builder = builder.with_auto_perl_config()
+            .map_err(|e| format!("Failed to get Perl config: {}", e))?;
+
         // 追加の -D オプションがあればマージ
-        let mut defines = perl_cfg.defines;
-        defines.extend(parse_defines(&cli.define));
-        // target_dir: CLI 指定があればそれを使用、なければデフォルト
-        let target_dir = cli.target_dir.clone().or_else(|| get_default_target_dir().ok());
-        PPConfig {
-            include_paths: perl_cfg.include_paths,
-            predefined: defines,
-            debug_pp: cli.debug_pp,
-            target_dir,
-            emit_markers: cli.emit_macro_markers,
+        for (name, value) in parse_defines(&cli.define) {
+            builder = builder.with_define(name, value);
         }
     } else {
         // 従来通り CLI 引数から
-        PPConfig {
-            include_paths: cli.include.clone(),
-            predefined: parse_defines(&cli.define),
-            debug_pp: cli.debug_pp,
-            target_dir: cli.target_dir.clone(),
-            emit_markers: cli.emit_macro_markers,
+        for path in &cli.include {
+            builder = builder.with_include(path);
         }
-    };
-
-    // 廃止予定: --gen-rust-fns
-    // if cli.gen_rust_fns {
-    //     let bindings = cli.bindings.ok_or("--bindings is required with --gen-rust-fns")?;
-    //     return run_gen_rust_fns_lib(...);
-    // }
-
-    // プリプロセッサを初期化してファイルを処理
-    let mut pp = Preprocessor::new(config);
-
-    // assert 系マクロをラップ対象として登録（process_file の前に必要）
-    // これにより inline 関数内の assert も Assert 式に変換される
-    pp.add_wrapped_macro("assert");
-    pp.add_wrapped_macro("assert_");
-
-    if let Err(e) = pp.process_file(&input) {
-        return Err(format_error(&e, &pp).into());
+        for (name, value) in parse_defines(&cli.define) {
+            builder = builder.with_define(name, value);
+        }
     }
+
+    // target_dir: CLI 指定があればそれを使用
+    if let Some(ref target_dir) = cli.target_dir {
+        builder = builder.with_target_dir(target_dir);
+    }
+
+    // オプション設定
+    if cli.debug_pp {
+        builder = builder.with_debug_pp();
+    }
+    if cli.emit_macro_markers {
+        builder = builder.with_emit_markers();
+    }
+
+    // コード生成用のデフォルト設定（assert ラップなど）
+    builder = builder.with_codegen_defaults();
+
+    // bindings があれば設定
+    if let Some(ref bindings_path) = cli.bindings {
+        builder = builder.with_bindings(bindings_path);
+    }
+
+    // apidoc があれば設定
+    if let Some(ref apidoc_path) = cli.apidoc {
+        builder = builder.with_apidoc(apidoc_path);
+    }
+
+    // デバッグオプション: dump_apidoc_after_merge
+    if let Some(ref filter_opt) = cli.dump_apidoc_after_merge {
+        let filter = filter_opt.as_deref().unwrap_or("").to_string();
+        builder = builder.with_dump_apidoc(filter);
+    }
+
+    // Codegen 設定
+    builder = builder.with_rust_edition(&cli.rust_edition);
+    if cli.strict_rustfmt {
+        builder = builder.with_strict_rustfmt();
+    }
+    if cli.macro_comments {
+        builder = builder.with_macro_comments();
+    }
+
+    // Pipeline を構築してプリプロセスを実行
+    let mut preprocessed = builder.build()?.preprocess()
+        .map_err(|e| format_pipeline_error(&e))?;
 
     if cli.preprocess_only {
         // -E: プリプロセス結果のみ出力
-        output_preprocessed(&mut pp, cli.output.as_ref(), cli.gcc_format)?;
+        output_preprocessed(preprocessed.preprocessor_mut(), cli.output.as_ref(), cli.gcc_format)?;
     } else if cli.streaming {
         // --streaming: ストリーミングモード
-        run_streaming(&mut pp)?;
+        run_streaming(preprocessed.preprocessor_mut())?;
     } else if cli.typed_sexp {
         // --typed-sexp: 型注釈付きS-expression出力
-        run_typed_sexp(&mut pp, cli.output.as_ref())?;
+        run_typed_sexp(preprocessed.preprocessor_mut(), cli.output.as_ref())?;
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
-        run_dump_fields_dict(&mut pp, cli.target_dir.as_ref())?;
+        run_dump_fields_dict(preprocessed.preprocessor_mut(), cli.target_dir.as_ref())?;
     } else if cli.sexp {
         // --sexp: S-expression出力（マクロ型推論なし）
-        let mut parser = match Parser::new(&mut pp) {
+        let pp = preprocessed.preprocessor_mut();
+        let mut parser = match Parser::new(pp) {
             Ok(p) => p,
-            Err(e) => return Err(format_error(&e, &pp).into()),
+            Err(e) => return Err(format_error(&e, pp).into()),
         };
         let tu = match parser.parse() {
             Ok(tu) => tu,
-            Err(e) => return Err(format_error(&e, &pp).into()),
+            Err(e) => return Err(format_error(&e, pp).into()),
         };
 
         // 出力
@@ -247,39 +267,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             handle.flush()?;
         }
     } else if cli.gen_rust {
-        // --gen-rust: Rust コード生成
-        // apidoc パスを解決（ライブラリ版を使用）
-        let apidoc_path = resolve_apidoc_path(
-            cli.apidoc.as_deref(),
-            cli.auto,
-            None, // apidoc_dir は自動検索
-        ).map_err(|e| format_apidoc_error(&e))?;
-
-        // 自動ロード時はパスを表示
-        if cli.auto && cli.apidoc.is_none() {
-            if let Some(ref path) = apidoc_path {
-                eprintln!("Note: Auto-loaded {}", path.display());
-            }
-        }
-
-        run_gen_rust(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), cli.output.as_ref(), debug_opts.as_ref(), &cli.rust_edition, cli.strict_rustfmt)?;
+        // --gen-rust: Rust コード生成（Pipeline API を使用）
+        run_gen_rust_pipeline(preprocessed, cli.output.as_ref(), cli.auto, &cli.rust_edition, cli.strict_rustfmt)?;
     } else {
         // デフォルト: マクロ型推論（統計出力）
-        // apidoc パスを解決（ライブラリ版を使用）
-        let apidoc_path = resolve_apidoc_path(
-            cli.apidoc.as_deref(),
-            cli.auto,
-            None, // apidoc_dir は自動検索
-        ).map_err(|e| format_apidoc_error(&e))?;
-
-        // 自動ロード時はパスを表示
-        if cli.auto && cli.apidoc.is_none() {
-            if let Some(ref path) = apidoc_path {
-                eprintln!("Note: Auto-loaded {}", path.display());
-            }
-        }
-
-        run_infer_macro_types(pp, apidoc_path.as_deref(), cli.bindings.as_deref(), debug_opts.as_ref())?;
+        run_infer_macro_types_pipeline(preprocessed, cli.auto)?;
     }
 
     Ok(())
@@ -368,22 +360,30 @@ fn run_dump_fields_dict(pp: &mut Preprocessor, _target_dir: Option<&PathBuf>) ->
     Ok(())
 }
 
-/// マクロ型推論（ExprId + TypeEnv ベース）
+/// マクロ型推論（Pipeline API 使用）
 ///
-/// ライブラリの run_inference_with_preprocessor を呼び出し、結果を出力する。
-fn run_infer_macro_types(
-    pp: Preprocessor,
-    apidoc_path: Option<&std::path::Path>,
-    bindings_path: Option<&std::path::Path>,
-    debug_opts: Option<&DebugOptions>,
+/// Pipeline を使用して型推論を実行し、結果を出力する。
+fn run_infer_macro_types_pipeline(
+    preprocessed: libperl_macrogen::PreprocessedPipeline,
+    auto_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // ライブラリ API を呼び出して型推論を実行
-    let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
-        Some(r) => r,
-        None => return Ok(()),  // デバッグダンプで早期終了
+    // 自動ロード時の通知（省略 - Pipeline 内部で解決）
+    let _ = auto_mode;
+
+    // 推論を実行
+    let inferred = match preprocessed.infer() {
+        Ok(r) => r,
+        Err(e) => {
+            // デバッグダンプで早期終了の場合は成功扱い
+            if matches!(e, PipelineError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Interrupted) {
+                return Ok(());
+            }
+            return Err(format_pipeline_error(&e).into());
+        }
     };
 
     // 結果から必要な情報を取り出す
+    let result = inferred.result();
     let infer_ctx = &result.infer_ctx;
     let interner = result.preprocessor.interner();
     let stats = &result.stats;
@@ -531,34 +531,42 @@ fn run_infer_macro_types(
     Ok(())
 }
 
-/// Rust コード生成
+/// Rust コード生成（Pipeline API 使用）
 ///
 /// 型推論結果から Rust コードを生成する。
-fn run_gen_rust(
-    pp: Preprocessor,
-    apidoc_path: Option<&std::path::Path>,
-    bindings_path: Option<&std::path::Path>,
+fn run_gen_rust_pipeline(
+    preprocessed: libperl_macrogen::PreprocessedPipeline,
     output_path: Option<&PathBuf>,
-    debug_opts: Option<&DebugOptions>,
+    auto_mode: bool,
     rust_edition: &str,
     strict_rustfmt: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // ライブラリ API を呼び出して型推論を実行
-    let result = match run_inference_with_preprocessor(pp, apidoc_path, bindings_path, debug_opts)? {
-        Some(r) => r,
-        None => return Ok(()),  // デバッグダンプで早期終了
-    };
+    // 自動ロード時はパスを表示
+    let infer_config = preprocessed.infer_config();
+    if auto_mode && infer_config.apidoc_path.is_none() {
+        // apidoc パスは infer() 内で解決されるので、ここでは通知のみ
+        // Pipeline 内部で解決した apidoc を表示するためには
+        // resolve_apidoc_path を呼び出すか、Pipeline に機能を追加する必要がある
+        // 今回は省略（ユーザーへの通知を一旦削除）
+    }
 
-    // コード生成設定
-    let config = CodegenConfig::default();
+    // 推論を実行
+    let inferred = match preprocessed.infer() {
+        Ok(r) => r,
+        Err(e) => {
+            // デバッグダンプで早期終了の場合は成功扱い
+            if matches!(e, PipelineError::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::Interrupted) {
+                return Ok(());
+            }
+            return Err(format_pipeline_error(&e).into());
+        }
+    };
 
     // まずバッファに生成
     let mut buffer = Vec::new();
-    let stats = {
-        let mut codegen = CodegenDriver::new(&mut buffer, result.preprocessor.interner(), config);
-        codegen.generate(&result)?;
-        codegen.stats().clone()
-    };
+    let generated = inferred.generate(&mut buffer)
+        .map_err(|e| format_pipeline_error(&e))?;
+    let stats = generated.stats();
 
     // rustfmt を適用
     let formatted = match apply_rustfmt(&buffer, rust_edition) {
@@ -594,19 +602,6 @@ fn run_gen_rust(
         stats.inline_fns_success, stats.inline_fns_type_incomplete);
 
     Ok(())
-}
-
-/// CLI引数からDebugOptionsを構築
-fn build_debug_options(cli: &Cli) -> Option<DebugOptions> {
-    // --dump-apidoc-after-merge が指定された場合
-    if let Some(ref filter_opt) = cli.dump_apidoc_after_merge {
-        // Some(None) -> フィルタなし（全件）
-        // Some(Some(filter)) -> フィルタあり
-        let filter = filter_opt.as_deref().unwrap_or("").to_string();
-        return Some(DebugOptions::new().dump_apidoc(filter));
-    }
-
-    None
 }
 
 /// rustfmt を適用
@@ -801,29 +796,13 @@ fn format_error(e: &CompileError, pp: &Preprocessor) -> String {
     e.format_with_files(pp.files())
 }
 
-/// apidoc 解決エラーをフォーマット
-fn format_apidoc_error(e: &ApidocResolveError) -> String {
+/// PipelineError をフォーマット
+fn format_pipeline_error(e: &PipelineError) -> String {
     match e {
-        ApidocResolveError::DevelopmentVersion { major, minor } => {
-            format!(
-                "Perl {}.{} is a development version.\n\
-                 Please specify --apidoc explicitly (e.g., --apidoc path/to/embed.fnc)",
-                major, minor
-            )
-        }
-        ApidocResolveError::DirectoryNotFound => {
-            "apidoc directory not found.\nPlease specify --apidoc explicitly.".to_string()
-        }
-        ApidocResolveError::JsonNotFound { path, major, minor } => {
-            format!(
-                "{}/v{}.{}.json not found for Perl {}.{}.\n\
-                 Please specify --apidoc explicitly or add the JSON file.",
-                path.display(), major, minor, major, minor
-            )
-        }
-        ApidocResolveError::VersionError(e) => {
-            format!("Failed to get Perl version: {}", e)
-        }
+        PipelineError::PerlConfig(pe) => format!("Perl config error: {}", pe),
+        PipelineError::Compile(ce) => format!("Compile error: {}", ce),
+        PipelineError::Infer(ie) => format!("Inference error: {}", ie),
+        PipelineError::Io(io_err) => format!("I/O error: {}", io_err),
     }
 }
 

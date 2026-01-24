@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use crate::apidoc::{resolve_apidoc_path, ApidocCollector, ApidocDict, ApidocResolveError};
+use crate::apidoc::{ApidocCollector, ApidocDict, ApidocResolveError};
 use crate::ast::{ExternalDecl, TypeSpec};
 use crate::error::CompileError;
 use crate::fields_dict::FieldsDict;
@@ -14,7 +14,7 @@ use crate::inline_fn::InlineFnDict;
 use crate::intern::InternedStr;
 use crate::macro_infer::{MacroInferContext, NoExpandSymbols};
 use crate::parser::Parser;
-use crate::perl_config::{build_pp_config_for_perl, PerlConfigError};
+use crate::perl_config::PerlConfigError;
 use crate::preprocessor::{MacroCallWatcher, Preprocessor};
 use crate::rust_decl::RustDeclDict;
 
@@ -192,6 +192,8 @@ pub struct InferResult {
 /// PPConfig を自動構築し、型推論を実行して結果を返す。
 /// build.rs から呼び出すことを想定。
 ///
+/// **Note**: 新しいコードでは `Pipeline` API の使用を推奨します。
+///
 /// # Example
 ///
 /// ```ignore
@@ -210,42 +212,73 @@ pub struct InferResult {
 ///     // ...
 /// }
 /// ```
+///
+/// # Pipeline API を使用する場合
+///
+/// ```ignore
+/// use libperl_macrogen::Pipeline;
+///
+/// let inferred = Pipeline::builder("wrapper.h")
+///     .with_auto_perl_config()?
+///     .with_codegen_defaults()
+///     .with_bindings("bindings.rs")
+///     .build()?
+///     .infer()?;
+///
+/// let result = inferred.result();
+/// ```
 pub fn run_macro_inference(config: InferConfig) -> Result<InferResult, InferError> {
-    // PPConfig を構築
-    let pp_config = build_pp_config_for_perl()?;
+    use crate::pipeline::{Pipeline, PipelineError};
 
-    // Preprocessor を初期化してファイルを処理
-    let mut pp = Preprocessor::new(pp_config);
+    // Pipeline を使用して推論を実行
+    let mut builder = Pipeline::builder(&config.input_file)
+        .with_auto_perl_config()
+        .map_err(|e| match e {
+            PipelineError::PerlConfig(pe) => InferError::PerlConfig(pe),
+            _ => unreachable!("with_auto_perl_config only returns PerlConfig error"),
+        })?
+        .with_codegen_defaults();
 
-    // assert 系マクロをラップ対象として登録
-    // これにより inline 関数内の assert も Assert 式に変換される
-    pp.add_wrapped_macro("assert");
-    pp.add_wrapped_macro("assert_");
-    // __ASSERT_ は末尾カンマを含む特殊な形式で、現状の実装では対応困難
-    // pp.add_wrapped_macro("__ASSERT_");
+    // オプション設定
+    if let Some(ref path) = config.bindings_path {
+        builder = builder.with_bindings(path);
+    }
+    if let Some(ref path) = config.apidoc_path {
+        builder = builder.with_apidoc(path);
+    }
+    if let Some(ref path) = config.apidoc_dir {
+        builder = builder.with_apidoc_dir(path);
+    }
 
-    pp.process_file(&config.input_file)?;
+    // 推論を実行
+    let inferred = builder
+        .build()
+        .map_err(pipeline_error_to_infer_error)?
+        .infer()
+        .map_err(pipeline_error_to_infer_error)?;
 
-    // apidoc パスを解決
-    let apidoc_path = resolve_apidoc_path(
-        config.apidoc_path.as_deref(),
-        true, // auto_mode
-        config.apidoc_dir.as_deref(),
-    )?;
+    Ok(inferred.into_result())
+}
 
-    // 推論を実行（デバッグオプションなし）
-    run_inference_with_preprocessor(
-        pp,
-        apidoc_path.as_deref(),
-        config.bindings_path.as_deref(),
-        None,
-    ).map(|opt| opt.expect("debug option not used, result should exist"))
+/// PipelineError を InferError に変換
+fn pipeline_error_to_infer_error(e: crate::pipeline::PipelineError) -> InferError {
+    use crate::pipeline::PipelineError;
+    match e {
+        PipelineError::PerlConfig(pe) => InferError::PerlConfig(pe),
+        PipelineError::Compile(ce) => InferError::Compile(ce),
+        PipelineError::Infer(ie) => ie,
+        PipelineError::Io(io) => InferError::Io(io),
+    }
 }
 
 /// 既存の Preprocessor を使ってマクロ型推論を実行
 ///
 /// Preprocessor が既に初期化されている場合に使用。
-/// main.rs から呼び出すことを想定。
+/// 主に Pipeline の内部実装から呼び出される。
+///
+/// **Note**: 新しいコードでは `Pipeline` API の使用を推奨します。
+/// この関数は Pipeline の内部実装で使用されており、直接呼び出す必要は
+/// 通常ありません。
 ///
 /// `debug_opts` が指定され、デバッグダンプで早期終了した場合は `Ok(None)` を返す。
 pub fn run_inference_with_preprocessor(
