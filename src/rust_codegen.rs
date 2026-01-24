@@ -91,20 +91,6 @@ fn escape_string(s: &[u8]) -> String {
     s.iter().map(|&c| escape_char(c)).collect()
 }
 
-/// 式がブール型を返すかどうかを判定（フリー関数版）
-///
-/// 注: LogNot は含めない。現在の LogNot -> Rust 変換は
-/// `(if x { 0 } else { 1 })` という int 値を返すため。
-fn is_boolean_expr_kind(kind: &ExprKind) -> bool {
-    match kind {
-        ExprKind::Binary { op, .. } => matches!(op,
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
-            BinOp::Eq | BinOp::Ne | BinOp::LogAnd | BinOp::LogOr
-        ),
-        _ => false,
-    }
-}
-
 /// 式がゼロ定数かどうかを判定
 fn is_zero_constant(expr: &Expr) -> bool {
     match &expr.kind {
@@ -112,6 +98,46 @@ fn is_zero_constant(expr: &Expr) -> bool {
         ExprKind::UIntLit(0) => true,
         _ => false,
     }
+}
+
+/// 式が bool として扱える形式かどうかを判定
+///
+/// キャスト `(expr as bool)` を含む場合も true を返す
+fn is_boolean_expr(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Binary { op, .. } => matches!(op,
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
+            BinOp::Eq | BinOp::Ne | BinOp::LogAnd | BinOp::LogOr
+        ),
+        // (expr as bool) も bool を返す
+        ExprKind::Cast { type_name, .. } => {
+            // TypeSpec が Bool かチェック
+            type_name.specs.type_specs.iter().any(|ts| {
+                matches!(ts, TypeSpec::Bool)
+            })
+        }
+        // LogNot は常に bool を返す（if 式として生成される）
+        ExprKind::LogNot(_) => true,
+        _ => false,
+    }
+}
+
+
+/// 式を bool 条件に変換するためのラッパー文字列を生成
+///
+/// 既に bool を返す式なら expr_str をそのまま返す。
+/// そうでなければ `((expr_str) != 0)` を返す。
+fn wrap_as_bool_condition(expr: &Expr, expr_str: &str) -> String {
+    // AST から bool 判定
+    if is_boolean_expr(expr) {
+        return expr_str.to_string();
+    }
+    // 生成された文字列から bool キャストを検出（TypedefName("bool") 対応）
+    // パターン: "... as bool)" で終わる場合
+    if expr_str.ends_with(" as bool)") {
+        return expr_str.to_string();
+    }
+    format!("(({}) != 0)", expr_str)
 }
 
 /// コード生成の設定
@@ -448,11 +474,6 @@ impl<'a> RustCodegen<'a> {
         result
     }
 
-    /// 式がブール型を返すかどうかを判定
-    fn is_boolean_expr(&self, expr: &Expr) -> bool {
-        is_boolean_expr_kind(&expr.kind)
-    }
-
     /// MUTABLE_PTR パターンを検出
     ///
     /// `({ void *p_ = (expr); p_; })` のような構造を検出し、
@@ -523,7 +544,15 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.expr_to_rust(lhs, info);
                 let r = self.expr_to_rust(rhs, info);
-                format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                // 論理演算子の場合、オペランドを bool に変換
+                match op {
+                    BinOp::LogAnd | BinOp::LogOr => {
+                        let l_bool = wrap_as_bool_condition(lhs, &l);
+                        let r_bool = wrap_as_bool_condition(rhs, &r);
+                        format!("({} {} {})", l_bool, bin_op_to_rust(*op), r_bool)
+                    }
+                    _ => format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                }
             }
             ExprKind::Call { func, args } => {
                 // __builtin_expect(cond, expected) -> cond
@@ -558,7 +587,12 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Cast { type_name, expr: inner } => {
                 let e = self.expr_to_rust(inner, info);
                 let t = self.type_name_to_rust(type_name);
-                format!("({} as {})", e, t)
+                // void キャストは式の値を捨てる（(expr as ()) は無効）
+                if t == "()" {
+                    format!("{{ {}; }}", e)
+                } else {
+                    format!("({} as {})", e, t)
+                }
             }
             ExprKind::Deref(inner) => {
                 let e = self.expr_to_rust(inner, info);
@@ -597,7 +631,9 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::LogNot(inner) => {
                 let e = self.expr_to_rust(inner, info);
-                format!("(if {} {{ 0 }} else {{ 1 }})", e)
+                // 内部式を bool に変換してから論理否定
+                let cond = wrap_as_bool_condition(inner, &e);
+                format!("(!{})", cond)
             }
             ExprKind::Sizeof(inner) => {
                 let e = self.expr_to_rust(inner, info);
@@ -611,7 +647,9 @@ impl<'a> RustCodegen<'a> {
                 let c = self.expr_to_rust(cond, info);
                 let t = self.expr_to_rust(then_expr, info);
                 let e = self.expr_to_rust(else_expr, info);
-                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_str = wrap_as_bool_condition(cond, &c);
+                format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.expr_to_rust(lhs, info);
@@ -628,7 +666,7 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Assert { kind, condition } => {
                 let cond = self.expr_to_rust(condition, info);
-                let assert_expr = if self.is_boolean_expr(condition) {
+                let assert_expr = if is_boolean_expr(condition) {
                     format!("assert!({})", cond)
                 } else {
                     format!("assert!(({}) != 0)", cond)
@@ -1062,7 +1100,9 @@ impl<'a> RustCodegen<'a> {
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
-                let mut result = format!("{}if {} != 0 {{\n", indent, cond_str);
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_bool = wrap_as_bool_condition(cond, &cond_str);
+                let mut result = format!("{}if {} {{\n", indent, cond_bool);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(then_stmt, &nested_indent));
                 result.push_str("\n");
@@ -1095,7 +1135,9 @@ impl<'a> RustCodegen<'a> {
             }
             Stmt::While { cond, body, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
-                let mut result = format!("{}while {} != 0 {{\n", indent, cond_str);
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_bool = wrap_as_bool_condition(cond, &cond_str);
+                let mut result = format!("{}while {} {{\n", indent, cond_bool);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
@@ -1121,7 +1163,9 @@ impl<'a> RustCodegen<'a> {
                 // ループ部分
                 if let Some(cond_expr) = cond {
                     let cond_str = self.expr_to_rust_inline(cond_expr);
-                    result.push_str(&format!("{}while {} != 0 {{\n", nested_indent, cond_str));
+                    // 条件が既に bool なら != 0 を追加しない
+                    let cond_bool = wrap_as_bool_condition(cond_expr, &cond_str);
+                    result.push_str(&format!("{}while {} {{\n", nested_indent, cond_bool));
                 } else {
                     result.push_str(&format!("{}loop {{\n", nested_indent));
                 }
@@ -1154,13 +1198,19 @@ impl<'a> RustCodegen<'a> {
                     return result;
                 }
 
-                // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
+                // 一般的な do-while 文: loop { body; if !cond { break; } }
                 let mut result = format!("{}loop {{\n", indent);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
                 let cond_str = self.expr_to_rust_inline(cond);
-                result.push_str(&format!("{}    if {} == 0 {{ break; }}\n", indent, cond_str));
+                // bool 式なら !cond、そうでなければ cond == 0
+                let break_cond = if is_boolean_expr(cond) {
+                    format!("!{}", cond_str)
+                } else {
+                    format!("{} == 0", cond_str)
+                };
+                result.push_str(&format!("{}    if {} {{ break; }}\n", indent, break_cond));
                 result.push_str(&format!("{}}}", indent));
                 result
             }
@@ -1365,7 +1415,15 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.expr_to_rust_inline(lhs);
                 let r = self.expr_to_rust_inline(rhs);
-                format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                // 論理演算子の場合、オペランドを bool に変換
+                match op {
+                    BinOp::LogAnd | BinOp::LogOr => {
+                        let l_bool = wrap_as_bool_condition(lhs, &l);
+                        let r_bool = wrap_as_bool_condition(rhs, &r);
+                        format!("({} {} {})", l_bool, bin_op_to_rust(*op), r_bool)
+                    }
+                    _ => format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                }
             }
             ExprKind::Call { func, args } => {
                 // __builtin_expect(cond, expected) -> cond
@@ -1399,7 +1457,12 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Cast { type_name, expr: inner } => {
                 let e = self.expr_to_rust_inline(inner);
                 let t = self.type_name_to_rust(type_name);
-                format!("({} as {})", e, t)
+                // void キャストは式の値を捨てる（(expr as ()) は無効）
+                if t == "()" {
+                    format!("{{ {}; }}", e)
+                } else {
+                    format!("({} as {})", e, t)
+                }
             }
             ExprKind::Deref(inner) => {
                 let e = self.expr_to_rust_inline(inner);
@@ -1436,7 +1499,9 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::LogNot(inner) => {
                 let e = self.expr_to_rust_inline(inner);
-                format!("(if {} {{ 0 }} else {{ 1 }})", e)
+                // 内部式を bool に変換してから論理否定
+                let cond = wrap_as_bool_condition(inner, &e);
+                format!("(!{})", cond)
             }
             ExprKind::Sizeof(inner) => {
                 let e = self.expr_to_rust_inline(inner);
@@ -1450,7 +1515,9 @@ impl<'a> RustCodegen<'a> {
                 let c = self.expr_to_rust_inline(cond);
                 let t = self.expr_to_rust_inline(then_expr);
                 let e = self.expr_to_rust_inline(else_expr);
-                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_str = wrap_as_bool_condition(cond, &c);
+                format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.expr_to_rust_inline(lhs);
@@ -1467,7 +1534,7 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Assert { kind, condition } => {
                 let cond = self.expr_to_rust_inline(condition);
-                let assert_expr = if self.is_boolean_expr(condition) {
+                let assert_expr = if is_boolean_expr(condition) {
                     format!("assert!({})", cond)
                 } else {
                     format!("assert!(({}) != 0)", cond)
@@ -1736,7 +1803,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
 
         if is_void {
-            "c_void".to_string()
+            "()".to_string()
         } else if is_char {
             if is_unsigned { "c_uchar" } else { "c_char" }.to_string()
         } else if is_float {
@@ -1924,7 +1991,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
-                let mut result = format!("{}if {} != 0 {{\n", indent, cond_str);
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_bool = wrap_as_bool_condition(cond, &cond_str);
+                let mut result = format!("{}if {} {{\n", indent, cond_bool);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(then_stmt, &nested_indent));
                 result.push_str("\n");
@@ -1957,7 +2026,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
             Stmt::While { cond, body, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
-                let mut result = format!("{}while {} != 0 {{\n", indent, cond_str);
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_bool = wrap_as_bool_condition(cond, &cond_str);
+                let mut result = format!("{}while {} {{\n", indent, cond_bool);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
@@ -1983,7 +2054,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 // ループ部分
                 if let Some(cond_expr) = cond {
                     let cond_str = self.expr_to_rust_inline(cond_expr);
-                    result.push_str(&format!("{}while {} != 0 {{\n", nested_indent, cond_str));
+                    // 条件が既に bool なら != 0 を追加しない
+                    let cond_bool = wrap_as_bool_condition(cond_expr, &cond_str);
+                    result.push_str(&format!("{}while {} {{\n", nested_indent, cond_bool));
                 } else {
                     result.push_str(&format!("{}loop {{\n", nested_indent));
                 }
@@ -2016,13 +2089,19 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     return result;
                 }
 
-                // 一般的な do-while 文: loop { body; if cond == 0 { break; } }
+                // 一般的な do-while 文: loop { body; if !cond { break; } }
                 let mut result = format!("{}loop {{\n", indent);
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
                 let cond_str = self.expr_to_rust_inline(cond);
-                result.push_str(&format!("{}    if {} == 0 {{ break; }}\n", indent, cond_str));
+                // bool 式なら !cond、そうでなければ cond == 0
+                let break_cond = if is_boolean_expr(cond) {
+                    format!("!{}", cond_str)
+                } else {
+                    format!("{} == 0", cond_str)
+                };
+                result.push_str(&format!("{}    if {} {{ break; }}\n", indent, break_cond));
                 result.push_str(&format!("{}}}", indent));
                 result
             }
@@ -2216,7 +2295,15 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.expr_to_rust_inline(lhs);
                 let r = self.expr_to_rust_inline(rhs);
-                format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                // 論理演算子の場合、オペランドを bool に変換
+                match op {
+                    BinOp::LogAnd | BinOp::LogOr => {
+                        let l_bool = wrap_as_bool_condition(lhs, &l);
+                        let r_bool = wrap_as_bool_condition(rhs, &r);
+                        format!("({} {} {})", l_bool, bin_op_to_rust(*op), r_bool)
+                    }
+                    _ => format!("({} {} {})", l, bin_op_to_rust(*op), r)
+                }
             }
             ExprKind::Call { func, args } => {
                 // __builtin_expect(cond, expected) -> cond
@@ -2250,7 +2337,12 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             ExprKind::Cast { type_name, expr: inner } => {
                 let e = self.expr_to_rust_inline(inner);
                 let t = self.type_name_to_rust(type_name);
-                format!("({} as {})", e, t)
+                // void キャストは式の値を捨てる（(expr as ()) は無効）
+                if t == "()" {
+                    format!("{{ {}; }}", e)
+                } else {
+                    format!("({} as {})", e, t)
+                }
             }
             ExprKind::Deref(inner) => {
                 let e = self.expr_to_rust_inline(inner);
@@ -2287,7 +2379,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
             ExprKind::LogNot(inner) => {
                 let e = self.expr_to_rust_inline(inner);
-                format!("(if {} {{ 0 }} else {{ 1 }})", e)
+                // 内部式を bool に変換してから論理否定
+                let cond = wrap_as_bool_condition(inner, &e);
+                format!("(!{})", cond)
             }
             ExprKind::Sizeof(inner) => {
                 let e = self.expr_to_rust_inline(inner);
@@ -2301,7 +2395,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 let c = self.expr_to_rust_inline(cond);
                 let t = self.expr_to_rust_inline(then_expr);
                 let e = self.expr_to_rust_inline(else_expr);
-                format!("(if {} != 0 {{ {} }} else {{ {} }})", c, t, e)
+                // 条件が既に bool なら != 0 を追加しない
+                let cond_str = wrap_as_bool_condition(cond, &c);
+                format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.expr_to_rust_inline(lhs);
@@ -2318,7 +2414,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
             ExprKind::Assert { kind, condition } => {
                 let cond = self.expr_to_rust_inline(condition);
-                let assert_expr = if is_boolean_expr_kind(&condition.kind) {
+                let assert_expr = if is_boolean_expr(condition) {
                     format!("assert!({})", cond)
                 } else {
                     format!("assert!(({}) != 0)", cond)

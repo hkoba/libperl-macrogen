@@ -938,6 +938,10 @@ impl TypeRepr {
                 // ポインタは逆順に適用（Rustの表記に合わせる）
                 let mut result = base;
                 for d in derived.iter().rev() {
+                    // void ポインタの場合は c_void を使用
+                    if result == "()" && matches!(d, CDerivedType::Pointer { .. } | CDerivedType::Array { .. }) {
+                        result = "c_void".to_string();
+                    }
                     result = match d {
                         CDerivedType::Pointer { is_const: true, .. } => format!("*const {}", result),
                         CDerivedType::Pointer { .. } => format!("*mut {}", result),
@@ -998,7 +1002,7 @@ impl CTypeSpecs {
     /// Rust コード生成用の型文字列に変換
     pub fn to_rust_string(&self, interner: &crate::intern::StringInterner) -> String {
         match self {
-            CTypeSpecs::Void => "c_void".to_string(),
+            CTypeSpecs::Void => "()".to_string(),
             CTypeSpecs::Char { signed: None } => "c_char".to_string(),
             CTypeSpecs::Char { signed: Some(true) } => "c_schar".to_string(),
             CTypeSpecs::Char { signed: Some(false) } => "c_uchar".to_string(),
