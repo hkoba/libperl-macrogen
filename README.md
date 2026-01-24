@@ -31,51 +31,76 @@ libperl-macrogen = "0.1"
 ### CLI
 
 ```bash
-# Generate Rust functions from Perl headers
-libperl-macrogen --auto --gen-rust-fns \
-    --bindings bindings.rs \
-    --apidoc embed.fnc \
+# Generate Rust wrapper functions from Perl headers
+libperl-macrogen --auto --gen-rust \
+    --bindings path/to/bindings.rs \
     -o macro_fns.rs \
     wrapper.h
+
+# Output to stdout (for inspection)
+libperl-macrogen --auto --gen-rust \
+    --bindings path/to/bindings.rs \
+    wrapper.h
+
+# With rustfmt validation
+libperl-macrogen --auto --gen-rust \
+    --bindings path/to/bindings.rs \
+    --strict-rustfmt \
+    wrapper.h
 ```
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `--auto` | Auto-detect Perl include paths and defines from `Config.pm` |
+| `--gen-rust` | Generate Rust code for macros and inline functions |
+| `--bindings <FILE>` | Path to bindgen-generated Rust bindings (for type inference) |
+| `-o <FILE>` | Output file (stdout if omitted) |
+| `--strict-rustfmt` | Fail if generated code doesn't pass rustfmt |
+| `-I <DIR>` | Add include directory |
+| `-D <MACRO>` | Define a macro |
 
 ### Library (in build.rs)
 
 ```rust
-use libperl_macrogen::{MacrogenBuilder, generate};
+use std::path::PathBuf;
+use libperl_macrogen::{InferConfig, run_macro_inference, CodegenConfig, CodegenDriver};
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
+    let bindings_path = format!("{}/bindings.rs", out_dir);
 
-    let config = MacrogenBuilder::new("wrapper.h", format!("{}/bindings.rs", out_dir))
-        .with_perl_auto_config()
-        .expect("Failed to get Perl config")
-        .apidoc("apidoc/embed.json")
-        .add_field_type("sv_any", "sv")
-        .add_field_type("sv_refcnt", "sv")
-        .add_field_type("sv_flags", "sv")
-        .verbose(true)
-        .build();
+    // Run type inference on macros and inline functions
+    let config = InferConfig {
+        input_file: PathBuf::from("wrapper.h"),
+        bindings_path: Some(PathBuf::from(&bindings_path)),
+        apidoc_path: None,  // Auto-detected from Perl installation
+        apidoc_dir: None,
+        debug: false,
+    };
 
-    let result = generate(&config).expect("Code generation failed");
+    let result = run_macro_inference(config).expect("Inference failed");
 
-    std::fs::write(format!("{}/macro_fns.rs", out_dir), &result.code)
-        .expect("Failed to write output");
+    // Generate Rust code
+    let codegen_config = CodegenConfig::default();
+    let mut output = std::fs::File::create(format!("{}/macro_fns.rs", out_dir)).unwrap();
+    let mut driver = CodegenDriver::new(&mut output, result.preprocessor.interner(), codegen_config);
+    driver.generate(&result).expect("Code generation failed");
 
-    println!("cargo:warning=Generated {} functions ({} inline, {} macro)",
-        result.stats.inline_success + result.stats.macro_success,
-        result.stats.inline_success,
-        result.stats.macro_success);
+    let stats = driver.stats();
+    println!("cargo:warning=Generated {} macro + {} inline functions",
+        stats.macro_success, stats.inline_success);
 }
 ```
 
 ## Features
 
-- C preprocessor with macro expansion
-- C parser for declarations and expressions
-- Type inference from function call context
-- Support for Perl's `embed.fnc` (apidoc) format
+- C preprocessor with full macro expansion
+- C parser for declarations, expressions, and inline function bodies
+- Type inference from function call context and Perl's apidoc (`embed.fnc`)
 - GCC extensions (`__attribute__`, `__typeof__`, statement expressions, etc.)
+- Automatic Perl configuration detection via `Config.pm`
 
 ## Acknowledgments
 
