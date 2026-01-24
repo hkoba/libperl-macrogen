@@ -619,7 +619,8 @@ impl InferredPipeline {
 /// コード生成完了状態
 pub struct GeneratedPipeline {
     result: InferResult,
-    stats: CodegenStats,
+    /// コード生成の統計情報
+    pub stats: CodegenStats,
 }
 
 impl GeneratedPipeline {
