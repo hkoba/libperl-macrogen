@@ -23,7 +23,9 @@ pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
 pub mod source;
-pub mod thx_collector;
+// thx_collector は現在未使用（将来のコールバック API 拡張で使用予定）
+#[allow(dead_code)]
+mod thx_collector;
 pub mod token;
 pub mod token_expander;
 pub mod token_source;
@@ -63,7 +65,8 @@ pub use preprocessor::{
     CallbackPair, CommentCallback, MacroCalledCallback, MacroCallWatcher, MacroDefCallback,
     PPConfig, Preprocessor,
 };
-pub use thx_collector::ThxCollector;
+// ThxCollector は現在未使用（HashSet<InternedStr> を直接使用する方式に変更）
+// pub use thx_collector::ThxCollector;
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
