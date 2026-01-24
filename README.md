@@ -61,37 +61,96 @@ libperl-macrogen --auto --gen-rust \
 | `-I <DIR>` | Add include directory |
 | `-D <MACRO>` | Define a macro |
 
-### Library (in build.rs)
+### Library API
+
+The library provides a Pipeline API with three phases:
+
+1. **Preprocess** - Parse C header files with macro expansion
+2. **Infer** - Perform type inference on macros and inline functions
+3. **Generate** - Generate Rust code
+
+#### Simple Usage (build.rs)
 
 ```rust
-use std::path::PathBuf;
-use libperl_macrogen::{InferConfig, run_macro_inference, CodegenConfig, CodegenDriver};
+use std::fs::File;
+use libperl_macrogen::Pipeline;
 
-fn main() {
-    let out_dir = std::env::var("OUT_DIR").unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = std::env::var("OUT_DIR")?;
     let bindings_path = format!("{}/bindings.rs", out_dir);
+    let output_path = format!("{}/macro_fns.rs", out_dir);
 
-    // Run type inference on macros and inline functions
-    let config = InferConfig {
-        input_file: PathBuf::from("wrapper.h"),
-        bindings_path: Some(PathBuf::from(&bindings_path)),
-        apidoc_path: None,  // Auto-detected from Perl installation
-        apidoc_dir: None,
-        debug: false,
-    };
+    // One-shot execution with Pipeline builder
+    let mut output = File::create(&output_path)?;
+    let result = Pipeline::builder("wrapper.h")
+        .with_auto_perl_config()?
+        .with_bindings(&bindings_path)
+        .build()?
+        .generate(&mut output)?;
 
-    let result = run_macro_inference(config).expect("Inference failed");
-
-    // Generate Rust code
-    let codegen_config = CodegenConfig::default();
-    let mut output = std::fs::File::create(format!("{}/macro_fns.rs", out_dir)).unwrap();
-    let mut driver = CodegenDriver::new(&mut output, result.preprocessor.interner(), codegen_config);
-    driver.generate(&result).expect("Code generation failed");
-
-    let stats = driver.stats();
     println!("cargo:warning=Generated {} macro + {} inline functions",
-        stats.macro_success, stats.inline_success);
+        result.stats.macro_success, result.stats.inline_success);
+
+    Ok(())
 }
+```
+
+#### Step-by-Step Execution
+
+For more control, you can execute each phase separately:
+
+```rust
+use std::fs::File;
+use libperl_macrogen::Pipeline;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Phase 1: Preprocess
+    let preprocessed = Pipeline::builder("wrapper.h")
+        .with_auto_perl_config()?
+        .build()?
+        .preprocess()?;
+
+    println!("Preprocessed {} macros", preprocessed.macro_count());
+
+    // Phase 2: Infer types
+    let inferred = preprocessed
+        .with_bindings("bindings.rs")
+        .infer()?;
+
+    println!("Inferred {} macro functions", inferred.result().macro_infos.len());
+
+    // Phase 3: Generate Rust code
+    let mut output = File::create("macro_fns.rs")?;
+    let generated = inferred
+        .with_strict_rustfmt()
+        .generate(&mut output)?;
+
+    println!("Generated {} functions", generated.stats.total_success());
+
+    Ok(())
+}
+```
+
+#### Pipeline Builder Options
+
+```rust
+Pipeline::builder("wrapper.h")
+    // Preprocessor options
+    .with_auto_perl_config()?      // Auto-detect from Perl's Config.pm
+    .add_include_path("/usr/include")
+    .add_define("DEBUG", Some("1"))
+    .with_target_dir("/usr/lib64/perl5/CORE")
+
+    // Inference options
+    .with_bindings("bindings.rs")  // bindgen output for type info
+    .with_apidoc_path("embed.fnc") // Perl API documentation
+
+    // Codegen options
+    .with_strict_rustfmt()         // Fail if rustfmt fails
+    .with_codegen_defaults()       // Apply default codegen settings
+
+    .build()?
+    .generate(&mut output)?;
 ```
 
 ## Features
