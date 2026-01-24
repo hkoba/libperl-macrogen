@@ -190,6 +190,8 @@ pub struct CodegenConfig {
     pub emit_inline_fns: bool,
     /// マクロを出力
     pub emit_macros: bool,
+    /// ヘッダーに出力する use 文（空ならデフォルト）
+    pub use_statements: Vec<String>,
 }
 
 impl Default for CodegenConfig {
@@ -200,6 +202,7 @@ impl Default for CodegenConfig {
             macro_comments: false,
             emit_inline_fns: true,
             emit_macros: true,
+            use_statements: Vec::new(),
         }
     }
 }
@@ -211,6 +214,7 @@ impl CodegenConfig {
             emit_inline_fns: self.emit_inline_fns,
             emit_macros: self.emit_macros,
             include_source_location: self.macro_comments,
+            use_statements: self.use_statements.clone(),
         }
     }
 }
