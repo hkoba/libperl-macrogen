@@ -598,6 +598,7 @@ impl InferredPipeline {
         let mut driver = CodegenDriver::new(
             &mut writer,
             self.result.preprocessor.interner(),
+            &self.result.enum_dict,
             rust_codegen_config,
         );
 

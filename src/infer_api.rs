@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::apidoc::{ApidocCollector, ApidocDict, ApidocResolveError};
 use crate::ast::{ExternalDecl, TypeSpec};
+use crate::enum_dict::EnumDict;
 use crate::error::CompileError;
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
@@ -173,6 +174,8 @@ pub struct InferResult {
     pub infer_ctx: MacroInferContext,
     /// フィールド辞書
     pub fields_dict: FieldsDict,
+    /// Enum 辞書
+    pub enum_dict: EnumDict,
     /// インライン関数辞書
     pub inline_fn_dict: InlineFnDict,
     /// Apidoc 辞書
@@ -305,6 +308,9 @@ pub fn run_inference_with_preprocessor(
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 
+    // Enum 辞書を作成（パースしながら収集）
+    let mut enum_dict = EnumDict::new();
+
     // ApidocCollector を Preprocessor に設定
     pp.set_comment_callback(Box::new(ApidocCollector::new()));
 
@@ -323,6 +329,9 @@ pub fn run_inference_with_preprocessor(
     parser.parse_each_with_pp(|decl, _loc, _path, pp| {
         let interner = pp.interner();
         fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
+
+        // enum 情報を収集
+        enum_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
         // inline 関数を収集
         if decl.is_target() {
@@ -461,6 +470,7 @@ pub fn run_inference_with_preprocessor(
     Ok(Some(InferResult {
         infer_ctx,
         fields_dict,
+        enum_dict,
         inline_fn_dict,
         apidoc,
         rust_decl_dict,

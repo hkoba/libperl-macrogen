@@ -5,6 +5,7 @@
 use std::io::{self, Write};
 
 use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+use crate::enum_dict::EnumDict;
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
@@ -243,6 +244,8 @@ impl GeneratedCode {
 /// 生成完了時に `GeneratedCode` として結果を返す。
 pub struct RustCodegen<'a> {
     interner: &'a StringInterner,
+    /// Enum バリアント辞書（パターンマッチ用）
+    enum_dict: &'a EnumDict,
     /// 内部バッファ（生成結果を蓄積）
     buffer: String,
     /// 不完全マーカーの生成回数
@@ -256,15 +259,18 @@ pub struct RustCodegen<'a> {
 pub struct CodegenDriver<'a, W: Write> {
     writer: W,
     interner: &'a StringInterner,
+    /// Enum バリアント辞書（パターンマッチ用）
+    enum_dict: &'a EnumDict,
     config: CodegenConfig,
     stats: CodegenStats,
 }
 
 impl<'a> RustCodegen<'a> {
     /// 新しい単一関数用コード生成器を作成
-    pub fn new(interner: &'a StringInterner) -> Self {
+    pub fn new(interner: &'a StringInterner, enum_dict: &'a EnumDict) -> Self {
         Self {
             interner,
+            enum_dict,
             buffer: String::new(),
             incomplete_count: 0,
         }
@@ -1310,8 +1316,9 @@ impl<'a> RustCodegen<'a> {
                             let mut patterns: Vec<&Expr> = vec![case_expr];
                             let (final_stmt, has_default) = flatten_case_chain(case_stmt, &mut patterns);
 
+                            // パターンは enum バリアントをフルパスで出力
                             let pattern_strs: Vec<String> = patterns.iter()
-                                .map(|e| self.expr_to_rust_inline(e))
+                                .map(|e| self.expr_to_rust_pattern(e))
                                 .collect();
 
                             // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
@@ -1331,8 +1338,9 @@ impl<'a> RustCodegen<'a> {
                             let mut patterns: Vec<&Expr> = Vec::new();
                             let (final_stmt, _) = flatten_case_chain(default_stmt, &mut patterns);
 
+                            // パターンは enum バリアントをフルパスで出力
                             let pattern_strs: Vec<String> = patterns.iter()
-                                .map(|e| self.expr_to_rust_inline(e))
+                                .map(|e| self.expr_to_rust_pattern(e))
                                 .collect();
 
                             // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
@@ -1581,14 +1589,37 @@ impl<'a> RustCodegen<'a> {
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
         }
     }
+
+    /// match パターン用の式を Rust に変換
+    ///
+    /// 通常の式変換と異なり、enum バリアントをフルパスで出力する。
+    /// Rust の match パターンでは、単純な識別子は変数束縛として扱われるため、
+    /// enum バリアントは `crate::EnumName::VariantName` 形式で出力する必要がある。
+    fn expr_to_rust_pattern(&mut self, expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                // enum バリアントかチェック
+                if let Some(enum_name) = self.enum_dict.get_enum_for_variant(*name) {
+                    let enum_str = self.interner.get(enum_name);
+                    let variant_str = self.interner.get(*name);
+                    format!("crate::{}::{}", enum_str, variant_str)
+                } else {
+                    escape_rust_keyword(self.interner.get(*name))
+                }
+            }
+            // 他の式は通常の変換
+            _ => self.expr_to_rust_inline(expr)
+        }
+    }
 }
 
 impl<'a, W: Write> CodegenDriver<'a, W> {
     /// 新しいコード生成ドライバを作成
-    pub fn new(writer: W, interner: &'a StringInterner, config: CodegenConfig) -> Self {
+    pub fn new(writer: W, interner: &'a StringInterner, enum_dict: &'a EnumDict, config: CodegenConfig) -> Self {
         Self {
             writer,
             interner,
+            enum_dict,
             config,
             stats: CodegenStats::default(),
         }
@@ -1613,6 +1644,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         // use 文を出力
         self.generate_use_statements()?;
+
+        // target enum のバリアントを import
+        self.generate_enum_imports(result)?;
 
         // inline 関数セクション
         if self.config.emit_inline_fns {
@@ -1645,6 +1679,22 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         Ok(())
     }
 
+    /// target enum のバリアントを import
+    fn generate_enum_imports(&mut self, result: &InferResult) -> io::Result<()> {
+        let enum_names = result.enum_dict.target_enum_names(self.interner);
+
+        if !enum_names.is_empty() {
+            writeln!(self.writer, "// Enum variant imports")?;
+            for name in enum_names {
+                writeln!(self.writer, "#[allow(unused_imports)]")?;
+                writeln!(self.writer, "use crate::{}::*;", name)?;
+            }
+            writeln!(self.writer)?;
+        }
+
+        Ok(())
+    }
+
     /// inline 関数セクションを生成
     pub fn generate_inline_fns(&mut self, result: &InferResult) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
@@ -1660,7 +1710,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         for (name, func_def) in fns {
             // 新しい RustCodegen を使って inline 関数を生成
-            let codegen = RustCodegen::new(self.interner);
+            let codegen = RustCodegen::new(self.interner, self.enum_dict);
             let generated = codegen.generate_inline_fn(*name, func_def);
 
             if generated.is_complete() {
@@ -2200,8 +2250,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             let mut patterns: Vec<&Expr> = vec![case_expr];
                             let (final_stmt, has_default) = flatten_case_chain(case_stmt, &mut patterns);
 
+                            // パターンは enum バリアントをフルパスで出力
                             let pattern_strs: Vec<String> = patterns.iter()
-                                .map(|e| self.expr_to_rust_inline(e))
+                                .map(|e| self.expr_to_rust_pattern(e))
                                 .collect();
 
                             // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
@@ -2221,8 +2272,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             let mut patterns: Vec<&Expr> = Vec::new();
                             let (final_stmt, _) = flatten_case_chain(default_stmt, &mut patterns);
 
+                            // パターンは enum バリアントをフルパスで出力
                             let pattern_strs: Vec<String> = patterns.iter()
-                                .map(|e| self.expr_to_rust_inline(e))
+                                .map(|e| self.expr_to_rust_pattern(e))
                                 .collect();
 
                             // final_stmt が Break の場合はスキップ（Rust の match は break 不要）
@@ -2452,6 +2504,28 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
     }
 
+    /// match パターン用の式を Rust に変換
+    ///
+    /// 通常の式変換と異なり、enum バリアントをフルパスで出力する。
+    /// Rust の match パターンでは、単純な識別子は変数束縛として扱われるため、
+    /// enum バリアントは `crate::EnumName::VariantName` 形式で出力する必要がある。
+    fn expr_to_rust_pattern(&self, expr: &Expr) -> String {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                // enum バリアントかチェック
+                if let Some(enum_name) = self.enum_dict.get_enum_for_variant(*name) {
+                    let enum_str = self.interner.get(enum_name);
+                    let variant_str = self.interner.get(*name);
+                    format!("crate::{}::{}", enum_str, variant_str)
+                } else {
+                    escape_rust_keyword(self.interner.get(*name))
+                }
+            }
+            // 他の式は通常の変換
+            _ => self.expr_to_rust_inline(expr)
+        }
+    }
+
     /// マクロセクションを生成
     pub fn generate_macros(&mut self, result: &InferResult) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
@@ -2470,7 +2544,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner);
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict);
                     let generated = codegen.generate_macro(info);
 
                     if generated.is_complete() {
