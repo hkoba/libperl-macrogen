@@ -8,7 +8,7 @@ use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declarati
 use crate::enum_dict::EnumDict;
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
-use crate::macro_infer::{MacroInferInfo, MacroParam, ParseResult};
+use crate::macro_infer::{MacroInferContext, MacroInferInfo, MacroParam, ParseResult};
 use crate::sexp::SexpPrinter;
 
 /// Rust の予約語リスト（strict keywords + reserved keywords）
@@ -246,6 +246,8 @@ pub struct RustCodegen<'a> {
     interner: &'a StringInterner,
     /// Enum バリアント辞書（パターンマッチ用）
     enum_dict: &'a EnumDict,
+    /// マクロ推論コンテキスト（THX マクロ呼び出し判定用）
+    macro_ctx: &'a MacroInferContext,
     /// 内部バッファ（生成結果を蓄積）
     buffer: String,
     /// 不完全マーカーの生成回数
@@ -261,19 +263,44 @@ pub struct CodegenDriver<'a, W: Write> {
     interner: &'a StringInterner,
     /// Enum バリアント辞書（パターンマッチ用）
     enum_dict: &'a EnumDict,
+    /// マクロ推論コンテキスト（THX マクロ呼び出し判定用）
+    macro_ctx: &'a MacroInferContext,
     config: CodegenConfig,
     stats: CodegenStats,
 }
 
 impl<'a> RustCodegen<'a> {
     /// 新しい単一関数用コード生成器を作成
-    pub fn new(interner: &'a StringInterner, enum_dict: &'a EnumDict) -> Self {
+    pub fn new(
+        interner: &'a StringInterner,
+        enum_dict: &'a EnumDict,
+        macro_ctx: &'a MacroInferContext,
+    ) -> Self {
         Self {
             interner,
             enum_dict,
+            macro_ctx,
             buffer: String::new(),
             incomplete_count: 0,
         }
+    }
+
+    /// 呼び出し先が THX マクロで、my_perl が不足しているかチェック
+    ///
+    /// 以下の条件を満たす場合に true を返す：
+    /// 1. 呼び出し先が MacroInferContext.macros に存在する
+    /// 2. その MacroInferInfo.is_thx_dependent が true
+    /// 3. 実引数が仮引数より1つ少ない（my_perl が不足）
+    fn needs_my_perl_for_call(&self, func_name: crate::InternedStr, actual_arg_count: usize) -> bool {
+        if let Some(callee_info) = self.macro_ctx.macros.get(&func_name) {
+            if callee_info.is_thx_dependent {
+                // THX マクロの期待引数数 = params.len() + 1 (my_perl)
+                let expected_count = callee_info.params.len() + 1;
+                // 実引数が1つ少ない場合、my_perl が必要
+                return actual_arg_count + 1 == expected_count;
+            }
+        }
+        false
     }
 
     /// 不完全マーカー: 型が不明
@@ -570,9 +597,20 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 let f = self.expr_to_rust(func, info);
-                let a: Vec<_> = args.iter()
-                    .map(|a| self.expr_to_rust(a, info))
-                    .collect();
+
+                // THX マクロで my_perl が不足しているかチェック
+                let needs_my_perl = if let ExprKind::Ident(name) = &func.kind {
+                    self.needs_my_perl_for_call(*name, args.len())
+                } else {
+                    false
+                };
+
+                let mut a: Vec<String> = if needs_my_perl {
+                    vec!["my_perl".to_string()]
+                } else {
+                    vec![]
+                };
+                a.extend(args.iter().map(|arg| self.expr_to_rust(arg, info)));
                 format!("{}({})", f, a.join(", "))
             }
             ExprKind::Member { expr: base, member } => {
@@ -1442,9 +1480,20 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 let f = self.expr_to_rust_inline(func);
-                let a: Vec<_> = args.iter()
-                    .map(|a| self.expr_to_rust_inline(a))
-                    .collect();
+
+                // THX マクロで my_perl が不足しているかチェック
+                let needs_my_perl = if let ExprKind::Ident(name) = &func.kind {
+                    self.needs_my_perl_for_call(*name, args.len())
+                } else {
+                    false
+                };
+
+                let mut a: Vec<String> = if needs_my_perl {
+                    vec!["my_perl".to_string()]
+                } else {
+                    vec![]
+                };
+                a.extend(args.iter().map(|arg| self.expr_to_rust_inline(arg)));
                 format!("{}({})", f, a.join(", "))
             }
             ExprKind::Member { expr: base, member } => {
@@ -1615,11 +1664,18 @@ impl<'a> RustCodegen<'a> {
 
 impl<'a, W: Write> CodegenDriver<'a, W> {
     /// 新しいコード生成ドライバを作成
-    pub fn new(writer: W, interner: &'a StringInterner, enum_dict: &'a EnumDict, config: CodegenConfig) -> Self {
+    pub fn new(
+        writer: W,
+        interner: &'a StringInterner,
+        enum_dict: &'a EnumDict,
+        macro_ctx: &'a MacroInferContext,
+        config: CodegenConfig,
+    ) -> Self {
         Self {
             writer,
             interner,
             enum_dict,
+            macro_ctx,
             config,
             stats: CodegenStats::default(),
         }
@@ -1628,6 +1684,24 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     /// 統計情報を取得
     pub fn stats(&self) -> &CodegenStats {
         &self.stats
+    }
+
+    /// 呼び出し先が THX マクロで、my_perl が不足しているかチェック
+    ///
+    /// 以下の条件を満たす場合に true を返す：
+    /// 1. 呼び出し先が MacroInferContext.macros に存在する
+    /// 2. その MacroInferInfo.is_thx_dependent が true
+    /// 3. 実引数が仮引数より1つ少ない（my_perl が不足）
+    fn needs_my_perl_for_call(&self, func_name: crate::InternedStr, actual_arg_count: usize) -> bool {
+        if let Some(callee_info) = self.macro_ctx.macros.get(&func_name) {
+            if callee_info.is_thx_dependent {
+                // THX マクロの期待引数数 = params.len() + 1 (my_perl)
+                let expected_count = callee_info.params.len() + 1;
+                // 実引数が1つ少ない場合、my_perl が必要
+                return actual_arg_count + 1 == expected_count;
+            }
+        }
+        false
     }
 
     /// 全体を生成
@@ -1710,7 +1784,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         for (name, func_def) in fns {
             // 新しい RustCodegen を使って inline 関数を生成
-            let codegen = RustCodegen::new(self.interner, self.enum_dict);
+            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx);
             let generated = codegen.generate_inline_fn(*name, func_def);
 
             if generated.is_complete() {
@@ -2366,9 +2440,20 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     }
                 }
                 let f = self.expr_to_rust_inline(func);
-                let a: Vec<_> = args.iter()
-                    .map(|a| self.expr_to_rust_inline(a))
-                    .collect();
+
+                // THX マクロで my_perl が不足しているかチェック
+                let needs_my_perl = if let ExprKind::Ident(name) = &func.kind {
+                    self.needs_my_perl_for_call(*name, args.len())
+                } else {
+                    false
+                };
+
+                let mut a: Vec<String> = if needs_my_perl {
+                    vec!["my_perl".to_string()]
+                } else {
+                    vec![]
+                };
+                a.extend(args.iter().map(|arg| self.expr_to_rust_inline(arg)));
                 format!("{}({})", f, a.join(", "))
             }
             ExprKind::Member { expr: base, member } => {
@@ -2544,7 +2629,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner, self.enum_dict);
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx);
                     let generated = codegen.generate_macro(info);
 
                     if generated.is_complete() {

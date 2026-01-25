@@ -599,6 +599,7 @@ impl InferredPipeline {
             &mut writer,
             self.result.preprocessor.interner(),
             &self.result.enum_dict,
+            &self.result.infer_ctx,
             rust_codegen_config,
         );
 
