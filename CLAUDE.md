@@ -60,22 +60,22 @@ Temporary test files should be placed in `./tmp/` directory, not `/tmp`.
 
 ## CLI Usage
 
-### Testing with samples/wrapper.h
+### Testing with samples/xs-wrapper.h
 
-The recommended way to test with `samples/wrapper.h` is using the `--auto` option:
+The recommended way to test with `samples/xs-wrapper.h` is using the `--auto` option:
 
 ```bash
 # Parse and output S-expression (recommended)
-cargo run -- --auto samples/wrapper.h
+cargo run -- --auto samples/xs-wrapper.h
 
 # Streaming mode with source context on errors
-cargo run -- --auto --streaming samples/wrapper.h
+cargo run -- --auto --streaming samples/xs-wrapper.h
 
 # Preprocess only (like gcc -E)
-cargo run -- --auto -E samples/wrapper.h
+cargo run -- --auto -E samples/xs-wrapper.h
 
 # GCC-compatible output format (for diff comparison)
-cargo run -- --auto -E --gcc-format samples/wrapper.h
+cargo run -- --auto -E --gcc-format samples/xs-wrapper.h
 ```
 
 The `--auto` option automatically retrieves include paths and defines from Perl's `Config.pm`.
@@ -85,11 +85,11 @@ The `--auto` option automatically retrieves include paths and defines from Perl'
 To test macro-to-Rust function generation with production data:
 
 ```bash
-cargo run --bin libperl-macrogen -- samples/wrapper.h --auto --gen-rust-fns --bindings samples/bindings.rs --apidoc samples/embed.fnc
+cargo run --bin libperl-macrogen -- samples/xs-wrapper.h --auto --gen-rust-fns --bindings samples/bindings.rs --apidoc samples/embed.fnc
 ```
 
 This command:
-- Uses `samples/wrapper.h` as input
+- Uses `samples/xs-wrapper.h` as input
 - Reads type information from `samples/bindings.rs`
 - Reads API documentation from `samples/embed.fnc`
 - Generates Rust functions from C macros
@@ -99,11 +99,11 @@ This command:
 **IMPORTANT**: Type inference requires both `--bindings` and `--apidoc` options to work correctly.
 
 ```bash
-cargo run --bin libperl-macrogen -- --auto --infer-macro-types samples/wrapper.h --bindings samples/bindings.rs --apidoc samples/embed.fnc
+cargo run --bin libperl-macrogen -- --auto --infer-macro-types samples/xs-wrapper.h --bindings samples/bindings.rs --apidoc samples/embed.fnc
 ```
 
 This command:
-- Uses `samples/wrapper.h` as input
+- Uses `samples/xs-wrapper.h` as input
 - Reads Rust type bindings from `samples/bindings.rs` (required for function signatures)
 - Reads API documentation from `samples/embed.fnc` (required for macro/function type hints)
 - Performs type inference on all macros and outputs statistics
@@ -137,7 +137,7 @@ cargo run -- -E \
   -D__STDC__ \
   -D__LP64__ \
   -D_LP64 \
-  samples/wrapper.h
+  samples/xs-wrapper.h
 ```
 
 ## Implemented Features
@@ -183,7 +183,7 @@ When errors occur in macro-expanded code, the error location points to where the
 
 Example with macro comments:
 ```bash
-cargo run --bin libperl-macrogen -- samples/wrapper.h --auto --gen-rust-fns \
+cargo run --bin libperl-macrogen -- samples/xs-wrapper.h --auto --gen-rust-fns \
   --bindings samples/bindings.rs --apidoc samples/embed.fnc --macro-comments
 ```
 
@@ -198,5 +198,5 @@ pub unsafe fn SvFLAGS(sv: *mut SV) -> U32 {
 
 ## Current Status
 
-- **wrapper.h parsing**: Successfully parses 5529 declarations
+- **xs-wrapper.h parsing**: Successfully parses declarations
 - **All tests passing**: 52 tests pass
