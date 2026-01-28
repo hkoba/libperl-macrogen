@@ -2678,8 +2678,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             return false;
         }
 
-        // 関数形式マクロまたは THX 依存オブジェクトマクロ
-        info.is_function || info.is_thx_dependent
+        // 関数形式マクロのみ含める（オブジェクトマクロは常にインライン展開される）
+        info.is_function
     }
 
     /// マクロの生成ステータスを判定
