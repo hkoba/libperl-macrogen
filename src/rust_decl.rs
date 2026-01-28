@@ -3,7 +3,7 @@
 //! bindgenが生成したRustコードから宣言を抽出する。
 //! syn crateを使用して正確にパースする。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -61,6 +61,7 @@ pub struct RustDeclDict {
     pub fns: HashMap<String, RustFn>,
     pub structs: HashMap<String, RustStruct>,
     pub types: HashMap<String, RustTypeAlias>,
+    pub enums: HashSet<String>,
 }
 
 impl RustDeclDict {
@@ -137,6 +138,11 @@ impl RustDeclDict {
                             }
                         }
                     }
+                }
+            }
+            Item::Enum(item_enum) => {
+                if Self::is_pub(&item_enum.vis) {
+                    self.enums.insert(item_enum.ident.to_string());
                 }
             }
             Item::Impl(_) => {

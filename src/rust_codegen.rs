@@ -1754,12 +1754,23 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     }
 
     /// target enum のバリアントを import
+    ///
+    /// bindings.rs に存在する enum のみ import する
     fn generate_enum_imports(&mut self, result: &InferResult) -> io::Result<()> {
         let enum_names = result.enum_dict.target_enum_names(self.interner);
+        let bindings_enums = result.rust_decl_dict.as_ref().map(|d| &d.enums);
 
-        if !enum_names.is_empty() {
+        // bindings.rs に存在する enum のみフィルタリング
+        let filtered_names: Vec<_> = enum_names
+            .into_iter()
+            .filter(|name| {
+                bindings_enums.map_or(true, |enums| enums.contains(*name))
+            })
+            .collect();
+
+        if !filtered_names.is_empty() {
             writeln!(self.writer, "// Enum variant imports")?;
-            for name in enum_names {
+            for name in filtered_names {
                 writeln!(self.writer, "#[allow(unused_imports)]")?;
                 writeln!(self.writer, "use crate::{}::*;", name)?;
             }
