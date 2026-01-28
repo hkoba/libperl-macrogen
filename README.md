@@ -85,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = Pipeline::builder("wrapper.h")
         .with_auto_perl_config()?
         .with_bindings(&bindings_path)
+        .with_codegen_defaults()       // Required for proper assert handling
         .build()?
         .generate(&mut output)?;
 
@@ -107,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 1: Preprocess
     let preprocessed = Pipeline::builder("wrapper.h")
         .with_auto_perl_config()?
+        .with_codegen_defaults()       // Required for proper assert handling
         .build()?
         .preprocess()?;
 
