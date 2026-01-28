@@ -2690,7 +2690,16 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
 
         // 関数形式マクロのみ含める（オブジェクトマクロは常にインライン展開される）
-        info.is_function
+        if !info.is_function {
+            return false;
+        }
+
+        // 利用不可関数を呼び出すマクロは除外
+        if info.calls_unavailable {
+            return false;
+        }
+
+        true
     }
 
     /// マクロの生成ステータスを判定

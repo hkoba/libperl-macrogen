@@ -698,6 +698,11 @@ pub struct MacroInferInfo {
     pub function_call_count: usize,
     /// ポインタデリファレンスの数（パース時に検出）
     pub deref_count: usize,
+
+    /// 呼び出される関数名の集合（マクロ以外の関数呼び出し）
+    pub called_functions: HashSet<InternedStr>,
+    /// 利用不可関数の呼び出しを含む（直接または推移的）
+    pub calls_unavailable: bool,
 }
 
 impl MacroInferInfo {
@@ -720,6 +725,8 @@ impl MacroInferInfo {
             generic_type_params: HashMap::new(),
             function_call_count: 0,
             deref_count: 0,
+            called_functions: HashSet::new(),
+            calls_unavailable: false,
         }
     }
 
@@ -1032,6 +1039,17 @@ impl MacroInferContext {
                         convert_assert_calls_in_stmt(stmt, interner);
                     }
                 }
+            }
+            ParseResult::Unparseable(_) => {}
+        }
+
+        // パース成功した場合、関数呼び出しを収集
+        match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                Self::collect_function_calls_from_expr(expr, &mut info.called_functions);
+            }
+            ParseResult::Statement(block_items) => {
+                Self::collect_function_calls_from_block_items(block_items, &mut info.called_functions);
             }
             ParseResult::Unparseable(_) => {}
         }
@@ -1397,6 +1415,17 @@ impl MacroInferContext {
         info.function_call_count = stats.function_call_count;
         info.deref_count = stats.deref_count;
 
+        // パース成功した場合、関数呼び出しを収集
+        match &info.parse_result {
+            ParseResult::Expression(expr) => {
+                Self::collect_function_calls_from_expr(expr, &mut info.called_functions);
+            }
+            ParseResult::Statement(block_items) => {
+                Self::collect_function_calls_from_block_items(block_items, &mut info.called_functions);
+            }
+            ParseResult::Unparseable(_) => {}
+        }
+
         // パース成功した場合、型制約を収集
         if let ParseResult::Expression(ref expr) = info.parse_result {
             let mut analyzer = SemanticAnalyzer::with_rust_decl_dict(
@@ -1657,6 +1686,10 @@ impl MacroInferContext {
         // Step 4: ## の推移閉包を計算（used_by 経由）
         self.propagate_flag_via_used_by(&pasting_initial, false);
 
+        // Step 4.5: 利用不可関数呼び出しのチェックと伝播
+        self.check_function_availability(rust_decl_dict, interner);
+        self.propagate_unavailable_via_used_by();
+
         // Step 5: 全マクロを unconfirmed に
         for name in self.macros.keys().copied().collect::<Vec<_>>() {
             self.unconfirmed.insert(name);
@@ -1701,6 +1734,125 @@ impl MacroInferContext {
                     };
                     if !*flag {
                         *flag = true;
+                        to_propagate.push(user);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 関数呼び出しの利用可能性をチェック
+    ///
+    /// 各マクロの `called_functions` を調べ、bindings.rs にもマクロにも
+    /// 存在しない関数を呼び出している場合、`calls_unavailable = true` を設定
+    fn check_function_availability(
+        &mut self,
+        rust_decl_dict: Option<&RustDeclDict>,
+        interner: &StringInterner,
+    ) {
+        // bindings.rs の関数名を収集
+        let bindings_fns: std::collections::HashSet<&str> = rust_decl_dict
+            .map(|d| d.fns.keys().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+
+        // ビルトイン関数
+        let builtin_fns: std::collections::HashSet<&str> = [
+            "__builtin_expect",
+            "__builtin_offsetof",
+            "__builtin_types_compatible_p",
+            "__builtin_constant_p",
+            "__builtin_choose_expr",
+            "__builtin_unreachable",
+            "__builtin_trap",
+            "__builtin_assume",
+            "__builtin_bswap16",
+            "__builtin_bswap32",
+            "__builtin_bswap64",
+            "__builtin_popcount",
+            "__builtin_clz",
+            "__builtin_ctz",
+            "__errno_location",  // glibc
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "pthread_rwlock_rdlock",
+            "pthread_rwlock_wrlock",
+            "pthread_rwlock_unlock",
+            "memchr",
+            "memcpy",
+            "memmove",
+            "memset",
+            "strlen",
+            "strcmp",
+            "strncmp",
+            "strcpy",
+            "strncpy",
+        ].into_iter().collect();
+
+        // マクロ名の集合
+        let macro_names: HashSet<InternedStr> = self.macros.keys().copied().collect();
+
+        // 各マクロの関数呼び出しをチェック
+        let macro_names_list: Vec<InternedStr> = self.macros.keys().copied().collect();
+        for name in macro_names_list {
+            let called_functions: Vec<InternedStr> = self.macros
+                .get(&name)
+                .map(|info| info.called_functions.iter().copied().collect())
+                .unwrap_or_default();
+
+            let mut has_unavailable = false;
+            for called_fn in called_functions {
+                let fn_name = interner.get(called_fn);
+
+                // マクロとして存在する場合はOK
+                if macro_names.contains(&called_fn) {
+                    continue;
+                }
+
+                // bindings.rs に存在する場合はOK
+                if bindings_fns.contains(fn_name) {
+                    continue;
+                }
+
+                // ビルトイン関数の場合はOK
+                if builtin_fns.contains(fn_name) {
+                    continue;
+                }
+
+                // それ以外は利用不可
+                has_unavailable = true;
+                break;
+            }
+
+            if has_unavailable {
+                if let Some(info) = self.macros.get_mut(&name) {
+                    info.calls_unavailable = true;
+                }
+            }
+        }
+    }
+
+    /// calls_unavailable を used_by 経由で伝播
+    fn propagate_unavailable_via_used_by(&mut self) {
+        // 初期集合: 直接利用不可関数を呼び出すマクロ
+        let initial_set: HashSet<InternedStr> = self.macros
+            .iter()
+            .filter(|(_, info)| info.calls_unavailable)
+            .map(|(name, _)| *name)
+            .collect();
+
+        // used_by を辿って伝播
+        let mut to_propagate: Vec<InternedStr> = initial_set.into_iter().collect();
+
+        while let Some(name) = to_propagate.pop() {
+            let used_by_list: Vec<InternedStr> = self.macros
+                .get(&name)
+                .map(|info| info.used_by.iter().copied().collect())
+                .unwrap_or_default();
+
+            for user in used_by_list {
+                if let Some(user_info) = self.macros.get_mut(&user) {
+                    if !user_info.calls_unavailable {
+                        user_info.calls_unavailable = true;
                         to_propagate.push(user);
                     }
                 }
@@ -1855,6 +2007,145 @@ impl MacroInferContext {
             ExprKind::Comma { lhs, rhs } => {
                 Self::collect_uses_from_expr(lhs, uses);
                 Self::collect_uses_from_expr(rhs, uses);
+            }
+            _ => {}
+        }
+    }
+
+    /// 式から関数呼び出しのみを再帰的に収集（識別子は含めない）
+    pub fn collect_function_calls_from_expr(
+        expr: &Expr,
+        calls: &mut HashSet<InternedStr>,
+    ) {
+        match &expr.kind {
+            ExprKind::Call { func, args } => {
+                // 関数名を収集（直接呼び出しの場合のみ）
+                if let ExprKind::Ident(name) = &func.kind {
+                    calls.insert(*name);
+                }
+                Self::collect_function_calls_from_expr(func, calls);
+                for arg in args {
+                    Self::collect_function_calls_from_expr(arg, calls);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                Self::collect_function_calls_from_expr(lhs, calls);
+                Self::collect_function_calls_from_expr(rhs, calls);
+            }
+            ExprKind::Cast { expr: inner, .. }
+            | ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner)
+            | ExprKind::Sizeof(inner) => {
+                Self::collect_function_calls_from_expr(inner, calls);
+            }
+            ExprKind::Index { expr: base, index } => {
+                Self::collect_function_calls_from_expr(base, calls);
+                Self::collect_function_calls_from_expr(index, calls);
+            }
+            ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+                Self::collect_function_calls_from_expr(base, calls);
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                Self::collect_function_calls_from_expr(cond, calls);
+                Self::collect_function_calls_from_expr(then_expr, calls);
+                Self::collect_function_calls_from_expr(else_expr, calls);
+            }
+            ExprKind::Assign { lhs, rhs, .. } => {
+                Self::collect_function_calls_from_expr(lhs, calls);
+                Self::collect_function_calls_from_expr(rhs, calls);
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                Self::collect_function_calls_from_expr(lhs, calls);
+                Self::collect_function_calls_from_expr(rhs, calls);
+            }
+            ExprKind::StmtExpr(compound) => {
+                Self::collect_function_calls_from_block_items(&compound.items, calls);
+            }
+            _ => {}
+        }
+    }
+
+    /// ブロックアイテムから関数呼び出しを収集
+    fn collect_function_calls_from_block_items(
+        items: &[BlockItem],
+        calls: &mut HashSet<InternedStr>,
+    ) {
+        for item in items {
+            match item {
+                BlockItem::Stmt(stmt) => {
+                    Self::collect_function_calls_from_stmt(stmt, calls);
+                }
+                BlockItem::Decl(_) => {
+                    // 宣言内の初期化子も処理する必要があるが、今回はスキップ
+                }
+            }
+        }
+    }
+
+    /// 文から関数呼び出しを収集
+    fn collect_function_calls_from_stmt(
+        stmt: &crate::ast::Stmt,
+        calls: &mut HashSet<InternedStr>,
+    ) {
+        use crate::ast::{Stmt, ForInit};
+        match stmt {
+            Stmt::Expr(Some(expr), _) => {
+                Self::collect_function_calls_from_expr(expr, calls);
+            }
+            Stmt::If { cond, then_stmt, else_stmt, .. } => {
+                Self::collect_function_calls_from_expr(cond, calls);
+                Self::collect_function_calls_from_stmt(then_stmt, calls);
+                if let Some(else_s) = else_stmt {
+                    Self::collect_function_calls_from_stmt(else_s, calls);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                Self::collect_function_calls_from_expr(cond, calls);
+                Self::collect_function_calls_from_stmt(body, calls);
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                Self::collect_function_calls_from_stmt(body, calls);
+                Self::collect_function_calls_from_expr(cond, calls);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(for_init) = init {
+                    match for_init {
+                        ForInit::Expr(expr) => {
+                            Self::collect_function_calls_from_expr(expr, calls);
+                        }
+                        ForInit::Decl(_) => {
+                            // 宣言内の初期化子は今回はスキップ
+                        }
+                    }
+                }
+                if let Some(cond_expr) = cond {
+                    Self::collect_function_calls_from_expr(cond_expr, calls);
+                }
+                if let Some(step_expr) = step {
+                    Self::collect_function_calls_from_expr(step_expr, calls);
+                }
+                Self::collect_function_calls_from_stmt(body, calls);
+            }
+            Stmt::Compound(compound) => {
+                Self::collect_function_calls_from_block_items(&compound.items, calls);
+            }
+            Stmt::Return(Some(expr), _) => {
+                Self::collect_function_calls_from_expr(expr, calls);
+            }
+            Stmt::Switch { expr, body, .. } => {
+                Self::collect_function_calls_from_expr(expr, calls);
+                Self::collect_function_calls_from_stmt(body, calls);
+            }
+            Stmt::Label { stmt, .. } | Stmt::Case { stmt, .. } | Stmt::Default { stmt, .. } => {
+                Self::collect_function_calls_from_stmt(stmt, calls);
             }
             _ => {}
         }
