@@ -371,10 +371,16 @@ static inline I32* Perl_CvDEPTH(const CV* sv) { ... }
 | A: skip_expand_macros | **適用済み** - パース時にマクロ展開済み |
 | B: NoExpandSymbols | **関係なし** - inline 関数は TokenExpander 不使用 |
 | C: no_expand セット | **関係なし** |
+| C': substitute_and_expand_mut | **関係なし** - inline 関数は Preprocessor で展開済み |
 | D: bindings_consts | **関係なし** |
 | D': wrapped_macros | **適用** - assert の引数保存に必須（下記参照） |
 | E: is_function_available() | **inline 関数も可用** として認識 |
 | F: escape_rust_keyword() | **共通使用** |
+
+**注**: 制御点 C'（`substitute_and_expand_mut` での関数マクロ保存）は、マクロ関数の
+処理時に他のマクロを関数呼び出しとして保存する仕組み。Inline 関数は Preprocessor で
+完全に展開されるため、この制御点は適用されない。
+詳細は [マクロ展開制御アーキテクチャ - 制御点 C'](./architecture-macro-expansion-control.md#制御点-c-substitute_and_expand_mut-における関数マクロ保存) を参照。
 
 ---
 

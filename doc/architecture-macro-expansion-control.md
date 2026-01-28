@@ -64,6 +64,8 @@
 │  │    │                                                              │   │
 │  │    └── TokenExpander.expand_with_calls()                         │   │
 │  │        ├── no_expand セット ← 制御点 C                            │   │
+│  │        ├── substitute_and_expand_mut() ← 制御点 C'               │   │
+│  │        │   (関数マクロを展開せず識別子として保存)                   │   │
 │  │        ├── bindings_consts ← 制御点 D                            │   │
 │  │        └── called_macros に呼び出しを記録                         │   │
 │  │                                                                   │   │
@@ -232,9 +234,81 @@ fn expand_mut(&mut self, tokens: &[Token], visited: &mut HashSet<InternedStr>) -
 
 ---
 
+### 制御点 C': substitute_and_expand_mut における関数マクロ保存
+
+**場所**: `src/token_expander.rs:530-589` (特に 553-577)
+
+**役割**: 関数マクロの本体展開時に、**他の関数形式マクロを展開せず識別子として保存**する
+
+**背景**:
+- `expand_with_calls_internal` はトップレベルで関数マクロ呼び出し `FOO(...)` を展開する
+- しかし、展開されたマクロ本体の中で出現する**他の関数マクロは展開しない**
+- これにより、呼び出し先マクロが関数呼び出しの形で AST に残り、個別に Rust 関数として生成される
+
+**実装**:
+```rust
+// token_expander.rs の substitute_and_expand_mut 内
+fn substitute_and_expand_mut(...) -> Vec<Token> {
+    for token in body {
+        match &token.kind {
+            TokenKind::Ident(id) => {
+                if let Some(arg_tokens) = arg_map.get(id) {
+                    // パラメータ: 置換して展開
+                    let expanded = self.expand_with_calls_internal(arg_tokens, in_progress);
+                    result.extend(expanded);
+                } else if let Some(def) = self.macro_table.get(*id) {
+                    if !def.is_function() {
+                        // オブジェクトマクロ: 展開する
+                        self.expanded_macros.insert(*id);
+                        let expanded = self.expand_object_macro_mut(def, token, in_progress);
+                        result.extend(expanded);
+                    } else {
+                        // ★ 関数マクロ: 展開しない！識別子として保存
+                        result.push(token.clone());
+                    }
+                }
+                // ...
+            }
+        }
+    }
+}
+```
+
+**動作例**:
+```
+AvFILL(av) の展開過程:
+
+1. AvFILL の本体: ((SvRMAGICAL((const SV *) (av))) ? ... : ...)
+   - SvRMAGICAL は関数マクロ → expand_with_calls_internal で展開
+
+2. SvRMAGICAL の本体: (SvFLAGS(sv) & SVs_RMG)
+   - substitute_and_expand_mut で処理
+   - sv → (const SV *) (av) に置換
+   - SvFLAGS は関数マクロ → ★展開されず識別子のまま保存
+
+3. 結果のトークン列: (SvFLAGS((const SV *) (av)) & SVs_RMG)
+   - SvFLAGS は識別子、続く (...) は引数トークン
+
+4. パーサーがこれを解析:
+   - SvFLAGS(...) → Call { func: SvFLAGS, args: [...] } として AST に
+
+5. Rust コード生成:
+   - SvFLAGS((av as *const SV)) として出力
+```
+
+**この仕組みにより**:
+- `SvFLAGS`, `MUTABLE_PTR` などの関数マクロが個別の Rust 関数として生成される
+- それらを呼び出すマクロ（`AvFILL` など）では、関数呼び出しとして残る
+- `NoExpandSymbols` に登録しなくても、自動的に関数呼び出しが保存される
+
+**注意**: オブジェクトマクロ（引数なし）は展開される。この区別により、定数マクロは
+インライン展開され、関数形式マクロは関数呼び出しとして保存される。
+
+---
+
 ### 制御点 D: bindings_consts (KeySet)
 
-**場所**: `src/token_expander.rs:45`, `src/macro_infer.rs:705-706`
+**場所**: `src/token_expander.rs:45`, `src/macro_infer.rs:505-506`
 
 **役割**: bindings.rs の定数名を展開抑制（制御点 A と連携）
 
@@ -527,8 +601,32 @@ pp.add_skip_expand_macro(my_const);
                                                               ┌────────────┐ ┌────────────┐
                                                               │ 展開しない  │ │ マクロ展開  │
                                                               │ (再帰防止) │ │ 実行       │
-                                                              └────────────┘ └────────────┘
+                                                              └────────────┘ └─────┬──────┘
+                                                                                    │
+                                                                                    ▼
+                                                                          ┌─────────────────┐
+                                                                          │ 展開コンテキスト │
+                                                                          └────────┬────────┘
+                                                                                   │
+                                                           ┌───────────────────────┴───────────────────────┐
+                                                           │                                               │
+                                                           ▼                                               ▼
+                                              ┌─────────────────────────────┐               ┌─────────────────────────────┐
+                                              │ expand_with_calls_internal  │               │ substitute_and_expand_mut   │
+                                              │ (トップレベル展開)           │               │ (マクロ本体のパラメータ置換)  │
+                                              └──────────────┬──────────────┘               └──────────────┬──────────────┘
+                                                             │                                             │
+                                                             ▼                                             ▼
+                                              ┌─────────────────────────────┐               ┌─────────────────────────────┐
+                                              │ 関数マクロ呼び出し FOO(...) │               │ 関数マクロ識別子 FOO         │
+                                              │ → 引数を収集して展開         │               │ → ★展開しない（識別子保存）  │
+                                              │                             │               │   ← 制御点 C'               │
+                                              └─────────────────────────────┘               └─────────────────────────────┘
 ```
+
+**重要**: 上図の「制御点 C'」が、関数マクロが呼び出し形式で保存される主要な仕組みである。
+`SvFLAGS`, `MUTABLE_PTR` などは `NoExpandSymbols` に登録されていないが、
+この仕組みにより自動的に関数呼び出しとして AST に残る。
 
 ### 記録される情報
 
@@ -545,13 +643,13 @@ pp.add_skip_expand_macro(my_const);
 
 | ファイル | 責務 |
 |----------|------|
-| `preprocessor.rs` | マクロ定義の管理、トークン展開、skip_expand_macros |
-| `token_expander.rs` | マクロ本体の展開、no_expand/bindings_consts チェック |
+| `preprocessor.rs` | マクロ定義の管理、トークン展開、skip_expand_macros、wrapped_macros |
+| `token_expander.rs` | マクロ本体の展開、no_expand/bindings_consts チェック、**関数マクロ保存（C'）** |
 | `macro_infer.rs` | マクロ型推論、NoExpandSymbols、def-use グラフ |
 | `infer_api.rs` | パイプライン統合、bindings.rs 読み込み、制御点の設定 |
 | `rust_codegen.rs` | Rust コード生成、関数可用性チェック、識別子変換 |
 | `rust_decl.rs` | bindings.rs のパース、RustDeclDict 構築 |
-| `pipeline.rs` | 高レベル API、設定の受け渡し |
+| `pipeline.rs` | 高レベル API、設定の受け渡し、with_codegen_defaults |
 
 ---
 
@@ -562,6 +660,11 @@ pp.add_skip_expand_macro(my_const);
 1. **静的に定義**: `NoExpandSymbols` に追加
 2. **動的に定義**: `pp.add_skip_expand_macro()` を呼び出し
 3. **bindings.rs ベース**: bindings.rs に定数として追加
+
+**注意**: 関数形式マクロは**制御点 C' により自動的に保存される**ため、
+`NoExpandSymbols` への追加は通常不要。`NoExpandSymbols` は以下の場合にのみ使用:
+- `assert`/`assert_`: 特別な AST ノードに変換するため
+- `SvANY`: 型推論で特別な処理が必要なため
 
 ### 新しい「可用な関数」を追加する場合
 
