@@ -38,7 +38,7 @@ pub use apidoc::{
     ApidocArg, ApidocCollector, ApidocDict, ApidocEntry, ApidocFlags, ApidocResolveError, ApidocStats, Nullability,
 };
 pub use infer_api::{
-    run_inference_with_preprocessor, run_macro_inference,
+    run_inference_with_preprocessor,
     DebugOptions, InferConfig, InferError, InferResult, InferStats, TypedefDict,
 };
 pub use ast::*;
