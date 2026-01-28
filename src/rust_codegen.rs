@@ -2823,6 +2823,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
         }
 
+        // インライン関数として存在する場合はOK
+        if result.inline_fn_dict.get(fn_id).is_some() {
+            return true;
+        }
+
         // ビルトイン関数リスト（macro_infer.rs と同じ）
         let builtin_fns = [
             "__builtin_expect",

@@ -1687,7 +1687,7 @@ impl MacroInferContext {
         self.propagate_flag_via_used_by(&pasting_initial, false);
 
         // Step 4.5: 利用不可関数呼び出しのチェックと伝播
-        self.check_function_availability(rust_decl_dict, interner);
+        self.check_function_availability(rust_decl_dict, inline_fn_dict, interner);
         self.propagate_unavailable_via_used_by();
 
         // Step 5: 全マクロを unconfirmed に
@@ -1748,6 +1748,7 @@ impl MacroInferContext {
     fn check_function_availability(
         &mut self,
         rust_decl_dict: Option<&RustDeclDict>,
+        inline_fn_dict: Option<&InlineFnDict>,
         interner: &StringInterner,
     ) {
         // bindings.rs の関数名を収集
@@ -1811,6 +1812,13 @@ impl MacroInferContext {
                 // bindings.rs に存在する場合はOK
                 if bindings_fns.contains(fn_name) {
                     continue;
+                }
+
+                // インライン関数として存在する場合はOK
+                if let Some(inline_fns) = inline_fn_dict {
+                    if inline_fns.get(called_fn).is_some() {
+                        continue;
+                    }
                 }
 
                 // ビルトイン関数の場合はOK
