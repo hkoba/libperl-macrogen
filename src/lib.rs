@@ -25,14 +25,10 @@ pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
 pub mod source;
-// thx_collector は現在未使用（将来のコールバック API 拡張で使用予定）
-#[allow(dead_code)]
-mod thx_collector;
 pub mod token;
 pub mod token_expander;
 pub mod token_source;
 pub mod type_env;
-pub mod type_registry;
 pub mod type_repr;
 pub mod unified_type;
 
@@ -67,8 +63,6 @@ pub use preprocessor::{
     CallbackPair, CommentCallback, MacroCalledCallback, MacroCallWatcher, MacroDefCallback,
     PPConfig, Preprocessor,
 };
-// ThxCollector は現在未使用（HashSet<InternedStr> を直接使用する方式に変更）
-// pub use thx_collector::ThxCollector;
 pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
@@ -76,7 +70,6 @@ pub use token::{Comment, CommentKind, Token, TokenKind};
 pub use token_expander::TokenExpander;
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 pub use type_env::{ParamLink, TypeConstraint, TypeEnv};
-pub use type_registry::{TypeEquality, TypeRegistry, TypeRegistryStats};
 pub use type_repr::{
     CDerivedType, CPrimitiveKind, CTypeSource, CTypeSpecs, InferredType,
     IntSize as TypeReprIntSize, RustPrimitiveKind, RustTypeRepr, RustTypeSource, TypeRepr,
