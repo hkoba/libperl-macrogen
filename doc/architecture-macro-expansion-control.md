@@ -251,6 +251,65 @@ if let Some(dict) = rust_decl_dict {
 
 ---
 
+### 制御点 D': wrapped_macros (assert 保存機構)
+
+**場所**: `src/preprocessor.rs:552-554`, `src/pipeline.rs:262-268`
+
+**役割**: 特定のマクロを展開しつつ、**元の引数情報を保存**する
+
+**背景**:
+- Perl の `assert` マクロは `DEBUGGING` 未定義時に `((void)0)` に展開される
+- 通常の展開では条件式が消失し、Rust の `assert!()` を生成できない
+- `wrapped_macros` に登録されたマクロは、展開結果を `MacroBegin`/`MacroEnd` マーカーで囲む
+- Parser がこのマーカーを検出して、**元の引数から** `Assert` AST ノードを作成
+
+**設定方法**:
+```rust
+// Pipeline API
+Pipeline::builder("wrapper.h")
+    .with_codegen_defaults()  // ← assert, assert_ を wrapped_macros に登録
+    .build()?;
+
+// with_codegen_defaults() の実装
+pub fn with_codegen_defaults(mut self) -> Self {
+    self.preprocess.wrapped_macros = vec![
+        "assert".to_string(),
+        "assert_".to_string(),
+    ];
+    self
+}
+```
+
+**処理フロー**:
+```
+assert(cond)
+    │
+    ▼ Preprocessor で展開
+┌─────────────────────────────────────────────────┐
+│ MacroBegin { name: "assert", args: [cond] }     │
+│ ((void)0)  ← 展開結果（DEBUGGING 未定義時）      │
+│ MacroEnd                                        │
+└─────────────────────────────────────────────────┘
+    │
+    ▼ Parser で検出
+┌─────────────────────────────────────────────────┐
+│ ExprKind::Assert {                              │
+│     kind: AssertKind::Assert,                   │
+│     condition: Box::new(cond)  ← 元の引数から復元│
+│ }                                               │
+└─────────────────────────────────────────────────┘
+    │
+    ▼ RustCodegen で変換
+┌─────────────────────────────────────────────────┐
+│ assert!((cond) != 0)                            │
+└─────────────────────────────────────────────────┘
+```
+
+**重要**: `with_codegen_defaults()` を呼ばないと、inline 関数内の `assert` が
+`{ 0; };` のような空文に変換されてしまう。
+
+---
+
 ### 制御点 E: is_function_available()
 
 **場所**: `src/rust_codegen.rs:2821-2876`

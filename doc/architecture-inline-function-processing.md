@@ -30,10 +30,10 @@
          │  4. 型推論 (TypeEnv)           │          │
          │  5. expr_to_rust() で変換      │          │
          │                               │          │
-         │  ★ assert は展開抑制          │          │
-         │    → Call として AST に残る    │          │
-         │    → convert_assert_calls()   │          │
-         │       で Assert に変換        │          │
+         │  ★ assert は wrapped_macros   │          │
+         │    で引数を保存               │          │
+         │    → MacroBegin/End マーカー   │          │
+         │    → Parser で Assert に変換  │          │
          └───────────────────────────────┘          │
                          │                          │
                          ▼                          ▼
@@ -42,15 +42,16 @@
          │ (MacroInferInfo)             │  │                             │
          └───────────────────────────────┘  │ 1. Parser で関数定義パース   │
                                            │    (マクロ展開あり)          │
+                                           │    ★ wrapped_macros で      │
+                                           │      assert 引数を保存      │
                                            │ 2. InlineFnDict に収集       │
-                                           │    ★ ここで assert 変換     │
                                            │ 3. FunctionDef を保存        │
                                            │ 4. generate_inline_fn()     │
                                            │ 5. expr_to_rust_inline()    │
                                            │    で変換                    │
                                            │                             │
-                                           │ ★ assert はパース時に展開   │
-                                           │   → 収集時に変換が必要       │
+                                           │ ★ with_codegen_defaults()   │
+                                           │   必須（省略時 { 0; }; に）  │
                                            └─────────────────────────────┘
                                                         │
                                                         ▼
@@ -274,20 +275,32 @@ Perl_CvDEPTH(const CV * const sv)
 ```
 
 ```rust
-// 生成される Rust コード
+// 生成される Rust コード（with_codegen_defaults() 使用時）
 #[inline]
 pub unsafe fn Perl_CvDEPTH(sv: *const CV) -> *mut I32 {
     unsafe {
-        { 0; };  // PERL_ARGS_ASSERT_CVDEPTH の展開結果
-        { 0; };  // assert の展開結果（条件が既に展開されている場合）
+        { 0; };  // PERL_ARGS_ASSERT_CVDEPTH（DEBUGGING 未定義で空）
+        assert!((SvTYPE(sv) == SVt_PVCV || SvTYPE(sv) == SVt_PVFM) != 0);
         return (&mut (*((*sv).sv_any as *mut XPVCV)).xcv_depth);
     }
 }
 ```
 
-**注**: `{ 0; };` は `assert_` (AssertKind::AssertUnderscore) の変換結果。
-Perl の `PERL_ARGS_ASSERT_*` マクロは `DEBUGGING` 未定義時に空になり、
-その後の assert 変換で `{ 0; };` として出力される。
+**重要**: 上記の適切な `assert!()` 出力を得るには、Pipeline API で `with_codegen_defaults()` を
+呼び出す必要がある。詳細は後述の「wrapped_macros との関連」を参照。
+
+**`with_codegen_defaults()` を使用しない場合**:
+```rust
+// with_codegen_defaults() 未使用時の出力
+#[inline]
+pub unsafe fn Perl_CvDEPTH(sv: *const CV) -> *mut I32 {
+    unsafe {
+        { 0; };  // PERL_ARGS_ASSERT_CVDEPTH
+        { 0; };  // assert が空に展開されてしまう
+        return (&mut (*((*sv).sv_any as *mut XPVCV)).xcv_depth);
+    }
+}
+```
 
 ---
 
@@ -359,8 +372,83 @@ static inline I32* Perl_CvDEPTH(const CV* sv) { ... }
 | B: NoExpandSymbols | **関係なし** - inline 関数は TokenExpander 不使用 |
 | C: no_expand セット | **関係なし** |
 | D: bindings_consts | **関係なし** |
+| D': wrapped_macros | **適用** - assert の引数保存に必須（下記参照） |
 | E: is_function_available() | **inline 関数も可用** として認識 |
 | F: escape_rust_keyword() | **共通使用** |
+
+---
+
+## wrapped_macros との関連
+
+### 背景: assert マクロの展開問題
+
+Perl の `assert` マクロは `DEBUGGING` が定義されていない場合、`((void)0)` に展開される:
+
+```c
+// perl.h での定義（DEBUGGING 未定義時）
+#define assert(x)  ((void)0)
+```
+
+inline 関数のパース時、Preprocessor がマクロを展開するため、
+`assert(cond)` は `((void)0)` となり、**条件式が消失**してしまう。
+
+### wrapped_macros による解決
+
+`with_codegen_defaults()` を呼び出すと、`wrapped_macros` に `assert`, `assert_` が登録される:
+
+```rust
+// src/pipeline.rs
+pub fn with_codegen_defaults(mut self) -> Self {
+    self.preprocess.wrapped_macros = vec![
+        "assert".to_string(),
+        "assert_".to_string(),
+    ];
+    self
+}
+```
+
+`wrapped_macros` に登録されたマクロは、展開結果を `MacroBegin`/`MacroEnd` マーカーで囲む:
+
+```
+assert(cond)
+    │
+    ▼ Preprocessor で展開
+┌─────────────────────────────────────────────┐
+│ MacroBegin { name: "assert", args: [cond] } │
+│ ((void)0)  ← 展開結果                        │
+│ MacroEnd                                    │
+└─────────────────────────────────────────────┘
+    │
+    ▼ Parser で検出
+┌─────────────────────────────────────────────┐
+│ Assert {                                    │
+│     kind: AssertKind::Assert,               │
+│     condition: Box::new(cond)  ← 引数から復元│
+│ }                                           │
+└─────────────────────────────────────────────┘
+```
+
+### Pipeline API での必須設定
+
+```rust
+// ✓ 正しい使い方
+Pipeline::builder("wrapper.h")
+    .with_auto_perl_config()?
+    .with_bindings(&bindings_path)
+    .with_codegen_defaults()       // ← 必須: assert 保存機構を有効化
+    .build()?
+    .generate(&mut output)?;
+
+// ✗ 誤った使い方（assert が { 0; }; になる）
+Pipeline::builder("wrapper.h")
+    .with_auto_perl_config()?
+    .with_bindings(&bindings_path)
+    // with_codegen_defaults() を忘れている
+    .build()?
+    .generate(&mut output)?;
+```
+
+詳細は [マクロ展開制御アーキテクチャ - 制御点 D'](./architecture-macro-expansion-control.md#制御点-d-wrapped_macros-assert-保存機構) を参照。
 
 ---
 
@@ -448,6 +536,7 @@ pub fn generate_inline_fn(...) -> GeneratedCode {
 |------|--------|-------------|
 | **保存形式** | `MacroInferInfo` (パース結果) | `FunctionDef` (完全な AST) |
 | **assert 処理タイミング** | TokenExpander 後、パース時 | 収集時 (`collect_from_function_def`) |
+| **assert 引数保存** | wrapped_macros で MacroBegin/End マーカー | 同左（`with_codegen_defaults()` 必須） |
 | **型推論** | TypeEnv による制約ベース | なし（AST 直接参照） |
 | **Rust 変換メソッド** | `expr_to_rust()` | `expr_to_rust_inline()` |
 | **可用性判定** | bindings.rs, builtins 確認 | InlineFnDict に存在すれば可用 |
