@@ -202,6 +202,8 @@ pub enum GenerateStatus {
     ParseFailed,
     /// 型推論不完全（型付S式をコメント出力）
     TypeIncomplete,
+    /// 利用不可関数を呼び出す（コメント出力）
+    CallsUnavailable,
     /// スキップ（対象外）
     Skip,
 }
@@ -215,6 +217,8 @@ pub struct CodegenStats {
     pub macros_parse_failed: usize,
     /// 型推論失敗マクロ数
     pub macros_type_incomplete: usize,
+    /// 利用不可関数呼び出しマクロ数
+    pub macros_calls_unavailable: usize,
     /// 正常生成された inline 関数数
     pub inline_fns_success: usize,
     /// 型推論失敗 inline 関数数
@@ -2667,6 +2671,10 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     self.generate_macro_type_incomplete(info, result)?;
                     self.stats.macros_type_incomplete += 1;
                 }
+                GenerateStatus::CallsUnavailable => {
+                    self.generate_macro_calls_unavailable(info, result)?;
+                    self.stats.macros_calls_unavailable += 1;
+                }
                 GenerateStatus::Skip => {
                     // 何もしない
                     let _ = name;
@@ -2690,20 +2698,16 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
 
         // 関数形式マクロのみ含める（オブジェクトマクロは常にインライン展開される）
-        if !info.is_function {
-            return false;
-        }
-
-        // 利用不可関数を呼び出すマクロは除外
-        if info.calls_unavailable {
-            return false;
-        }
-
-        true
+        info.is_function
     }
 
     /// マクロの生成ステータスを判定
     fn get_macro_status(&self, info: &MacroInferInfo) -> GenerateStatus {
+        // 利用不可関数を呼び出すマクロは CallsUnavailable
+        if info.calls_unavailable {
+            return GenerateStatus::CallsUnavailable;
+        }
+
         match &info.parse_result {
             ParseResult::Unparseable(_) => GenerateStatus::ParseFailed,
             ParseResult::Expression(_) | ParseResult::Statement(_) => {
@@ -2765,6 +2769,98 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         writeln!(self.writer)?;
 
         Ok(())
+    }
+
+    /// 利用不可関数呼び出しマクロをコメント出力
+    fn generate_macro_calls_unavailable(&mut self, info: &MacroInferInfo, result: &InferResult) -> io::Result<()> {
+        let name_str = self.interner.get(info.name);
+
+        // パラメータリストを構築
+        let params_str = if info.is_function {
+            let params: Vec<_> = info.params.iter()
+                .map(|p| self.interner.get(p.name).to_string())
+                .collect();
+            format!("({})", params.join(", "))
+        } else {
+            String::new()
+        };
+
+        // THX 情報
+        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+
+        writeln!(self.writer, "// [CALLS_UNAVAILABLE] {}{}{} - calls unavailable function(s)", name_str, params_str, thx_info)?;
+
+        // 利用不可関数を特定して出力
+        let unavailable_fns: Vec<_> = info.called_functions.iter()
+            .filter(|&fn_id| {
+                let fn_name = self.interner.get(*fn_id);
+                // bindings.rs にもマクロにも存在しない関数を検出
+                !self.is_function_available(*fn_id, fn_name, result)
+            })
+            .map(|fn_id| self.interner.get(*fn_id))
+            .collect();
+
+        if !unavailable_fns.is_empty() {
+            writeln!(self.writer, "// Unavailable: {}", unavailable_fns.join(", "))?;
+        }
+
+        writeln!(self.writer)?;
+
+        Ok(())
+    }
+
+    /// 関数が利用可能かチェック
+    fn is_function_available(&self, fn_id: crate::InternedStr, fn_name: &str, result: &InferResult) -> bool {
+        // マクロとして存在する場合はOK
+        if result.infer_ctx.macros.contains_key(&fn_id) {
+            return true;
+        }
+
+        // bindings.rs に存在する場合はOK
+        if let Some(rust_decl_dict) = &result.rust_decl_dict {
+            if rust_decl_dict.fns.contains_key(fn_name) {
+                return true;
+            }
+        }
+
+        // ビルトイン関数リスト（macro_infer.rs と同じ）
+        let builtin_fns = [
+            "__builtin_expect",
+            "__builtin_offsetof",
+            "__builtin_types_compatible_p",
+            "__builtin_constant_p",
+            "__builtin_choose_expr",
+            "__builtin_unreachable",
+            "__builtin_trap",
+            "__builtin_assume",
+            "__builtin_bswap16",
+            "__builtin_bswap32",
+            "__builtin_bswap64",
+            "__builtin_popcount",
+            "__builtin_clz",
+            "__builtin_ctz",
+            "__errno_location",
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "pthread_rwlock_rdlock",
+            "pthread_rwlock_wrlock",
+            "pthread_rwlock_unlock",
+            "memchr",
+            "memcpy",
+            "memmove",
+            "memset",
+            "strlen",
+            "strcmp",
+            "strncmp",
+            "strcpy",
+            "strncpy",
+        ];
+
+        if builtin_fns.contains(&fn_name) {
+            return true;
+        }
+
+        false
     }
 
     /// 型推論失敗マクロをコメント出力
