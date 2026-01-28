@@ -160,10 +160,6 @@ impl DebugOptions {
 pub struct InferStats {
     /// コメントから収集した apidoc 数
     pub apidoc_from_comments: usize,
-    /// SvANY パターンから推論された型制約数
-    pub sv_any_constraint_count: usize,
-    /// sv_u フィールドパターンから推論された型制約数
-    pub sv_u_field_constraint_count: usize,
     /// THX 依存マクロ数
     pub thx_dependent_count: usize,
 }
@@ -343,34 +339,6 @@ pub fn run_inference_with_preprocessor(
         );
     }
 
-    // SvANY パターンから追加の型制約を適用
-    let mut sv_any_constraint_count = 0;
-    {
-        let interner = pp.interner();
-        let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
-        for name in macro_names {
-            sv_any_constraint_count += infer_ctx.apply_sv_any_constraints(
-                name,
-                &fields_dict,
-                no_expand,
-                interner,
-            );
-        }
-    }
-
-    // sv_u フィールドパターンから追加の型制約を適用
-    let mut sv_u_field_constraint_count = 0;
-    {
-        let interner = pp.interner();
-        let macro_names: Vec<_> = infer_ctx.macros.keys().copied().collect();
-        for name in macro_names {
-            sv_u_field_constraint_count += infer_ctx.apply_sv_u_field_constraints(
-                name,
-                interner,
-            );
-        }
-    }
-
     // THX 依存マクロ数をカウント
     let thx_dependent_count = infer_ctx.macros.values()
         .filter(|info| info.is_target && info.is_thx_dependent)
@@ -378,8 +346,6 @@ pub fn run_inference_with_preprocessor(
 
     let stats = InferStats {
         apidoc_from_comments,
-        sv_any_constraint_count,
-        sv_u_field_constraint_count,
         thx_dependent_count,
     };
 
