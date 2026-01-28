@@ -22,6 +22,7 @@
 //! // 段階的実行
 //! let preprocessed = Pipeline::builder("wrapper.h")
 //!     .with_auto_perl_config()?
+//!     .with_codegen_defaults()
 //!     .build()?
 //!     .preprocess()?;
 //!
