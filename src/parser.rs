@@ -2615,7 +2615,7 @@ mod tests {
         file.write_all(code.as_bytes()).unwrap();
 
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path())?;
+        pp.add_source_file(file.path())?;
 
         let mut parser = Parser::new(&mut pp)?;
         parser.parse()

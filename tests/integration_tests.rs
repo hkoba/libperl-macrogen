@@ -22,7 +22,7 @@ fn parse_source(source: &str) -> Vec<ExternalDecl> {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     parser.parse().unwrap().decls
@@ -43,7 +43,7 @@ fn parse_to_sexp(source: &str) -> String {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     let tu = parser.parse().unwrap();
@@ -71,7 +71,7 @@ fn parse_streaming(source: &str) -> (Vec<ExternalDecl>, Option<String>) {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     let mut decls = Vec::new();
@@ -245,7 +245,7 @@ fn test_predefined_macro_integration() {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     let tu = parser.parse().unwrap();

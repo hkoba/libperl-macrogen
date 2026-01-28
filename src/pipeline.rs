@@ -416,7 +416,7 @@ impl Pipeline {
         }
 
         // ファイルを処理
-        pp.process_file(&self.preprocess_config.input_file)?;
+        pp.add_source_file(&self.preprocess_config.input_file)?;
 
         Ok(PreprocessedPipeline {
             preprocessor: pp,

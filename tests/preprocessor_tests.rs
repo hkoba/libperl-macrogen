@@ -19,7 +19,7 @@ fn preprocess(source: &str) -> Preprocessor {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
     pp
 }
 
@@ -229,7 +229,7 @@ fn test_predefined_macros() {
     file.flush().unwrap();
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let tokens = collect_tokens(&mut pp);
 

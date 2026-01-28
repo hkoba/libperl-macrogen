@@ -644,8 +644,12 @@ impl Preprocessor {
         tokens
     }
 
-    /// ファイルを処理開始
-    pub fn process_file(&mut self, path: &Path) -> Result<(), CompileError> {
+    /// ファイルをソースとして登録する
+    ///
+    /// 注: この関数はファイルを InputSource として登録するだけで、
+    /// 実際のマクロ展開処理は行わない。マクロ展開は `next_token()` や
+    /// `collect_tokens()` の呼び出し時に遅延実行される。
+    pub fn add_source_file(&mut self, path: &Path) -> Result<(), CompileError> {
         let source = fs::read(path).map_err(|e| {
             CompileError::Preprocess {
                 loc: SourceLocation::default(),
@@ -3129,7 +3133,7 @@ mod tests {
     fn test_simple_tokens() {
         let file = create_temp_file("int x;");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         // int, x, ; の3トークン
@@ -3143,7 +3147,7 @@ mod tests {
     fn test_object_macro() {
         let file = create_temp_file("#define VALUE 42\nint x = VALUE;");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::IntLit(42))));
@@ -3153,7 +3157,7 @@ mod tests {
     fn test_function_macro() {
         let file = create_temp_file("#define ADD(a, b) a + b\nint x = ADD(1, 2);");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Plus)));
@@ -3163,7 +3167,7 @@ mod tests {
     fn test_ifdef() {
         let file = create_temp_file("#define FOO\n#ifdef FOO\nint x;\n#endif");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(has_keyword(&tokens, TokenKind::KwInt));
@@ -3173,7 +3177,7 @@ mod tests {
     fn test_ifndef() {
         let file = create_temp_file("#ifndef BAR\nint x;\n#endif");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(has_keyword(&tokens, TokenKind::KwInt));
@@ -3183,7 +3187,7 @@ mod tests {
     fn test_ifdef_else() {
         let file = create_temp_file("#ifdef UNDEFINED\nint x;\n#else\nfloat y;\n#endif");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         // UNDEFINED は定義されていないので、int x は出力されない
@@ -3197,7 +3201,7 @@ mod tests {
     fn test_if_expression() {
         let file = create_temp_file("#if 1 + 1 == 2\nint x;\n#endif");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(has_keyword(&tokens, TokenKind::KwInt));
@@ -3211,7 +3215,7 @@ mod tests {
         };
         let file = create_temp_file("int v = VERSION;");
         let mut pp = Preprocessor::new(config);
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::IntLit(100))));
@@ -3221,7 +3225,7 @@ mod tests {
     fn test_undef() {
         let file = create_temp_file("#define FOO 1\n#undef FOO\n#ifdef FOO\nint x;\n#endif");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         // FOO は #undef されているので、int x は出力されない
@@ -3234,7 +3238,7 @@ mod tests {
             "#define A\n#ifdef A\n#ifdef B\nint x;\n#else\nfloat y;\n#endif\n#endif"
         );
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
         // A は定義されているが B は定義されていないので、float y が出力される
@@ -3363,7 +3367,7 @@ mod tests {
         // emit_markers = false (デフォルト) の場合、マーカーは出力されない
         let file = create_temp_file("#define FOO 42\nint x = FOO;");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
 
@@ -3383,7 +3387,7 @@ mod tests {
             ..Default::default()
         };
         let mut pp = Preprocessor::new(config);
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
 
@@ -3416,7 +3420,7 @@ mod tests {
             ..Default::default()
         };
         let mut pp = Preprocessor::new(config);
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
 
@@ -3453,7 +3457,7 @@ mod tests {
             ..Default::default()
         };
         let mut pp = Preprocessor::new(config);
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let tokens = pp.collect_tokens().unwrap();
 
@@ -3498,7 +3502,7 @@ mod tests {
         // オブジェクトマクロの呼び出し検出
         let file = create_temp_file("#define TEST_MACRO 42\nint x = TEST_MACRO;");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         // コールバックを登録
         let macro_name = pp.interner_mut().intern("TEST_MACRO");
@@ -3526,7 +3530,7 @@ mod tests {
         // 関数マクロの呼び出し検出と引数取得
         let file = create_temp_file("#define ADD(a, b) a + b\nint x = ADD(10, 20);");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         // コールバックを登録
         let macro_name = pp.interner_mut().intern("ADD");
@@ -3559,7 +3563,7 @@ mod tests {
         // clear() メソッドのテスト
         let file = create_temp_file("#define FOO(x) x\nint a = FOO(1);\nint b = FOO(2);");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         // コールバックを登録
         let macro_name = pp.interner_mut().intern("FOO");
@@ -3605,7 +3609,7 @@ mod tests {
         // take_called() メソッドのテスト（フラグを取得してリセット）
         let file = create_temp_file("#define BAR 99\nint x = BAR;");
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let macro_name = pp.interner_mut().intern("BAR");
         pp.set_macro_called_callback(macro_name, Box::new(MacroCallWatcher::new()));
@@ -3628,7 +3632,7 @@ mod tests {
             "#define A(x) x\n#define B(x) x\n#define C(x) x\nint a = A(1); int b = B(2);"
         );
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let macro_a = pp.interner_mut().intern("A");
         let macro_b = pp.interner_mut().intern("B");
@@ -3669,7 +3673,7 @@ mod tests {
              struct other { int x; };"
         );
         let mut pp = Preprocessor::new(PPConfig::default());
-        pp.process_file(file.path()).unwrap();
+        pp.add_source_file(file.path()).unwrap();
 
         let sv_head = pp.interner_mut().intern("_SV_HEAD");
         pp.set_macro_called_callback(sv_head, Box::new(MacroCallWatcher::new()));

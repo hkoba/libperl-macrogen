@@ -21,7 +21,7 @@ fn parse(source: &str) -> Vec<ExternalDecl> {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     let tu = parser.parse().unwrap();
@@ -462,7 +462,7 @@ fn parse_with_markers(source: &str) -> Vec<ExternalDecl> {
     };
 
     let mut pp = Preprocessor::new(config);
-    pp.process_file(file.path()).unwrap();
+    pp.add_source_file(file.path()).unwrap();
 
     let mut parser = Parser::new(&mut pp).unwrap();
     parser.set_handle_macro_markers(true).unwrap();  // Enable marker handling

@@ -25,7 +25,7 @@ fn run_test_case(name: &str) {
 
     // C ファイルをパース
     let mut pp = Preprocessor::new(PPConfig::default());
-    pp.process_file(&c_file)
+    pp.add_source_file(&c_file)
         .expect(&format!("Failed to preprocess {:?}", c_file));
 
     let mut parser = Parser::new(&mut pp)
