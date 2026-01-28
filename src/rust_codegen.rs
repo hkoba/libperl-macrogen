@@ -12,24 +12,32 @@ use crate::macro_infer::{MacroInferContext, MacroInferInfo, MacroParam, ParseRes
 use crate::sexp::SexpPrinter;
 
 /// Rust の予約語リスト（strict keywords + reserved keywords）
+/// 注: true/false はリテラルなので含めない
 const RUST_KEYWORDS: &[&str] = &[
-    // Strict keywords
+    // Strict keywords (true/false は除外 - リテラルなのでエスケープ不要)
     "as", "async", "await", "break", "const", "continue", "crate", "dyn",
-    "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in",
+    "else", "enum", "extern", "fn", "for", "if", "impl", "in",
     "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
-    "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "self", "Self", "static", "struct", "super", "trait", "type",
     "unsafe", "use", "where", "while",
     // Reserved keywords
     "abstract", "become", "box", "do", "final", "gen", "macro", "override",
     "priv", "try", "typeof", "unsized", "virtual", "yield",
 ];
 
-/// Rust の予約語をエスケープ（必要なら r# を付ける）
+/// 識別子を Rust コードに変換
+///
+/// - Rust の予約語は r# を付ける
+/// - C のプリプロセッサマクロは Rust の同等品に変換
 fn escape_rust_keyword(name: &str) -> String {
-    if RUST_KEYWORDS.contains(&name) {
-        format!("r#{}", name)
-    } else {
-        name.to_string()
+    match name {
+        // C プリプロセッサマクロ → Rust マクロ
+        "__FILE__" => "file!()".to_string(),
+        "__LINE__" => "line!()".to_string(),
+        // Rust 予約語はエスケープ
+        _ if RUST_KEYWORDS.contains(&name) => format!("r#{}", name),
+        // その他はそのまま
+        _ => name.to_string(),
     }
 }
 

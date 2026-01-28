@@ -87,35 +87,31 @@ cargo run -- --auto -E --gcc-format samples/xs-wrapper.h
 
 The `--auto` option automatically retrieves include paths and defines from Perl's `Config.pm`.
 
-### Testing Rust Function Generation (--gen-rust-fns)
+### Testing Rust Function Generation (--gen-rust)
 
 To test macro-to-Rust function generation with production data:
 
 ```bash
-cargo run --bin libperl-macrogen -- samples/xs-wrapper.h --auto --gen-rust-fns --bindings samples/bindings.rs --apidoc samples/embed.fnc
+cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.rs
 ```
 
 This command:
 - Uses `samples/xs-wrapper.h` as input
 - Reads type information from `samples/bindings.rs`
-- Reads API documentation from `samples/embed.fnc`
+- `--auto` automatically reads API documentation from `apidoc/embed.fnc`
 - Generates Rust functions from C macros
 
 ### Testing Macro Type Inference (--infer-macro-types)
 
-**IMPORTANT**: Type inference requires both `--bindings` and `--apidoc` options to work correctly.
-
 ```bash
-cargo run --bin libperl-macrogen -- --auto --infer-macro-types samples/xs-wrapper.h --bindings samples/bindings.rs --apidoc samples/embed.fnc
+cargo run -- --auto --infer-macro-types samples/xs-wrapper.h --bindings samples/bindings.rs
 ```
 
 This command:
 - Uses `samples/xs-wrapper.h` as input
 - Reads Rust type bindings from `samples/bindings.rs` (required for function signatures)
-- Reads API documentation from `samples/embed.fnc` (required for macro/function type hints)
+- `--auto` automatically reads API documentation (required for macro/function type hints)
 - Performs type inference on all macros and outputs statistics
-
-Without `--bindings` and `--apidoc`, type inference will have limited information and produce more `<unknown>` type results.
 
 ### Manual Options (alternative)
 
@@ -186,12 +182,11 @@ When errors occur in macro-expanded code, the error location points to where the
 ### Macro Tracking CLI Options
 
 - `--emit-macro-markers`: Output MacroBegin/MacroEnd marker tokens during preprocessing (for debugging)
-- `--macro-comments`: Add definition location comments to generated Rust code (with `--gen-rust-fns`)
+- `--macro-comments`: Add definition location comments to generated Rust code (with `--gen-rust`)
 
 Example with macro comments:
 ```bash
-cargo run --bin libperl-macrogen -- samples/xs-wrapper.h --auto --gen-rust-fns \
-  --bindings samples/bindings.rs --apidoc samples/embed.fnc --macro-comments
+cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.rs --macro-comments
 ```
 
 This generates code like:
