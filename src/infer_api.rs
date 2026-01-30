@@ -13,7 +13,7 @@ use crate::error::CompileError;
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::InternedStr;
-use crate::macro_infer::{MacroInferContext, NoExpandSymbols};
+use crate::macro_infer::{ExplicitExpandSymbols, MacroInferContext, NoExpandSymbols};
 use crate::parser::Parser;
 use crate::perl_config::PerlConfigError;
 use crate::preprocessor::{MacroCallWatcher, Preprocessor};
@@ -318,8 +318,10 @@ pub fn run_inference_with_preprocessor(
     let sym_my_perl = pp.interner_mut().intern("my_perl");
     let thx_symbols = (sym_athx, sym_tthx, sym_my_perl);
 
-    // 展開を抑制するマクロシンボルを作成（assert, SvANY など）
+    // 展開を抑制するマクロシンボルを作成（assert など特殊処理用）
     let no_expand = NoExpandSymbols::new(pp.interner_mut());
+    // 明示的に展開するマクロシンボルを作成（SvANY, SvFLAGS など）
+    let explicit_expand = ExplicitExpandSymbols::new(pp.interner_mut());
 
     {
         let interner = pp.interner();
@@ -336,6 +338,7 @@ pub fn run_inference_with_preprocessor(
             &typedefs,
             thx_symbols,
             no_expand,
+            explicit_expand,
         );
     }
 

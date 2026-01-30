@@ -37,7 +37,7 @@ pub struct TokenExpander<'a> {
     /// ファイルレジストリ（将来のエラーメッセージ改善用）
     #[allow(dead_code)]
     files: &'a FileRegistry,
-    /// 展開しないマクロ名（定数マクロ等）
+    /// 展開しないマクロ名（assert 等の特殊処理用）
     no_expand: HashSet<InternedStr>,
     /// マクロ展開マーカーを出力するか
     emit_markers: bool,
@@ -52,8 +52,17 @@ pub struct TokenExpander<'a> {
     ///
     /// `expand_with_calls` 呼び出し時にクリアされ、展開プロセス中に
     /// 呼び出されたマクロ名（展開されたものと no_expand のもの両方）が記録される。
-    /// SvANY パターン検出などの型推論に使用。
     called_macros: HashSet<InternedStr>,
+    /// 関数マクロをデフォルトで保存するか（展開しない）
+    ///
+    /// `true` の場合、関数マクロは `explicit_expand` に登録されているもののみ展開される。
+    /// `false` の場合、関数マクロは `no_expand` に登録されていなければ展開される（旧動作）。
+    preserve_function_macros: bool,
+    /// 明示的に展開するマクロのセット
+    ///
+    /// `preserve_function_macros` が `true` の場合にのみ使用される。
+    /// このセットに含まれる関数マクロのみが展開される。
+    explicit_expand: HashSet<InternedStr>,
 }
 
 impl<'a> TokenExpander<'a> {
@@ -72,6 +81,8 @@ impl<'a> TokenExpander<'a> {
             bindings_consts: None,
             expanded_macros: HashSet::new(),
             called_macros: HashSet::new(),
+            preserve_function_macros: true,  // 新しいデフォルト: 関数マクロを保存
+            explicit_expand: HashSet::new(),
         }
     }
 
@@ -108,6 +119,25 @@ impl<'a> TokenExpander<'a> {
     /// マクロ展開マーカー出力を有効化
     pub fn set_emit_markers(&mut self, emit: bool) {
         self.emit_markers = emit;
+    }
+
+    /// 関数マクロ保存モードを設定
+    ///
+    /// `true` の場合、関数マクロは `explicit_expand` に登録されているもののみ展開される。
+    /// `false` の場合、関数マクロは `no_expand` に登録されていなければ展開される（旧動作）。
+    #[allow(dead_code)]
+    pub fn set_preserve_function_macros(&mut self, preserve: bool) {
+        self.preserve_function_macros = preserve;
+    }
+
+    /// 明示的に展開するマクロを追加
+    pub fn add_explicit_expand(&mut self, name: InternedStr) {
+        self.explicit_expand.insert(name);
+    }
+
+    /// 明示的に展開するマクロを複数追加
+    pub fn extend_explicit_expand(&mut self, names: impl IntoIterator<Item = InternedStr>) {
+        self.explicit_expand.extend(names);
     }
 
     /// トークン列をマクロ展開する（オブジェクトマクロのみ）
@@ -241,16 +271,37 @@ impl<'a> TokenExpander<'a> {
                         if def.is_function() {
                             // 関数マクロ: 次のトークンが '(' かチェック
                             if let Some((args, end_idx)) = self.try_collect_args(&tokens[i + 1..]) {
-                                // 展開記録（累積）
-                                self.expanded_macros.insert(*id);
-                                self.called_macros.insert(*id);
-                                in_progress.insert(*id);
-                                let expanded =
-                                    self.expand_function_macro_mut(def, token, &args, in_progress);
-                                result.extend(expanded);
-                                in_progress.remove(id);
-                                i += 1 + end_idx + 1; // id + args + closing paren
-                                continue;
+                                // 展開するかどうかの判定
+                                let should_expand = if self.preserve_function_macros {
+                                    // 新モード: explicit_expand にあるもののみ展開
+                                    self.explicit_expand.contains(id)
+                                } else {
+                                    // 旧モード: 常に展開（no_expand チェックは上で済み）
+                                    true
+                                };
+
+                                if should_expand {
+                                    // 展開記録（累積）
+                                    self.expanded_macros.insert(*id);
+                                    self.called_macros.insert(*id);
+                                    in_progress.insert(*id);
+                                    let expanded =
+                                        self.expand_function_macro_mut(def, token, &args, in_progress);
+                                    result.extend(expanded);
+                                    in_progress.remove(id);
+                                    i += 1 + end_idx + 1; // id + args + closing paren
+                                    continue;
+                                } else {
+                                    // 展開しない: 関数呼び出しとして保存
+                                    self.called_macros.insert(*id);
+                                    result.push(token.clone());
+                                    // 引数もそのまま追加
+                                    for j in 0..=end_idx {
+                                        result.push(tokens[i + 1 + j].clone());
+                                    }
+                                    i += 1 + end_idx + 1;
+                                    continue;
+                                }
                             }
                         } else {
                             // オブジェクトマクロ

@@ -37,8 +37,6 @@ pub struct NoExpandSymbols {
     pub assert: InternedStr,
     /// assert_ マクロ（Perl 独自）
     pub assert_: InternedStr,
-    /// SvANY マクロ（SV ファミリー型推論用）
-    pub sv_any: InternedStr,
 }
 
 impl NoExpandSymbols {
@@ -47,13 +45,39 @@ impl NoExpandSymbols {
         Self {
             assert: interner.intern("assert"),
             assert_: interner.intern("assert_"),
-            sv_any: interner.intern("SvANY"),
         }
     }
 
     /// 全シンボルをイテレート
     pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
-        [self.assert, self.assert_, self.sv_any].into_iter()
+        [self.assert, self.assert_].into_iter()
+    }
+}
+
+/// 明示的に展開するマクロのシンボル
+///
+/// `preserve_function_macros` モードで展開対象となるマクロ。
+/// これらは単純なフィールドアクセスなので、インライン展開した方が効率的。
+#[derive(Debug, Clone, Copy)]
+pub struct ExplicitExpandSymbols {
+    /// SvANY マクロ（sv->sv_any に展開）
+    pub sv_any: InternedStr,
+    /// SvFLAGS マクロ（sv->sv_flags に展開）
+    pub sv_flags: InternedStr,
+}
+
+impl ExplicitExpandSymbols {
+    /// 新しい ExplicitExpandSymbols を作成
+    pub fn new(interner: &mut StringInterner) -> Self {
+        Self {
+            sv_any: interner.intern("SvANY"),
+            sv_flags: interner.intern("SvFLAGS"),
+        }
+    }
+
+    /// 全シンボルをイテレート
+    pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
+        [self.sv_any, self.sv_flags].into_iter()
     }
 }
 
@@ -484,6 +508,7 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
+        explicit_expand: ExplicitExpandSymbols,
     ) -> (MacroInferInfo, bool, bool) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
@@ -505,10 +530,12 @@ impl MacroInferContext {
         if let Some(dict) = rust_decl_dict {
             expander.set_bindings_consts(&dict.consts);
         }
-        // 特定マクロを展開しないよう登録（assert, SvANY など）
+        // 特定マクロを展開しないよう登録（assert など特殊処理用）
         for sym in no_expand.iter() {
             expander.add_no_expand(sym);
         }
+        // 明示的に展開するマクロを登録（SvANY, SvFLAGS など）
+        expander.extend_explicit_expand(explicit_expand.iter());
         let expanded_tokens = expander.expand_with_calls(&def.body);
 
         // def-use 関係を収集（呼び出されたマクロの集合から、no_expand マクロを含む）
@@ -960,6 +987,7 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
+        explicit_expand: ExplicitExpandSymbols,
     ) {
         // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
         let mut thx_initial = HashSet::new();
@@ -967,7 +995,7 @@ impl MacroInferContext {
 
         for def in macro_table.iter_target_macros() {
             let (info, has_pasting, has_thx) = self.build_macro_info(
-                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, no_expand
+                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, no_expand, explicit_expand
             );
             if has_pasting {
                 pasting_initial.insert(def.name);
@@ -1774,7 +1802,6 @@ mod tests {
 
         assert_eq!(interner.get(symbols.assert), "assert");
         assert_eq!(interner.get(symbols.assert_), "assert_");
-        assert_eq!(interner.get(symbols.sv_any), "SvANY");
     }
 
     #[test]
@@ -1783,9 +1810,28 @@ mod tests {
         let symbols = NoExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 3);
+        assert_eq!(syms.len(), 2);
         assert!(syms.contains(&symbols.assert));
         assert!(syms.contains(&symbols.assert_));
+    }
+
+    #[test]
+    fn test_explicit_expand_symbols_new() {
+        let mut interner = StringInterner::new();
+        let symbols = ExplicitExpandSymbols::new(&mut interner);
+
+        assert_eq!(interner.get(symbols.sv_any), "SvANY");
+        assert_eq!(interner.get(symbols.sv_flags), "SvFLAGS");
+    }
+
+    #[test]
+    fn test_explicit_expand_symbols_iter() {
+        let mut interner = StringInterner::new();
+        let symbols = ExplicitExpandSymbols::new(&mut interner);
+
+        let syms: Vec<_> = symbols.iter().collect();
+        assert_eq!(syms.len(), 2);
         assert!(syms.contains(&symbols.sv_any));
+        assert!(syms.contains(&symbols.sv_flags));
     }
 }
