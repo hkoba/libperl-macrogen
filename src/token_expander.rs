@@ -293,12 +293,27 @@ impl<'a> TokenExpander<'a> {
                                     continue;
                                 } else {
                                     // 展開しない: 関数呼び出しとして保存
+                                    // ただし引数内の explicit_expand マクロは展開する
                                     self.called_macros.insert(*id);
                                     result.push(token.clone());
-                                    // 引数もそのまま追加
-                                    for j in 0..=end_idx {
-                                        result.push(tokens[i + 1 + j].clone());
+
+                                    // 開き括弧を追加
+                                    result.push(tokens[i + 1].clone()); // '('
+
+                                    // 各引数を再帰展開してから追加
+                                    for (arg_idx, arg_tokens) in args.iter().enumerate() {
+                                        if arg_idx > 0 {
+                                            // カンマを追加
+                                            result.push(Token::new(TokenKind::Comma, token.loc.clone()));
+                                        }
+                                        // 引数内のマクロを再帰展開
+                                        let expanded_arg = self.expand_with_calls_internal(arg_tokens, in_progress);
+                                        result.extend(expanded_arg);
                                     }
+
+                                    // 閉じ括弧を追加
+                                    result.push(tokens[i + 1 + end_idx].clone()); // ')'
+
                                     i += 1 + end_idx + 1;
                                     continue;
                                 }
@@ -919,5 +934,141 @@ mod tests {
         assert_eq!(result.len(), 1);
         // 100 に展開される
         assert!(matches!(result[0].kind, TokenKind::IntLit(100)));
+    }
+
+    fn define_function_macro(
+        interner: &mut StringInterner,
+        table: &mut MacroTable,
+        name: &str,
+        params: Vec<&str>,
+        body: Vec<Token>,
+    ) {
+        let macro_name = interner.intern(name);
+        let param_ids: Vec<InternedStr> = params.iter()
+            .map(|p| interner.intern(p))
+            .collect();
+        let has_token_pasting = body.iter()
+            .any(|t| matches!(t.kind, TokenKind::HashHash));
+        let def = MacroDef {
+            name: macro_name,
+            kind: MacroKind::Function { params: param_ids, is_variadic: false },
+            body,
+            def_loc: SourceLocation::default(),
+            leading_comments: vec![],
+            is_builtin: false,
+            is_target: true,
+            has_token_pasting,
+        };
+        table.define(def, interner);
+    }
+
+    #[test]
+    fn test_explicit_expand_in_nested_function_args() {
+        let (mut interner, mut table, files) = make_interner_and_table();
+
+        // INNER(x) を x に展開するマクロ（シンプルなパススルー）
+        let x_param = interner.intern("x");
+        let x_token = Token::new(TokenKind::Ident(x_param), SourceLocation::default());
+        define_function_macro(&mut interner, &mut table, "INNER", vec!["x"], vec![x_token]);
+
+        // OUTER(y) を INNER(y) に展開するマクロ
+        let inner_id = interner.intern("INNER");
+        let y_param = interner.intern("y");
+        let outer_body = vec![
+            Token::new(TokenKind::Ident(inner_id), SourceLocation::default()),
+            Token::new(TokenKind::LParen, SourceLocation::default()),
+            Token::new(TokenKind::Ident(y_param), SourceLocation::default()),
+            Token::new(TokenKind::RParen, SourceLocation::default()),
+        ];
+        define_function_macro(&mut interner, &mut table, "OUTER", vec!["y"], outer_body);
+
+        // OUTER(42) を呼び出すトークン列
+        let outer_id = interner.intern("OUTER");
+        let call_tokens = vec![
+            Token::new(TokenKind::Ident(outer_id), SourceLocation::default()),
+            Token::new(TokenKind::LParen, SourceLocation::default()),
+            Token::new(TokenKind::IntLit(42), SourceLocation::default()),
+            Token::new(TokenKind::RParen, SourceLocation::default()),
+        ];
+
+        // INNER を explicit_expand に登録、OUTER は登録しない
+        let inner_interned = interner.intern("INNER");
+        let mut expander = TokenExpander::new(&table, &interner, &files);
+        expander.set_preserve_function_macros(true);
+        expander.add_explicit_expand(inner_interned);
+
+        let result = expander.expand_with_calls(&call_tokens);
+
+        // OUTER(42) は展開されないが、引数内の処理後:
+        // OUTER( の後に 42 が来る（INNER は展開されて 42 がそのまま残る）
+        // 期待: OUTER ( 42 )
+        // ただし OUTER の本体は展開されず、引数の 42 がそのまま
+
+        // 確認: OUTER は識別子のまま
+        assert!(matches!(result[0].kind, TokenKind::Ident(id) if interner.get(id) == "OUTER"));
+        // '(' が続く
+        assert!(matches!(result[1].kind, TokenKind::LParen));
+        // 引数として 42
+        assert!(matches!(result[2].kind, TokenKind::IntLit(42)));
+        // ')' で閉じる
+        assert!(matches!(result[3].kind, TokenKind::RParen));
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_explicit_expand_deeply_nested() {
+        // WRAPPER(INNER(x)) のような入れ子で INNER が展開されることを確認
+        let (mut interner, mut table, files) = make_interner_and_table();
+
+        // INNER(x) を (*x) に展開するマクロ（ポインタデリファレンス風）
+        let x_param = interner.intern("x");
+        let inner_body = vec![
+            Token::new(TokenKind::LParen, SourceLocation::default()),
+            Token::new(TokenKind::Star, SourceLocation::default()),
+            Token::new(TokenKind::Ident(x_param), SourceLocation::default()),
+            Token::new(TokenKind::RParen, SourceLocation::default()),
+        ];
+        define_function_macro(&mut interner, &mut table, "INNER", vec!["x"], inner_body);
+
+        // WRAPPER(y) を y に展開するマクロ（単純なパススルー）
+        let y_param = interner.intern("y");
+        let wrapper_body = vec![
+            Token::new(TokenKind::Ident(y_param), SourceLocation::default()),
+        ];
+        define_function_macro(&mut interner, &mut table, "WRAPPER", vec!["y"], wrapper_body);
+
+        // WRAPPER(INNER(sv)) を呼び出すトークン列
+        let wrapper_id = interner.intern("WRAPPER");
+        let inner_id = interner.intern("INNER");
+        let sv_id = interner.intern("sv");
+        let call_tokens = vec![
+            Token::new(TokenKind::Ident(wrapper_id), SourceLocation::default()),
+            Token::new(TokenKind::LParen, SourceLocation::default()),
+            Token::new(TokenKind::Ident(inner_id), SourceLocation::default()),
+            Token::new(TokenKind::LParen, SourceLocation::default()),
+            Token::new(TokenKind::Ident(sv_id), SourceLocation::default()),
+            Token::new(TokenKind::RParen, SourceLocation::default()),
+            Token::new(TokenKind::RParen, SourceLocation::default()),
+        ];
+
+        // INNER を explicit_expand に登録、WRAPPER は登録しない
+        let inner_interned = interner.intern("INNER");
+        let mut expander = TokenExpander::new(&table, &interner, &files);
+        expander.set_preserve_function_macros(true);
+        expander.add_explicit_expand(inner_interned);
+
+        let result = expander.expand_with_calls(&call_tokens);
+
+        // 期待: WRAPPER ( ( * sv ) )
+        // - WRAPPER は展開されない
+        // - INNER(sv) は (*sv) に展開される
+        assert!(matches!(result[0].kind, TokenKind::Ident(id) if interner.get(id) == "WRAPPER"));
+        assert!(matches!(result[1].kind, TokenKind::LParen));  // WRAPPER の (
+        assert!(matches!(result[2].kind, TokenKind::LParen));  // INNER 展開後の (
+        assert!(matches!(result[3].kind, TokenKind::Star));    // *
+        assert!(matches!(result[4].kind, TokenKind::Ident(id) if interner.get(id) == "sv"));
+        assert!(matches!(result[5].kind, TokenKind::RParen));  // INNER 展開後の )
+        assert!(matches!(result[6].kind, TokenKind::RParen));  // WRAPPER の )
+        assert_eq!(result.len(), 7);
     }
 }
