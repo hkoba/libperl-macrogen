@@ -7,7 +7,8 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::apidoc::{ApidocCollector, ApidocDict, ApidocResolveError};
-use crate::ast::{ExternalDecl, TypeSpec};
+use crate::ast::{DerivedDecl, ExternalDecl, TypeSpec};
+use crate::c_fn_decl::{CFnDecl, CFnDeclDict, CParam};
 use crate::enum_dict::EnumDict;
 use crate::error::CompileError;
 use crate::fields_dict::FieldsDict;
@@ -162,6 +163,10 @@ pub struct InferStats {
     pub apidoc_from_comments: usize,
     /// THX 依存マクロ数
     pub thx_dependent_count: usize,
+    /// 収集された C 関数宣言数
+    pub c_fn_decl_count: usize,
+    /// THX 依存の C 関数数
+    pub c_fn_thx_count: usize,
 }
 
 /// 型推論の結果
@@ -178,6 +183,8 @@ pub struct InferResult {
     pub apidoc: ApidocDict,
     /// Rust 宣言辞書
     pub rust_decl_dict: Option<RustDeclDict>,
+    /// C 関数宣言辞書
+    pub c_fn_decl_dict: CFnDeclDict,
     /// typedef 辞書
     pub typedefs: TypedefDict,
     /// プリプロセッサ（マクロテーブル、StringInterner、FileRegistry へのアクセス用）
@@ -230,6 +237,15 @@ pub fn run_inference_with_preprocessor(
     let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
     pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
 
+    // pTHX_ と pTHX マクロ呼び出しを監視（関数宣言の THX 依存検出用）
+    let pthx_id = pp.interner_mut().intern("pTHX_");
+    let pthx_no_comma_id = pp.interner_mut().intern("pTHX");
+    pp.set_macro_called_callback(pthx_id, Box::new(MacroCallWatcher::new()));
+    pp.set_macro_called_callback(pthx_no_comma_id, Box::new(MacroCallWatcher::new()));
+
+    // C 関数宣言辞書を作成
+    let mut c_fn_decl_dict = CFnDeclDict::new();
+
     // パーサー作成
     let mut parser = Parser::new(&mut pp)?;
 
@@ -238,7 +254,8 @@ pub fn run_inference_with_preprocessor(
 
     // parse_each_with_pp でフィールド辞書と inline 関数を収集
     // 同時に _SV_HEAD マクロ呼び出しを検出して SV ファミリーを動的に構築
-    parser.parse_each_with_pp(|decl, _loc, _path, pp| {
+    // また、関数宣言を収集して THX 依存性を検出
+    parser.parse_each_with_pp(|decl, loc, path, pp| {
         let interner = pp.interner();
         fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
@@ -250,6 +267,26 @@ pub fn run_inference_with_preprocessor(
             if let ExternalDecl::FunctionDef(func_def) = decl {
                 inline_fn_dict.collect_from_function_def(func_def, interner);
             }
+        }
+
+        // 関数宣言を収集（THX 依存性検出用）
+        if let ExternalDecl::Declaration(declaration) = decl {
+            // pTHX_ または pTHX が呼ばれたかチェック
+            let is_thx = check_macro_called(pp, pthx_id) || check_macro_called(pp, pthx_no_comma_id);
+
+            // 関数宣言を収集
+            collect_function_declarations(
+                declaration,
+                &mut c_fn_decl_dict,
+                is_thx,
+                loc,
+                path,
+                interner,
+            );
+
+            // フラグをリセット（次の宣言のために）
+            reset_macro_called(pp, pthx_id);
+            reset_macro_called(pp, pthx_no_comma_id);
         }
 
         // 構造体定義の場合、_SV_HEAD フラグをチェック
@@ -335,6 +372,7 @@ pub fn run_inference_with_preprocessor(
             Some(&fields_dict),
             rust_decl_dict.as_ref(),
             Some(&inline_fn_dict),
+            Some(&c_fn_decl_dict),
             &typedefs,
             thx_symbols,
             no_expand,
@@ -347,9 +385,15 @@ pub fn run_inference_with_preprocessor(
         .filter(|info| info.is_target && info.is_thx_dependent)
         .count();
 
+    // C 関数宣言の統計
+    let c_fn_decl_count = c_fn_decl_dict.len();
+    let c_fn_thx_count = c_fn_decl_dict.thx_count();
+
     let stats = InferStats {
         apidoc_from_comments,
         thx_dependent_count,
+        c_fn_decl_count,
+        c_fn_thx_count,
     };
 
     Ok(Some(InferResult {
@@ -359,6 +403,7 @@ pub fn run_inference_with_preprocessor(
         inline_fn_dict,
         apidoc,
         rust_decl_dict,
+        c_fn_decl_dict,
         typedefs,
         preprocessor: pp,
         stats,
@@ -392,5 +437,129 @@ fn extract_struct_names(decl: &ExternalDecl) -> Option<Vec<InternedStr>> {
         None
     } else {
         Some(names)
+    }
+}
+
+/// MacroCallWatcher の呼び出しフラグをチェック
+fn check_macro_called(pp: &Preprocessor, macro_id: InternedStr) -> bool {
+    pp.get_macro_called_callback(macro_id)
+        .and_then(|cb| cb.as_any().downcast_ref::<MacroCallWatcher>())
+        .is_some_and(|w| w.was_called())
+}
+
+/// MacroCallWatcher のフラグをリセット
+fn reset_macro_called(pp: &Preprocessor, macro_id: InternedStr) {
+    // take_called() は Cell を使っているので &self で動作する
+    if let Some(cb) = pp.get_macro_called_callback(macro_id) {
+        if let Some(w) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+            w.take_called(); // フラグを消費してリセット
+        }
+    }
+}
+
+/// 宣言から関数宣言を収集
+fn collect_function_declarations(
+    declaration: &crate::ast::Declaration,
+    dict: &mut CFnDeclDict,
+    is_thx: bool,
+    loc: &crate::source::SourceLocation,
+    path: &std::path::Path,
+    interner: &crate::intern::StringInterner,
+) {
+    // 各宣言子を処理
+    for init_decl in &declaration.declarators {
+        let declarator = &init_decl.declarator;
+
+        // 関数宣言かどうかをチェック（DerivedDecl::Function があるか）
+        let param_list = declarator.derived.iter().find_map(|d| {
+            if let DerivedDecl::Function(params) = d {
+                Some(params)
+            } else {
+                None
+            }
+        });
+
+        if let Some(param_list) = param_list {
+            if let Some(name) = declarator.name {
+                // パラメータを抽出
+                let params: Vec<CParam> = param_list.params.iter().map(|param| {
+                    let param_name = param.declarator.as_ref().and_then(|d| d.name);
+                    let ty = type_specs_to_string(&param.specs, interner);
+                    CParam { name: param_name, ty }
+                }).collect();
+
+                // 戻り値の型を抽出
+                let ret_ty = type_specs_to_string(&declaration.specs, interner);
+
+                let c_fn_decl = CFnDecl {
+                    name,
+                    params,
+                    ret_ty,
+                    is_thx,
+                    is_target: declaration.is_target,
+                    location: Some(format!("{}:{}", path.display(), loc.line)),
+                };
+                dict.insert(c_fn_decl);
+            }
+        }
+    }
+}
+
+/// DeclSpecs から型の文字列表現を生成（シンプルな実装）
+fn type_specs_to_string(specs: &crate::ast::DeclSpecs, interner: &crate::intern::StringInterner) -> String {
+    use crate::ast::TypeSpec;
+
+    let mut parts = Vec::new();
+
+    for type_spec in &specs.type_specs {
+        match type_spec {
+            TypeSpec::Void => parts.push("void".to_string()),
+            TypeSpec::Char => parts.push("char".to_string()),
+            TypeSpec::Short => parts.push("short".to_string()),
+            TypeSpec::Int => parts.push("int".to_string()),
+            TypeSpec::Long => parts.push("long".to_string()),
+            TypeSpec::Float => parts.push("float".to_string()),
+            TypeSpec::Double => parts.push("double".to_string()),
+            TypeSpec::Signed => parts.push("signed".to_string()),
+            TypeSpec::Unsigned => parts.push("unsigned".to_string()),
+            TypeSpec::Bool => parts.push("bool".to_string()),
+            TypeSpec::Complex => parts.push("_Complex".to_string()),
+            TypeSpec::TypedefName(name) => parts.push(interner.get(*name).to_string()),
+            TypeSpec::Struct(spec) => {
+                if let Some(name) = spec.name {
+                    parts.push(format!("struct {}", interner.get(name)));
+                } else {
+                    parts.push("struct".to_string());
+                }
+            }
+            TypeSpec::Union(spec) => {
+                if let Some(name) = spec.name {
+                    parts.push(format!("union {}", interner.get(name)));
+                } else {
+                    parts.push("union".to_string());
+                }
+            }
+            TypeSpec::Enum(spec) => {
+                if let Some(name) = spec.name {
+                    parts.push(format!("enum {}", interner.get(name)));
+                } else {
+                    parts.push("enum".to_string());
+                }
+            }
+            TypeSpec::TypeofExpr(_) => parts.push("typeof(...)".to_string()),
+            TypeSpec::Int128 => parts.push("__int128".to_string()),
+            TypeSpec::Float16 => parts.push("_Float16".to_string()),
+            TypeSpec::Float32 => parts.push("_Float32".to_string()),
+            TypeSpec::Float64 => parts.push("_Float64".to_string()),
+            TypeSpec::Float128 => parts.push("_Float128".to_string()),
+            TypeSpec::Float32x => parts.push("_Float32x".to_string()),
+            TypeSpec::Float64x => parts.push("_Float64x".to_string()),
+        }
+    }
+
+    if parts.is_empty() {
+        "int".to_string() // デフォルトは int
+    } else {
+        parts.join(" ")
     }
 }

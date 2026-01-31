@@ -6,6 +6,7 @@
 pub mod apidoc;
 pub mod apidoc_data;
 pub mod ast;
+pub mod c_fn_decl;
 pub mod error;
 pub mod enum_dict;
 pub mod fields_dict;

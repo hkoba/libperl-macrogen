@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
 use crate::ast::{AssertKind, BlockItem, Expr, ExprKind};
+use crate::c_fn_decl::CFnDeclDict;
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::{InternedStr, StringInterner};
@@ -1012,6 +1013,7 @@ impl MacroInferContext {
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
         inline_fn_dict: Option<&'a InlineFnDict>,
+        c_fn_decl_dict: Option<&'a CFnDeclDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
@@ -1032,6 +1034,19 @@ impl MacroInferContext {
                 thx_initial.insert(def.name);
             }
             self.register(info);
+        }
+
+        // Step 1.5: called_functions を CFnDeclDict と照合して THX 依存を追加検出
+        if let Some(c_fn_dict) = c_fn_decl_dict {
+            for (name, info) in &self.macros {
+                // 呼び出す関数が THX 依存かチェック
+                let has_thx_from_fn_calls = info.called_functions.iter().any(|fn_name| {
+                    c_fn_dict.is_thx_dependent(*fn_name)
+                });
+                if has_thx_from_fn_calls && !thx_initial.contains(name) {
+                    thx_initial.insert(*name);
+                }
+            }
         }
 
         // Step 2: used_by を構築
