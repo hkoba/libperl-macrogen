@@ -75,6 +75,8 @@ pub struct ExplicitExpandSymbols {
     pub cbool: InternedStr,
     /// __ASSERT_ マクロ（DEBUGGING 時のアサーション）
     pub assert_underscore_: InternedStr,
+    /// STR_WITH_LEN マクロ（文字列リテラルと長さのペア）
+    pub str_with_len: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -88,6 +90,7 @@ impl ExplicitExpandSymbols {
             unlikely: interner.intern("UNLIKELY"),
             cbool: interner.intern("cBOOL"),
             assert_underscore_: interner.intern("__ASSERT_"),
+            str_with_len: interner.intern("STR_WITH_LEN"),
         }
     }
 
@@ -101,6 +104,7 @@ impl ExplicitExpandSymbols {
             self.unlikely,
             self.cbool,
             self.assert_underscore_,
+            self.str_with_len,
         ].into_iter()
     }
 }
@@ -1851,6 +1855,7 @@ mod tests {
         assert_eq!(interner.get(symbols.unlikely), "UNLIKELY");
         assert_eq!(interner.get(symbols.cbool), "cBOOL");
         assert_eq!(interner.get(symbols.assert_underscore_), "__ASSERT_");
+        assert_eq!(interner.get(symbols.str_with_len), "STR_WITH_LEN");
     }
 
     #[test]
@@ -1859,7 +1864,7 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 7);
+        assert_eq!(syms.len(), 8);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.expect));
@@ -1867,5 +1872,6 @@ mod tests {
         assert!(syms.contains(&symbols.unlikely));
         assert!(syms.contains(&symbols.cbool));
         assert!(syms.contains(&symbols.assert_underscore_));
+        assert!(syms.contains(&symbols.str_with_len));
     }
 }
