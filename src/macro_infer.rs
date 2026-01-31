@@ -73,6 +73,8 @@ pub struct ExplicitExpandSymbols {
     pub unlikely: InternedStr,
     /// cBOOL マクロ（条件を bool に変換）
     pub cbool: InternedStr,
+    /// __ASSERT_ マクロ（DEBUGGING 時のアサーション）
+    pub assert_underscore_: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -85,6 +87,7 @@ impl ExplicitExpandSymbols {
             likely: interner.intern("LIKELY"),
             unlikely: interner.intern("UNLIKELY"),
             cbool: interner.intern("cBOOL"),
+            assert_underscore_: interner.intern("__ASSERT_"),
         }
     }
 
@@ -97,6 +100,7 @@ impl ExplicitExpandSymbols {
             self.likely,
             self.unlikely,
             self.cbool,
+            self.assert_underscore_,
         ].into_iter()
     }
 }
@@ -1846,6 +1850,7 @@ mod tests {
         assert_eq!(interner.get(symbols.likely), "LIKELY");
         assert_eq!(interner.get(symbols.unlikely), "UNLIKELY");
         assert_eq!(interner.get(symbols.cbool), "cBOOL");
+        assert_eq!(interner.get(symbols.assert_underscore_), "__ASSERT_");
     }
 
     #[test]
@@ -1854,12 +1859,13 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 6);
+        assert_eq!(syms.len(), 7);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.expect));
         assert!(syms.contains(&symbols.likely));
         assert!(syms.contains(&symbols.unlikely));
         assert!(syms.contains(&symbols.cbool));
+        assert!(syms.contains(&symbols.assert_underscore_));
     }
 }
