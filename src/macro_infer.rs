@@ -57,13 +57,22 @@ impl NoExpandSymbols {
 /// 明示的に展開するマクロのシンボル
 ///
 /// `preserve_function_macros` モードで展開対象となるマクロ。
-/// これらは単純なフィールドアクセスなので、インライン展開した方が効率的。
+/// これらは単純なフィールドアクセスや `__builtin_expect` ラッパーなので、
+/// インライン展開した方が効率的。
 #[derive(Debug, Clone, Copy)]
 pub struct ExplicitExpandSymbols {
     /// SvANY マクロ（sv->sv_any に展開）
     pub sv_any: InternedStr,
     /// SvFLAGS マクロ（sv->sv_flags に展開）
     pub sv_flags: InternedStr,
+    /// EXPECT マクロ（__builtin_expect のラッパー）
+    pub expect: InternedStr,
+    /// LIKELY マクロ（__builtin_expect(cond, 1) のラッパー）
+    pub likely: InternedStr,
+    /// UNLIKELY マクロ（__builtin_expect(cond, 0) のラッパー）
+    pub unlikely: InternedStr,
+    /// cBOOL マクロ（条件を bool に変換）
+    pub cbool: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -72,12 +81,23 @@ impl ExplicitExpandSymbols {
         Self {
             sv_any: interner.intern("SvANY"),
             sv_flags: interner.intern("SvFLAGS"),
+            expect: interner.intern("EXPECT"),
+            likely: interner.intern("LIKELY"),
+            unlikely: interner.intern("UNLIKELY"),
+            cbool: interner.intern("cBOOL"),
         }
     }
 
     /// 全シンボルをイテレート
     pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
-        [self.sv_any, self.sv_flags].into_iter()
+        [
+            self.sv_any,
+            self.sv_flags,
+            self.expect,
+            self.likely,
+            self.unlikely,
+            self.cbool,
+        ].into_iter()
     }
 }
 
@@ -1822,6 +1842,10 @@ mod tests {
 
         assert_eq!(interner.get(symbols.sv_any), "SvANY");
         assert_eq!(interner.get(symbols.sv_flags), "SvFLAGS");
+        assert_eq!(interner.get(symbols.expect), "EXPECT");
+        assert_eq!(interner.get(symbols.likely), "LIKELY");
+        assert_eq!(interner.get(symbols.unlikely), "UNLIKELY");
+        assert_eq!(interner.get(symbols.cbool), "cBOOL");
     }
 
     #[test]
@@ -1830,8 +1854,12 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 2);
+        assert_eq!(syms.len(), 6);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
+        assert!(syms.contains(&symbols.expect));
+        assert!(syms.contains(&symbols.likely));
+        assert!(syms.contains(&symbols.unlikely));
+        assert!(syms.contains(&symbols.cbool));
     }
 }
