@@ -459,6 +459,8 @@ pub struct Preprocessor {
     comment_callback: Option<Box<dyn CommentCallback>>,
     /// グローバルな展開抑制マクロ名（bindings.rs の定数など）
     skip_expand_macros: HashSet<InternedStr>,
+    /// 明示的に展開する関数マクロ名（preserve_function_macros モードで使用）
+    explicit_expand_macros: HashSet<InternedStr>,
 }
 
 impl Preprocessor {
@@ -482,6 +484,7 @@ impl Preprocessor {
             wrapped_macros: HashSet::new(),
             comment_callback: None,
             skip_expand_macros: HashSet::new(),
+            explicit_expand_macros: HashSet::new(),
         };
 
         // 事前定義マクロを登録
@@ -566,6 +569,16 @@ impl Preprocessor {
     /// 複数の展開抑制マクロを追加
     pub fn add_skip_expand_macros(&mut self, names: impl IntoIterator<Item = InternedStr>) {
         self.skip_expand_macros.extend(names);
+    }
+
+    /// 明示展開マクロを追加（preserve_function_macros モードで展開対象となる）
+    pub fn add_explicit_expand_macro(&mut self, name: InternedStr) {
+        self.explicit_expand_macros.insert(name);
+    }
+
+    /// 複数の明示展開マクロを追加
+    pub fn add_explicit_expand_macros(&mut self, names: impl IntoIterator<Item = InternedStr>) {
+        self.explicit_expand_macros.extend(names);
     }
 
     /// 事前定義マクロを登録
@@ -2489,6 +2502,24 @@ impl Preprocessor {
 
     /// マクロ展開を試みる
     fn try_expand_macro(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
+        self.try_expand_macro_internal(id, token, false)
+    }
+
+    /// マクロ展開を試みる（関数マクロ保存モード）
+    ///
+    /// `preserve_function_macros` が true の場合、`explicit_expand_macros` に
+    /// 登録されていない関数マクロは展開されず、関数呼び出しとして保存される。
+    fn try_expand_macro_preserve_fn(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
+        self.try_expand_macro_internal(id, token, true)
+    }
+
+    /// マクロ展開を試みる（内部実装）
+    fn try_expand_macro_internal(
+        &mut self,
+        id: InternedStr,
+        token: &Token,
+        preserve_function_macros: bool,
+    ) -> Result<Option<Vec<Token>>, CompileError> {
         // グローバルな展開抑制リストをチェック（bindings.rs の定数など）
         if self.skip_expand_macros.contains(&id) {
             return Ok(None);
@@ -2533,6 +2564,11 @@ impl Preprocessor {
                 Ok(Some(wrapped))
             }
             MacroKind::Function { params, is_variadic } => {
+                // preserve_function_macros モード: explicit_expand に含まれない関数マクロは保存
+                if preserve_function_macros && !self.explicit_expand_macros.contains(&id) {
+                    return Ok(None);
+                }
+
                 // C標準: 関数形式マクロの識別子と ( の間に空白（改行を含む）があっても良い
                 // 改行をスキップして ( を探す
                 let mut skipped_newlines = Vec::new();
@@ -2621,7 +2657,8 @@ impl Preprocessor {
                 let kind = if self.wrapped_macros.contains(&id) {
                     let expanded_args: Result<Vec<_>, _> = args.into_iter()
                         .map(|arg_tokens| {
-                            let expanded = self.expand_token_list(&arg_tokens)?;
+                            // 関数マクロ保存モードで展開（SvTYPE 等を保存、オブジェクトマクロは展開）
+                            let expanded = self.expand_token_list_preserve_fn(&arg_tokens)?;
                             // 展開結果からマーカーを除去（入れ子 assert エラー防止）
                             Ok(expanded.into_iter()
                                 .filter(|t| !matches!(t.kind, TokenKind::MacroBegin(_) | TokenKind::MacroEnd(_)))
@@ -2777,6 +2814,23 @@ impl Preprocessor {
     /// トークンリストを展開（引数prescan用）
     /// マクロ展開を行うが、ソースからは読まない
     fn expand_token_list(&mut self, tokens: &[Token]) -> Result<Vec<Token>, CompileError> {
+        self.expand_token_list_internal(tokens, false)
+    }
+
+    /// トークンリストを展開（関数マクロ保存モード）
+    ///
+    /// `explicit_expand_macros` に登録されていない関数マクロは展開されず、
+    /// 関数呼び出しとして保存される。オブジェクトマクロは通常通り展開される。
+    fn expand_token_list_preserve_fn(&mut self, tokens: &[Token]) -> Result<Vec<Token>, CompileError> {
+        self.expand_token_list_internal(tokens, true)
+    }
+
+    /// トークンリストを展開（内部実装）
+    fn expand_token_list_internal(
+        &mut self,
+        tokens: &[Token],
+        preserve_function_macros: bool,
+    ) -> Result<Vec<Token>, CompileError> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -2806,7 +2860,7 @@ impl Preprocessor {
 
             // マクロ展開を試みる
             if let TokenKind::Ident(id) = token.kind {
-                if let Some(expanded) = self.try_expand_macro(id, &token)? {
+                if let Some(expanded) = self.try_expand_macro_internal(id, &token, preserve_function_macros)? {
                     // 展開結果を逆順でlookaheadに戻す
                     for t in expanded.into_iter().rev() {
                         self.lookahead.push(t);

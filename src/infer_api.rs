@@ -224,6 +224,13 @@ pub fn run_inference_with_preprocessor(
         }
     }
 
+    // 明示展開マクロを Preprocessor に登録（wrapped_macros の引数展開用）
+    // SvANY, SvFLAGS など、preserve_function_macros モードでも展開するマクロ
+    {
+        let explicit_expand = ExplicitExpandSymbols::new(pp.interner_mut());
+        pp.add_explicit_expand_macros(explicit_expand.iter());
+    }
+
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
 

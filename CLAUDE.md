@@ -198,6 +198,40 @@ pub unsafe fn SvFLAGS(sv: *mut SV) -> U32 {
 }
 ```
 
+## Code Generation Goals
+
+### Consistency Principle
+
+**C インライン関数と C マクロ関数の両方に対して、コード生成が一貫した挙動をすること。**
+関数呼び出しの引数に対しても、同じ一貫した挙動をすること。
+
+### Macro Handling Rules
+
+生成コードにおけるマクロの処理ルール:
+
+| マクロ種別 | 条件 | 処理 |
+|-----------|------|------|
+| オブジェクトマクロ（定数） | Rust 側に対応する定数定義あり | Rust の定数として出力 |
+| オブジェクトマクロ（定数） | Rust 側に対応なし | 展開 |
+| 関数マクロ | 特殊辞書に**未登録** | 関数呼び出しの形を維持 |
+| 関数マクロ | `ExplicitExpandSymbols` に登録 | 展開（`SvANY`, `SvFLAGS` など） |
+| assert 系 | `NoExpandSymbols` / `wrapped_macros` | `DEBUGGING` の状態を無視し、引数を処理して `assert!` として生成 |
+
+### Key Implication
+
+- **デフォルト動作は「関数マクロを保存」**
+- 展開は明示的に指定されたマクロのみ
+- この規則は **Preprocessor**（inline 関数用）と **TokenExpander**（マクロ用）の両方に適用されるべき
+
+### Current Implementation Gap
+
+| 処理エンジン | 対象 | 関数マクロのデフォルト |
+|-------------|------|----------------------|
+| `TokenExpander` | マクロ | 保存 ✓ |
+| `Preprocessor` | Inline 関数 | **展開** ✗ ← 要修正 |
+
+`Preprocessor` の `wrapped_macros` 引数展開を `TokenExpander` と同等の動作にする必要がある。
+
 ## Current Status
 
 - **xs-wrapper.h parsing**: Successfully parses declarations
