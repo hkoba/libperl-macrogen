@@ -10,39 +10,6 @@ use crate::ast::ExprId;
 use crate::intern::InternedStr;
 use crate::type_repr::TypeRepr;
 
-/// 型制約の出所を区別するための列挙型
-///
-/// 注意: unified_type::TypeSource とは異なる（こちらは制約の出所分類用）
-///
-/// 非推奨: TypeRepr に統合されました。段階的移行のために残されています。
-#[deprecated(note = "Use TypeRepr variants instead which include source information")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConstraintSource {
-    /// C ヘッダーのパース結果から取得
-    CHeader,
-    /// bindings.rs（Rust バインディング）から取得
-    RustBindings,
-    /// apidoc（embed.fnc 等）から取得
-    Apidoc,
-    /// inline 関数の AST から取得
-    InlineFn,
-    /// 推論で導出
-    Inferred,
-}
-
-#[allow(deprecated)]
-impl std::fmt::Display for ConstraintSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CHeader => write!(f, "c-header"),
-            Self::RustBindings => write!(f, "rust-bindings"),
-            Self::Apidoc => write!(f, "apidoc"),
-            Self::InlineFn => write!(f, "inline-fn"),
-            Self::Inferred => write!(f, "inferred"),
-        }
-    }
-}
-
 /// 型制約
 ///
 /// 簡約せずにそのまま保持し、デバッグ・観察可能にする。
@@ -63,34 +30,6 @@ impl TypeConstraint {
         Self {
             expr_id,
             ty,
-            context: context.into(),
-        }
-    }
-
-    /// 後方互換: 旧シグネチャで型制約を作成
-    ///
-    /// 段階的移行用。新規コードでは `new()` を使用すること。
-    #[deprecated(note = "Use new() with TypeRepr instead")]
-    #[allow(deprecated)]
-    pub fn from_legacy(
-        expr_id: ExprId,
-        ty: impl Into<String>,
-        source: ConstraintSource,
-        context: impl Into<String>,
-    ) -> Self {
-        let ty_str = ty.into();
-        let source_str = match source {
-            ConstraintSource::CHeader => "c-header",
-            ConstraintSource::RustBindings => "rust-bindings",
-            ConstraintSource::Apidoc => "apidoc",
-            ConstraintSource::InlineFn => "inline-fn",
-            ConstraintSource::Inferred => "inferred",
-        };
-        #[allow(deprecated)]
-        let type_repr = TypeRepr::from_legacy_string(&ty_str, source_str);
-        Self {
-            expr_id,
-            ty: type_repr,
             context: context.into(),
         }
     }
@@ -395,15 +334,6 @@ mod tests {
         assert_eq!(env1.expr_constraint_count(), 2);
         assert!(env1.get_expr_constraints(expr1).is_some());
         assert!(env1.get_expr_constraints(expr2).is_some());
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_constraint_source_display() {
-        assert_eq!(format!("{}", ConstraintSource::CHeader), "c-header");
-        assert_eq!(format!("{}", ConstraintSource::RustBindings), "rust-bindings");
-        assert_eq!(format!("{}", ConstraintSource::Apidoc), "apidoc");
-        assert_eq!(format!("{}", ConstraintSource::Inferred), "inferred");
     }
 
     #[test]

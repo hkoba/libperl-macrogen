@@ -2505,14 +2505,6 @@ impl Preprocessor {
         self.try_expand_macro_internal(id, token, false)
     }
 
-    /// マクロ展開を試みる（関数マクロ保存モード）
-    ///
-    /// `preserve_function_macros` が true の場合、`explicit_expand_macros` に
-    /// 登録されていない関数マクロは展開されず、関数呼び出しとして保存される。
-    fn try_expand_macro_preserve_fn(&mut self, id: InternedStr, token: &Token) -> Result<Option<Vec<Token>>, CompileError> {
-        self.try_expand_macro_internal(id, token, true)
-    }
-
     /// マクロ展開を試みる（内部実装）
     fn try_expand_macro_internal(
         &mut self,
