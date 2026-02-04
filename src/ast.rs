@@ -592,6 +592,22 @@ pub enum ExprKind {
         kind: AssertKind,
         condition: Box<Expr>,
     },
+
+    /// マクロ呼び出し（元の呼び出し情報と展開結果を両方保持）
+    ///
+    /// 全てのマクロを常に展開しながら、元のマクロ呼び出し情報を AST に保持する。
+    /// - `expanded`: 型推論・意味解析用の展開結果
+    /// - `name` と `args`: コード生成時にマクロ呼び出しを再構築
+    MacroCall {
+        /// マクロ名
+        name: InternedStr,
+        /// 元の引数（パース済み式）
+        args: Vec<Expr>,
+        /// 展開後の式（型推論・意味解析用）
+        expanded: Box<Expr>,
+        /// マクロ呼び出し位置
+        call_loc: SourceLocation,
+    },
 }
 
 /// 式ノード

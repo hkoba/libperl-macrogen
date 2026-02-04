@@ -1429,6 +1429,13 @@ pub fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
                 }
             }
         }
+        // マクロ呼び出し（引数と展開結果の両方を処理）
+        ExprKind::MacroCall { args, expanded, .. } => {
+            for arg in args.iter_mut() {
+                convert_assert_calls(arg, interner);
+            }
+            convert_assert_calls(expanded, interner);
+        }
         // リテラルや識別子など、再帰不要
         ExprKind::Ident(_)
         | ExprKind::IntLit(_)

@@ -1583,6 +1583,26 @@ impl<'a> SemanticAnalyzer<'a> {
                     "assertion",
                 ));
             }
+
+            // マクロ呼び出し（展開結果の型を使用）
+            ExprKind::MacroCall { args, expanded, .. } => {
+                // 引数の型制約を収集
+                for arg in args {
+                    self.collect_expr_constraints(arg, type_env);
+                }
+                // 展開結果の型制約を収集
+                self.collect_expr_constraints(expanded, type_env);
+                // MacroCall 式全体の型は expanded と同じ
+                if let Some(constraints) = type_env.get_expr_constraints(expanded.id) {
+                    if let Some(constraint) = constraints.first() {
+                        type_env.add_constraint(TypeEnvConstraint::new(
+                            expr.id,
+                            constraint.ty.clone(),
+                            "macro call (expanded)",
+                        ));
+                    }
+                }
+            }
         }
     }
 

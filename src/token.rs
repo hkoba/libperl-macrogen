@@ -72,6 +72,16 @@ pub struct MacroBeginInfo {
     pub call_loc: SourceLocation,
     /// wrap 対象マクロの場合 true（assert 等の特殊処理用）
     pub is_wrapped: bool,
+    /// コード生成でマクロ呼び出しを保持するか
+    ///
+    /// true の場合、パーサーは MacroCall AST ノードを生成し、
+    /// コード生成時にマクロ呼び出し形式で出力可能にする。
+    /// false の場合、展開形式のみが使用される。
+    ///
+    /// 以下の場合に false になる：
+    /// - トークンペースト（##）を含むマクロ
+    /// - explicit_expand_macros に登録されたマクロ（SvANY, SvFLAGS 等）
+    pub preserve_call: bool,
 }
 
 /// マクロ展開終了マーカーの情報

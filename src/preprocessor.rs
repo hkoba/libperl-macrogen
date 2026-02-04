@@ -2552,6 +2552,7 @@ impl Preprocessor {
                     token,
                     MacroInvocationKind::Object,
                     &call_loc,
+                    def.has_token_pasting,
                 );
                 Ok(Some(wrapped))
             }
@@ -2667,6 +2668,7 @@ impl Preprocessor {
                     token,
                     kind,
                     &call_loc,
+                    def.has_token_pasting,
                 );
                 Ok(Some(wrapped))
             }
@@ -2701,6 +2703,8 @@ impl Preprocessor {
     /// マーカーはパーサーがマクロ展開情報をASTに付与するために使用される。
     /// wrapped_macros に含まれるマクロは is_wrapped フラグが true になり、
     /// パーサーで特殊処理（assert の復元など）が可能になる。
+    ///
+    /// `has_token_pasting`: マクロ本体にトークン連結 (##) を含むか
     fn wrap_with_markers(
         &self,
         tokens: Vec<Token>,
@@ -2708,6 +2712,7 @@ impl Preprocessor {
         trigger_token: &Token,
         kind: MacroInvocationKind,
         call_loc: &SourceLocation,
+        has_token_pasting: bool,
     ) -> Vec<Token> {
         let is_wrapped = self.wrapped_macros.contains(&macro_name);
 
@@ -2718,6 +2723,16 @@ impl Preprocessor {
 
         let marker_id = TokenId::next();
 
+        // preserve_call を決定:
+        // - オブジェクトマクロ → false（引数がないので保存不要）
+        // - トークンペースト(##)を含むマクロ → false
+        // - explicit_expand_macros に登録されたマクロ → false
+        // - その他の関数マクロ → true
+        let is_function_macro = matches!(kind, MacroInvocationKind::Function { .. });
+        let preserve_call = is_function_macro
+            && !has_token_pasting
+            && !self.explicit_expand_macros.contains(&macro_name);
+
         // MacroBegin マーカーを作成
         let begin_info = MacroBeginInfo {
             marker_id,
@@ -2726,6 +2741,7 @@ impl Preprocessor {
             kind,
             call_loc: call_loc.clone(),
             is_wrapped,
+            preserve_call,
         };
         let begin_token = Token::new(
             TokenKind::MacroBegin(Box::new(begin_info)),

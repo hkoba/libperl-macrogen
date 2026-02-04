@@ -633,6 +633,21 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.print_expr(condition)?;
                 self.write_close()
             }
+            ExprKind::MacroCall { name, args, expanded, call_loc: _ } => {
+                self.write_open("macro-call")?;
+                write!(self.writer, " {}", self.interner.get(*name))?;
+                // 元の引数を出力
+                self.write_open("args")?;
+                for arg in args {
+                    self.print_expr(arg)?;
+                }
+                self.write_close()?;
+                // 展開結果を出力
+                self.write_open("expanded")?;
+                self.print_expr(expanded)?;
+                self.write_close()?;
+                self.write_close()
+            }
         }
     }
 
@@ -1490,6 +1505,26 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 self.print_expr(condition)?;
                 write!(self.writer, ")")?;
                 write!(self.writer, " :type void")?;
+            }
+            ExprKind::MacroCall { name, args, expanded, call_loc: _ } => {
+                write!(self.writer, "(macro-call")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {}", self.interner.get(*name))?;
+                // 元の引数を出力
+                write!(self.writer, " (args")?;
+                for arg in args {
+                    if !self.pretty { write!(self.writer, " ")?; }
+                    self.print_expr(arg)?;
+                }
+                write!(self.writer, ")")?;
+                // 展開結果を出力
+                write!(self.writer, " (expanded")?;
+                if !self.pretty { write!(self.writer, " ")?; }
+                self.print_expr(expanded)?;
+                write!(self.writer, ")")?;
+                write!(self.writer, ")")?;
+                // 展開結果の型を使用
+                write!(self.writer, " :type {}", self.get_type_str(expanded.id))?;
             }
         }
         if self.pretty {

@@ -315,6 +315,21 @@ impl<'a> RustCodegen<'a> {
         false
     }
 
+    /// マクロ呼び出し形式で出力すべきかを判定
+    ///
+    /// 以下の場合にマクロ呼び出し形式で出力する：
+    /// - MacroInferContext に登録されており、生成対象である
+    ///
+    /// そうでない場合は展開形式で出力する。
+    fn should_emit_as_macro_call(&self, name: crate::InternedStr) -> bool {
+        // MacroInferContext にマクロ情報があり、パース可能なら生成対象
+        if let Some(info) = self.macro_ctx.macros.get(&name) {
+            // パース成功し、利用不可関数を呼ばないマクロのみ
+            return info.is_parseable() && !info.calls_unavailable;
+        }
+        false
+    }
+
     /// 不完全マーカー: 型が不明
     fn unknown_marker(&mut self) -> &'static str {
         self.incomplete_count += 1;
@@ -764,6 +779,28 @@ impl<'a> RustCodegen<'a> {
                     let last = parts.pop().unwrap();
                     let stmts = parts.join("; ");
                     format!("{{ {}; {} }}", stmts, last)
+                }
+            }
+            ExprKind::MacroCall { name, args, expanded, .. } => {
+                // マクロ呼び出しの処理：
+                // - マクロが利用可能（生成対象 or bindings に存在）ならマクロ呼び出し形式
+                // - そうでなければ展開形式
+                if self.should_emit_as_macro_call(*name) {
+                    let name_str = escape_rust_keyword(self.interner.get(*name));
+
+                    // THX マクロで my_perl が不足しているかチェック
+                    let needs_my_perl = self.needs_my_perl_for_call(*name, args.len());
+
+                    let mut a: Vec<String> = if needs_my_perl {
+                        vec!["my_perl".to_string()]
+                    } else {
+                        vec![]
+                    };
+                    a.extend(args.iter().map(|arg| self.expr_to_rust(arg, info)));
+                    format!("{}({})", name_str, a.join(", "))
+                } else {
+                    // 展開形式で出力
+                    self.expr_to_rust(expanded, info)
                 }
             }
             _ => {

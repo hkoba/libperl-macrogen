@@ -1996,6 +1996,10 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 // wrapped マクロ（assert 等）を処理
                 self.parse_wrapped_macro_expr()
             }
+            TokenKind::MacroBegin(info) if info.preserve_call => {
+                // preserve_call マクロを MacroCall ノードとして処理
+                self.parse_macro_call_expr()
+            }
             _ => Err(CompileError::Parse {
                 loc,
                 kind: ParseError::UnexpectedToken {
@@ -2077,6 +2081,120 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             ))
         } else {
             Ok(assert_expr)
+        }
+    }
+
+    /// preserve_call マクロを MacroCall 式としてパース
+    ///
+    /// MacroBegin(preserve_call=true) から元の引数を取得し、
+    /// 展開結果をパースして MacroCall ノードを生成する。
+    ///
+    /// MacroCall は元のマクロ呼び出し情報と展開結果を両方保持することで：
+    /// - 展開結果で型推論を実行
+    /// - コード生成時にマクロ呼び出し形式で出力可能
+    fn parse_macro_call_expr(&mut self) -> Result<Expr> {
+        let loc = self.current.loc.clone();
+
+        // MacroBegin から情報を取得
+        let (marker_id, macro_name, raw_args, call_loc) = match &self.current.kind {
+            TokenKind::MacroBegin(info) if info.preserve_call => {
+                let args = match &info.kind {
+                    MacroInvocationKind::Function { args } => args.clone(),
+                    MacroInvocationKind::Object => Vec::new(),
+                };
+                (info.marker_id, info.macro_name, args, info.call_loc.clone())
+            }
+            _ => unreachable!("parse_macro_call_expr called without preserve_call MacroBegin"),
+        };
+
+        // MacroBegin を消費（advance は inner_next_token を使うため MacroEnd もスキップされる可能性がある）
+        // そのため、ここでは source から直接読み取って展開トークンを収集
+        let expanded_tokens = self.collect_tokens_until_macro_end(marker_id)?;
+
+        // 展開トークンから式をパース
+        let expanded = if expanded_tokens.is_empty() {
+            // 空展開の場合は 0 を返す（void 式として扱う）
+            Expr::new(ExprKind::IntLit(0), loc.clone())
+        } else {
+            crate::parser::parse_expression_from_tokens_ref(
+                expanded_tokens,
+                self.source.interner(),
+                self.source.files(),
+                &self.typedefs,
+            )?
+        };
+
+        // 元の引数トークン列を式としてパース
+        let parsed_args: Result<Vec<Expr>> = raw_args.iter()
+            .map(|arg_tokens| {
+                if arg_tokens.is_empty() {
+                    // 空引数の場合
+                    Ok(Expr::new(ExprKind::IntLit(0), loc.clone()))
+                } else {
+                    crate::parser::parse_expression_from_tokens_ref(
+                        arg_tokens.clone(),
+                        self.source.interner(),
+                        self.source.files(),
+                        &self.typedefs,
+                    )
+                }
+            })
+            .collect();
+        let args = parsed_args?;
+
+        // current を次のトークンで更新
+        self.current = self.inner_next_token()?;
+
+        Ok(Expr::new(ExprKind::MacroCall {
+            name: macro_name,
+            args,
+            expanded: Box::new(expanded),
+            call_loc,
+        }, loc))
+    }
+
+    /// 指定した marker_id に対応する MacroEnd までのトークンを収集
+    ///
+    /// source から直接読み取り、MacroBegin/MacroEnd のネストを追跡する。
+    fn collect_tokens_until_macro_end(&mut self, target_marker_id: TokenId) -> Result<Vec<Token>> {
+        let mut tokens = Vec::new();
+        let mut nested_depth = 0;
+
+        loop {
+            let token = self.source.next_token()?;
+
+            match &token.kind {
+                TokenKind::MacroBegin(_) => {
+                    // ネストされたマクロ展開開始
+                    nested_depth += 1;
+                    tokens.push(token);
+                }
+                TokenKind::MacroEnd(info) => {
+                    if nested_depth > 0 {
+                        // ネストされたマクロ展開終了
+                        nested_depth -= 1;
+                        tokens.push(token);
+                    } else if info.begin_marker_id == target_marker_id {
+                        // 目標の MacroEnd を見つけた
+                        return Ok(tokens);
+                    } else {
+                        // 異なる MacroEnd（これは起こらないはず）
+                        tokens.push(token);
+                    }
+                }
+                TokenKind::Eof => {
+                    return Err(CompileError::Parse {
+                        loc: token.loc,
+                        kind: ParseError::UnexpectedToken {
+                            expected: "MacroEnd".to_string(),
+                            found: token.kind,
+                        },
+                    });
+                }
+                _ => {
+                    tokens.push(token);
+                }
+            }
         }
     }
 
@@ -2173,8 +2291,10 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     ///
     /// `handle_macro_markers` が true の場合、MacroBegin/MacroEnd マーカーを
     /// 処理してスキップし、通常のトークンのみを返す。
-    /// ただし、is_wrapped が true の MacroBegin はスキップせず返す（assert 処理用）。
-    /// 空展開でも MacroBegin を返し、parse_wrapped_macro_expr で Assert ノードを生成する。
+    /// ただし、以下の MacroBegin はスキップせず返す：
+    /// - `is_wrapped=true`: assert 等の特殊処理用
+    /// - `preserve_call=true`: MacroCall ノード生成用
+    /// 空展開でもこれらの MacroBegin を返し、適切な AST ノードを生成する。
     fn inner_next_token(&mut self) -> Result<Token> {
         loop {
             let token = self.source.next_token()?;
@@ -2188,6 +2308,11 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     if info.is_wrapped {
                         // wrapped マクロ（assert 等）は常に返す
                         // 空展開でも Assert ノードとして AST に残す
+                        return Ok(token);
+                    }
+                    if info.preserve_call {
+                        // preserve_call マクロは常に返す
+                        // MacroCall ノードとして AST に残す
                         return Ok(token);
                     }
                     // 通常のマクロ展開開始：コンテキストにプッシュ
