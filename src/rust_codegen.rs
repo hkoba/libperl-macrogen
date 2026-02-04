@@ -1012,8 +1012,12 @@ impl<'a> RustCodegen<'a> {
             .collect();
         let return_type = self.apply_derived_to_type(&return_type, &return_derived);
 
+        // THX 依存性を判定
+        let is_thx_dependent = self.is_inline_fn_thx_dependent(&func_def.declarator.derived);
+        let thx_info = if is_thx_dependent { " [THX]" } else { "" };
+
         // ドキュメントコメント
-        self.writeln(&format!("/// {} - inline function", name_str));
+        self.writeln(&format!("/// {}{} - inline function", name_str, thx_info));
         self.writeln("#[inline]");
 
         // 関数定義
@@ -1056,6 +1060,26 @@ impl<'a> RustCodegen<'a> {
             }
         }
         String::new()
+    }
+
+    /// inline 関数が THX 依存かどうかを判定
+    ///
+    /// 最初のパラメータが `my_perl` という名前であれば THX 依存とみなす。
+    fn is_inline_fn_thx_dependent(&self, derived: &[DerivedDecl]) -> bool {
+        for d in derived {
+            if let DerivedDecl::Function(param_list) = d {
+                if let Some(first_param) = param_list.params.first() {
+                    if let Some(ref declarator) = first_param.declarator {
+                        if let Some(name) = declarator.name {
+                            let name_str = self.interner.get(name);
+                            return name_str == "my_perl";
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+        false
     }
 
     /// ParamDecl を Rust パラメータ宣言に変換

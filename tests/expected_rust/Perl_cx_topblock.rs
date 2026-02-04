@@ -1,4 +1,4 @@
-/// Perl_cx_topblock - inline function
+/// Perl_cx_topblock [THX] - inline function
 #[inline]
 pub unsafe fn Perl_cx_topblock(my_perl: *mut PerlInterpreter, cx: *mut PERL_CONTEXT) -> () {
     unsafe {
