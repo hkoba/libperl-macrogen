@@ -438,6 +438,14 @@ impl ApidocEntry {
     pub fn is_generic(&self) -> bool {
         self.returns_type_param() || !self.type_param_indices().is_empty()
     }
+
+    /// 引数に `token` 型を持つかどうか
+    ///
+    /// `token` 型の引数は `##` によるトークン合成に使われるため、
+    /// このマクロは展開が必要（explicit_expand に追加すべき）
+    pub fn has_token_arg(&self) -> bool {
+        self.args.iter().any(|arg| arg.ty == "token")
+    }
 }
 
 impl ApidocDict {
@@ -904,6 +912,8 @@ pub struct ApidocStats {
 /// `=for apidoc` を含むコメントを見つけたら辞書に登録する。
 pub struct ApidocCollector {
     entries: HashMap<String, ApidocEntry>,
+    /// token 型の引数を持つマクロ名（展開が必要なマクロ）
+    token_type_macros: Vec<String>,
 }
 
 impl ApidocCollector {
@@ -911,6 +921,7 @@ impl ApidocCollector {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            token_type_macros: Vec::new(),
         }
     }
 
@@ -930,6 +941,14 @@ impl ApidocCollector {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// 検出した token 型マクロ名を返す
+    ///
+    /// これらのマクロはトークン合成（`##`）を使用するため、
+    /// TokenExpander で展開が必要。
+    pub fn token_type_macros(&self) -> &[String] {
+        &self.token_type_macros
+    }
 }
 
 impl Default for ApidocCollector {
@@ -944,6 +963,10 @@ impl CommentCallback for ApidocCollector {
         // （is_target チェックは呼び出し側で行われるため、ここでは常に処理）
         for line in comment.text.lines() {
             if let Some(entry) = ApidocEntry::parse_apidoc_line(line) {
+                // token 型の引数を持つマクロを記録
+                if entry.has_token_arg() {
+                    self.token_type_macros.push(entry.name.clone());
+                }
                 self.entries.insert(entry.name.clone(), entry);
             }
         }
@@ -1170,5 +1193,29 @@ Cp	|void	|internal_fn	|int x
 
         dict1.merge(dict2);
         assert_eq!(dict1.len(), 2);
+    }
+
+    #[test]
+    fn test_has_token_arg() {
+        // XopENTRYCUSTOM has a token argument
+        let entry = ApidocEntry::parse_apidoc_line(
+            "=for apidoc Amu||XopENTRYCUSTOM|const OP *o|token which"
+        ).unwrap();
+        assert!(entry.has_token_arg());
+        assert_eq!(entry.name, "XopENTRYCUSTOM");
+
+        // Regular macro without token argument
+        let entry2 = ApidocEntry::parse_apidoc_line(
+            "=for apidoc Am|char*|SvPV|SV* sv|STRLEN len"
+        ).unwrap();
+        assert!(!entry2.has_token_arg());
+    }
+
+    #[test]
+    fn test_has_token_arg_embed_fnc() {
+        // Test embed.fnc style with token argument
+        let entry = ApidocEntry::parse_line("Amu	|	|XopENTRYCUSTOM	|const OP *o	|token which").unwrap();
+        assert!(entry.has_token_arg());
+        assert_eq!(entry.name, "XopENTRYCUSTOM");
     }
 }

@@ -19,9 +19,9 @@ use crate::parser::{
 };
 use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
+use crate::preprocessor::Preprocessor;
 use crate::source::FileRegistry;
 use crate::token::TokenKind;
-use crate::token_expander::TokenExpander;
 use crate::type_env::{TypeConstraint, TypeEnv};
 use crate::type_repr::TypeRepr;
 
@@ -530,45 +530,53 @@ impl MacroInferContext {
     pub fn build_macro_info(
         &self,
         def: &MacroDef,
-        macro_table: &MacroTable,
-        interner: &StringInterner,
-        files: &FileRegistry,
-        rust_decl_dict: Option<&RustDeclDict>,
+        pp: &mut Preprocessor,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
-        explicit_expand: ExplicitExpandSymbols,
     ) -> (MacroInferInfo, bool, bool) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
         info.has_body = !def.body.is_empty();
         info.is_function = matches!(def.kind, MacroKind::Function { .. });
 
-        // パラメータの Expr を生成（各パラメータに ExprId を割り当て）
-        if let MacroKind::Function { params, .. } = &def.kind {
+        // パラメータ名を取得
+        let params: Vec<InternedStr> = if let MacroKind::Function { params, .. } = &def.kind {
             for &param_name in params {
                 info.params.push(MacroParam::new(param_name, crate::source::SourceLocation::default()));
             }
-        }
+            params.clone()
+        } else {
+            Vec::new()
+        };
 
         // 直接 ## を含むかチェック
         let has_pasting_direct = def.body.iter().any(|t| matches!(t.kind, TokenKind::HashHash));
 
-        // マクロ本体を展開（TokenExpander を使用）
-        let mut expander = TokenExpander::new(macro_table, interner, files);
-        if let Some(dict) = rust_decl_dict {
-            expander.set_bindings_consts(&dict.consts);
-        }
-        // 特定マクロを展開しないよう登録（assert など特殊処理用）
+        // マクロ本体を展開（Preprocessor を使用）
+        // no_expand マクロを skip_expand_macros に一時的に追加
         for sym in no_expand.iter() {
-            expander.add_no_expand(sym);
+            pp.add_skip_expand_macro(sym);
         }
-        // 明示的に展開するマクロを登録（SvANY, SvFLAGS など）
-        expander.extend_explicit_expand(explicit_expand.iter());
-        let expanded_tokens = expander.expand_with_calls(&def.body);
 
-        // def-use 関係を収集（呼び出されたマクロの集合から、no_expand マクロを含む）
-        self.collect_uses_from_called(expander.called_macros(), &mut info);
+        let mut in_progress = HashSet::new();
+        in_progress.insert(def.name); // 自己参照防止
+
+        let (expanded_tokens, called_macros) = match pp.expand_macro_body_for_inference(
+            &def.body,
+            &params,
+            &[], // 引数なし（マクロ定義の解析なので）
+            &mut in_progress,
+        ) {
+            Ok(result) => result,
+            Err(_) => {
+                // 展開に失敗した場合は元のトークンを使用
+                (def.body.clone(), HashSet::new())
+            }
+        };
+
+        // def-use 関係を収集（呼び出されたマクロの集合から）
+        self.collect_uses_from_called(&called_macros, &mut info);
 
         // THX 判定: 展開されたマクロに aTHX, tTHX が含まれるか、
         // または展開後トークンに my_perl が含まれるかをチェック
@@ -583,7 +591,9 @@ impl MacroInferContext {
         info.has_token_pasting = has_pasting_direct;
         info.is_thx_dependent = has_thx;
 
-        // パースを試行
+        // パースを試行（pp から interner と files を取得）
+        let interner = pp.interner();
+        let files = pp.files();
         let (parse_result, stats) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
         info.parse_result = parse_result;
         info.function_call_count = stats.function_call_count;
@@ -789,9 +799,7 @@ impl MacroInferContext {
     /// def-use 関係を構築して初期分類を行う。
     pub fn analyze_all_macros<'a>(
         &mut self,
-        macro_table: &MacroTable,
-        interner: &'a StringInterner,
-        files: &FileRegistry,
+        pp: &mut Preprocessor,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
@@ -800,15 +808,17 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
-        explicit_expand: ExplicitExpandSymbols,
     ) {
         // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
         let mut thx_initial = HashSet::new();
         let mut pasting_initial = HashSet::new();
 
-        for def in macro_table.iter_target_macros() {
+        // マクロ定義のリストを事前に収集（借用の問題を回避）
+        let target_macros: Vec<MacroDef> = pp.macros().iter_target_macros().cloned().collect();
+
+        for def in &target_macros {
             let (info, has_pasting, has_thx) = self.build_macro_info(
-                def, macro_table, interner, files, rust_decl_dict, typedefs, thx_symbols, no_expand, explicit_expand
+                def, pp, typedefs, thx_symbols, no_expand
             );
             if has_pasting {
                 pasting_initial.insert(def.name);
@@ -842,7 +852,10 @@ impl MacroInferContext {
         self.propagate_flag_via_used_by(&pasting_initial, false);
 
         // Step 4.5: 利用不可関数呼び出しのチェックと伝播
-        self.check_function_availability(rust_decl_dict, inline_fn_dict, interner);
+        {
+            let interner = pp.interner();
+            self.check_function_availability(rust_decl_dict, inline_fn_dict, interner);
+        }
         self.propagate_unavailable_via_used_by();
 
         // Step 5: 全マクロを unconfirmed に
@@ -851,9 +864,14 @@ impl MacroInferContext {
         }
 
         // Step 6: 依存順に型推論
-        self.infer_types_in_dependency_order(
-            macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs
-        );
+        {
+            let macro_table = pp.macros();
+            let interner = pp.interner();
+            let files = pp.files();
+            self.infer_types_in_dependency_order(
+                macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs
+            );
+        }
     }
 
     /// used_by を辿ってフラグを推移的に伝播

@@ -27,7 +27,6 @@ pub mod semantic;
 pub mod sexp;
 pub mod source;
 pub mod token;
-pub mod token_expander;
 pub mod token_source;
 pub mod type_env;
 pub mod type_repr;
@@ -67,7 +66,6 @@ pub use semantic::{SemanticAnalyzer, Symbol, SymbolKind, Type};
 pub use sexp::{SexpPrinter, TypedSexpPrinter};
 pub use source::{FileId, FileRegistry, SourceLocation};
 pub use token::{Comment, CommentKind, Token, TokenKind};
-pub use token_expander::TokenExpander;
 pub use token_source::{TokenSlice, TokenSliceRef, TokenSource};
 pub use type_env::{ParamLink, TypeConstraint, TypeEnv};
 pub use type_repr::{

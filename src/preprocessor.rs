@@ -3083,6 +3083,227 @@ impl Preprocessor {
         &self.macros
     }
 
+    /// マクロ本体を展開する（MacroInferContext 用）
+    ///
+    /// TokenExpander の代替として、マクロ推論で使用する。
+    /// トークンペースト（##）と文字列化（#）を完全にサポートする。
+    ///
+    /// # Arguments
+    /// - `body`: マクロ本体のトークン列
+    /// - `params`: パラメータ名のリスト（関数マクロの場合）
+    /// - `args`: 各パラメータに対応する引数トークン列
+    /// - `in_progress`: 再帰展開防止用のマクロ名セット
+    ///
+    /// # Returns
+    /// (展開結果, 呼び出されたマクロ集合)
+    pub fn expand_macro_body_for_inference(
+        &mut self,
+        body: &[Token],
+        params: &[InternedStr],
+        args: &[Vec<Token>],
+        in_progress: &mut HashSet<InternedStr>,
+    ) -> Result<(Vec<Token>, HashSet<InternedStr>), CompileError> {
+        let mut called_macros = HashSet::new();
+
+        // パラメータと引数のマッピングを作成
+        let mut raw_args = HashMap::new();
+        let mut prescanned_args = HashMap::new();
+
+        for (i, &param) in params.iter().enumerate() {
+            if let Some(arg_tokens) = args.get(i) {
+                // raw_args: ## や # で使用（展開前）
+                raw_args.insert(param, arg_tokens.clone());
+                // prescanned_args: 通常の置換で使用（展開済み）
+                // 引数を展開してから使用
+                let (expanded_arg, arg_called) = self.expand_tokens_for_inference(
+                    arg_tokens,
+                    in_progress,
+                )?;
+                called_macros.extend(arg_called);
+                prescanned_args.insert(param, expanded_arg);
+            }
+        }
+
+        // パラメータ置換と ##, # を処理
+        let substituted = self.expand_tokens(body, &raw_args, &prescanned_args)?;
+
+        // 展開後のトークン列内のマクロを再帰的に展開
+        let (result, more_called) = self.expand_tokens_for_inference(&substituted, in_progress)?;
+        called_macros.extend(more_called);
+
+        Ok((result, called_macros))
+    }
+
+    /// トークン列内のマクロを展開する（MacroInferContext 用）
+    ///
+    /// 再帰的にマクロを展開し、呼び出されたマクロを記録する。
+    fn expand_tokens_for_inference(
+        &mut self,
+        tokens: &[Token],
+        in_progress: &mut HashSet<InternedStr>,
+    ) -> Result<(Vec<Token>, HashSet<InternedStr>), CompileError> {
+        let mut result = Vec::new();
+        let mut called_macros = HashSet::new();
+        let mut i = 0;
+
+        while i < tokens.len() {
+            let token = &tokens[i];
+
+            if let TokenKind::Ident(id) = token.kind {
+                // グローバルな展開抑制リストをチェック
+                if self.skip_expand_macros.contains(&id) {
+                    result.push(token.clone());
+                    i += 1;
+                    continue;
+                }
+
+                // 再帰展開防止
+                if in_progress.contains(&id) {
+                    result.push(token.clone());
+                    i += 1;
+                    continue;
+                }
+
+                // マクロ定義を取得
+                if let Some(def) = self.macros.get(id).cloned() {
+                    match &def.kind {
+                        MacroKind::Object => {
+                            // オブジェクトマクロは常に展開
+                            called_macros.insert(id);
+                            in_progress.insert(id);
+                            let (expanded, more_called) = self.expand_macro_body_for_inference(
+                                &def.body,
+                                &[],
+                                &[],
+                                in_progress,
+                            )?;
+                            called_macros.extend(more_called);
+                            result.extend(expanded);
+                            in_progress.remove(&id);
+                            i += 1;
+                            continue;
+                        }
+                        MacroKind::Function { params, is_variadic } => {
+                            // 関数マクロ: 引数を収集できるかチェック
+                            if let Some((args, consumed)) = self.try_collect_args_from_tokens(&tokens[i + 1..], params.len(), *is_variadic) {
+                                // 関数マクロの呼び出しを記録
+                                called_macros.insert(id);
+
+                                // preserve_function_macros モード: explicit_expand に含まれない場合は保存
+                                if !self.explicit_expand_macros.contains(&id) {
+                                    // 展開しない: 識別子と引数をそのまま残す
+                                    result.push(token.clone());
+                                    result.extend(tokens[i + 1..i + 1 + consumed].iter().cloned());
+                                    i += 1 + consumed;
+                                    continue;
+                                }
+
+                                // 展開する
+                                in_progress.insert(id);
+                                let (expanded, more_called) = self.expand_macro_body_for_inference(
+                                    &def.body,
+                                    params,
+                                    &args,
+                                    in_progress,
+                                )?;
+                                called_macros.extend(more_called);
+                                result.extend(expanded);
+                                in_progress.remove(&id);
+                                i += 1 + consumed;
+                                continue;
+                            } else {
+                                // 引数がない: 関数マクロとして認識されない
+                                result.push(token.clone());
+                            }
+                        }
+                    }
+                } else {
+                    result.push(token.clone());
+                }
+            } else {
+                result.push(token.clone());
+            }
+
+            i += 1;
+        }
+
+        Ok((result, called_macros))
+    }
+
+    /// トークン列から関数マクロの引数を収集する（MacroInferContext 用）
+    ///
+    /// ファイルからではなく、トークン列から引数を収集する。
+    fn try_collect_args_from_tokens(
+        &self,
+        tokens: &[Token],
+        param_count: usize,
+        is_variadic: bool,
+    ) -> Option<(Vec<Vec<Token>>, usize)> {
+        // 空白をスキップして '(' を探す
+        let mut start = 0;
+        while start < tokens.len() {
+            match &tokens[start].kind {
+                TokenKind::Space | TokenKind::Newline => start += 1,
+                TokenKind::LParen => break,
+                _ => return None,
+            }
+        }
+
+        if start >= tokens.len() || !matches!(tokens[start].kind, TokenKind::LParen) {
+            return None;
+        }
+
+        // 引数を収集
+        let mut args: Vec<Vec<Token>> = Vec::new();
+        let mut current_arg = Vec::new();
+        let mut paren_depth = 0;
+        let mut i = start + 1;
+
+        while i < tokens.len() {
+            let token = &tokens[i];
+            match &token.kind {
+                TokenKind::LParen => {
+                    paren_depth += 1;
+                    current_arg.push(token.clone());
+                }
+                TokenKind::RParen => {
+                    if paren_depth == 0 {
+                        // 引数終了
+                        if !current_arg.is_empty() || !args.is_empty() {
+                            args.push(current_arg);
+                        }
+                        // 消費したトークン数を返す（start から i まで、i を含む）
+                        return Some((args, i + 1));
+                    }
+                    paren_depth -= 1;
+                    current_arg.push(token.clone());
+                }
+                TokenKind::Comma if paren_depth == 0 => {
+                    // 可変長引数の場合、必要な引数数を超えたらカンマも含める
+                    if is_variadic && args.len() >= param_count.saturating_sub(1) {
+                        current_arg.push(token.clone());
+                    } else {
+                        args.push(current_arg);
+                        current_arg = Vec::new();
+                    }
+                }
+                TokenKind::Space | TokenKind::Newline => {
+                    // 空白は無視（ただし引数内の空白は保持が必要な場合も）
+                    if !current_arg.is_empty() {
+                        current_arg.push(token.clone());
+                    }
+                }
+                _ => {
+                    current_arg.push(token.clone());
+                }
+            }
+            i += 1;
+        }
+
+        // ')' が見つからなかった
+        None
+    }
+
     /// 現在のファイルがターゲットディレクトリ内かどうかを判定
     fn is_current_file_in_target(&self) -> bool {
         let target_dir = match &self.config.target_dir {

@@ -330,6 +330,14 @@ pub fn run_inference_with_preprocessor(
         .downcast::<ApidocCollector>()
         .expect("callback type mismatch");
 
+    // token 型マクロを intern して InternedStr のベクターに変換
+    // （apidoc から検出されたトークン合成マクロ、例: XopENTRYCUSTOM）
+    let token_type_macros: Vec<InternedStr> = apidoc_collector
+        .token_type_macros()
+        .iter()
+        .map(|name| pp.interner_mut().intern(name))
+        .collect();
+
     // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
     fields_dict.build_consistent_type_cache(pp.interner());
 
@@ -364,28 +372,26 @@ pub fn run_inference_with_preprocessor(
 
     // 展開を抑制するマクロシンボルを作成（assert など特殊処理用）
     let no_expand = NoExpandSymbols::new(pp.interner_mut());
-    // 明示的に展開するマクロシンボルを作成（SvANY, SvFLAGS など）
-    let explicit_expand = ExplicitExpandSymbols::new(pp.interner_mut());
 
+    // 明示的に展開するマクロを Preprocessor に登録
+    // （SvANY, SvFLAGS など + apidoc から検出した token 型マクロ）
     {
-        let interner = pp.interner();
-        let files = pp.files();
-
-        infer_ctx.analyze_all_macros(
-            pp.macros(),
-            interner,
-            files,
-            Some(&apidoc),
-            Some(&fields_dict),
-            rust_decl_dict.as_ref(),
-            Some(&inline_fn_dict),
-            Some(&c_fn_decl_dict),
-            &typedefs,
-            thx_symbols,
-            no_expand,
-            explicit_expand,
-        );
+        let explicit_expand = ExplicitExpandSymbols::new(pp.interner_mut());
+        pp.add_explicit_expand_macros(explicit_expand.iter());
     }
+    pp.add_explicit_expand_macros(token_type_macros.iter().copied());
+
+    infer_ctx.analyze_all_macros(
+        &mut pp,
+        Some(&apidoc),
+        Some(&fields_dict),
+        rust_decl_dict.as_ref(),
+        Some(&inline_fn_dict),
+        Some(&c_fn_decl_dict),
+        &typedefs,
+        thx_symbols,
+        no_expand,
+    );
 
     // THX 依存マクロ数をカウント
     let thx_dependent_count = infer_ctx.macros.values()
