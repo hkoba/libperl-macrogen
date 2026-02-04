@@ -24,16 +24,19 @@
          │       マクロの処理経路         │          │
          │                               │          │
          │  1. Preprocessor で定義収集    │          │
-         │  2. TokenExpander で展開       │          │
-         │     (NoExpandSymbols で制御)   │          │
+         │  2. Preprocessor で展開        │          │
+         │     (explicit_expand で制御)   │          │
          │  3. パース → MacroInferInfo    │          │
          │  4. 型推論 (TypeEnv)           │          │
          │  5. expr_to_rust() で変換      │          │
          │                               │          │
-         │  ★ assert は wrapped_macros   │          │
-         │    で引数を保存               │          │
+         │  ★ wrapped_macros で          │          │
+         │    assert 引数を保存          │          │
          │    → MacroBegin/End マーカー   │          │
          │    → Parser で Assert に変換  │          │
+         │                               │          │
+         │  ★ MacroCall AST ノードで     │          │
+         │    元のマクロ呼び出しを保存    │          │
          └───────────────────────────────┘          │
                          │                          │
                          ▼                          ▼
@@ -118,7 +121,7 @@ pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &S
 
 **assert 変換の理由**:
 - パース時点では `assert(cond)` は単なる関数呼び出し (`Call`) として AST に存在
-- マクロの場合は `NoExpandSymbols` で展開が抑制されるため、後で `Assert` に変換できる
+- マクロの場合は `wrapped_macros` により Parser が `Assert` ノードを作成する
 - inline 関数はマクロ展開後にパースされるため、`assert` が展開**されてしまっている**
 - そのため、収集時に明示的に `Call("assert", ...)` → `Assert { kind, condition }` の変換が必要
 
@@ -369,18 +372,18 @@ static inline I32* Perl_CvDEPTH(const CV* sv) { ... }
 | マクロ制御点 | Inline 関数での状況 |
 |-------------|-------------------|
 | A: skip_expand_macros | **適用済み** - パース時にマクロ展開済み |
-| B: NoExpandSymbols | **関係なし** - inline 関数は TokenExpander 不使用 |
-| C: no_expand セット | **関係なし** |
-| C': substitute_and_expand_mut | **関係なし** - inline 関数は Preprocessor で展開済み |
-| D: bindings_consts | **関係なし** |
+| B: NoExpandSymbols | **関係なし** - inline 関数は通常のパース時展開 |
+| B': ExplicitExpandSymbols | **関係なし** - 型推論用の展開制御 |
+| C: Preprocessor 展開制御 | **適用済み** - パース時に展開済み |
+| C': MacroCall AST ノード | **関係なし** - inline 関数内では使用されない |
+| D: is_function_available() | **inline 関数も可用** として認識 |
 | D': wrapped_macros | **適用** - assert の引数保存に必須（下記参照） |
-| E: is_function_available() | **inline 関数も可用** として認識 |
+| E: MacroCall 出力判定 | **関係なし** - inline 関数は別経路 |
 | F: escape_rust_keyword() | **共通使用** |
 
-**注**: 制御点 C'（`substitute_and_expand_mut` での関数マクロ保存）は、マクロ関数の
-処理時に他のマクロを関数呼び出しとして保存する仕組み。Inline 関数は Preprocessor で
-完全に展開されるため、この制御点は適用されない。
-詳細は [マクロ展開制御アーキテクチャ - 制御点 C'](./architecture-macro-expansion-control.md#制御点-c-substitute_and_expand_mut-における関数マクロ保存) を参照。
+**注**: Inline 関数は Preprocessor で完全にマクロ展開されるため、
+マクロ型推論用の制御点（MacroCall ノード等）は適用されない。
+詳細は [マクロ展開制御アーキテクチャ](./architecture-macro-expansion-control.md) を参照。
 
 ---
 
@@ -541,12 +544,13 @@ pub fn generate_inline_fn(...) -> GeneratedCode {
 | 観点 | マクロ | Inline 関数 |
 |------|--------|-------------|
 | **保存形式** | `MacroInferInfo` (パース結果) | `FunctionDef` (完全な AST) |
-| **assert 処理タイミング** | TokenExpander 後、パース時 | 収集時 (`collect_from_function_def`) |
+| **assert 処理タイミング** | Preprocessor 展開後、Parser で | 収集時 (`collect_from_function_def`) |
 | **assert 引数保存** | wrapped_macros で MacroBegin/End マーカー | 同左（`with_codegen_defaults()` 必須） |
 | **型推論** | TypeEnv による制約ベース | なし（AST 直接参照） |
 | **Rust 変換メソッド** | `expr_to_rust()` | `expr_to_rust_inline()` |
 | **可用性判定** | bindings.rs, builtins 確認 | InlineFnDict に存在すれば可用 |
-| **展開制御** | NoExpandSymbols, skip_expand | なし（パース時に展開済み） |
+| **展開制御** | explicit_expand_macros, skip_expand | なし（パース時に展開済み） |
+| **マクロ呼び出し保存** | MacroCall AST ノード | なし |
 
 ---
 

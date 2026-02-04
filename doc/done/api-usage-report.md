@@ -55,7 +55,6 @@ main.rs (--gen-rust)
 | `source.rs` | `FileRegistry`, `FileId`, `SourceLocation` | **Active** |
 | `token.rs` | `Token`, `TokenKind`, `Comment` | **Active** |
 | `token_source.rs` | `TokenSlice`, `TokenSource` | **Active** |
-| `token_expander.rs` | `TokenExpander` | **Active** (macro_infer.rs で使用) |
 | `lexer.rs` | `Lexer`, traits | **Active** |
 | `parser.rs` | `Parser`, `parse_expression_from_tokens` | **Active** |
 | `error.rs` | `CompileError`, error types | **Active** |

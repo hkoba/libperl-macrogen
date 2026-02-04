@@ -287,11 +287,14 @@ pub enum UnifiedType {
 
 ```
 1. マクロ定義を取得
-2. TokenExpander でマクロ本体を展開
-   - NoExpandSymbols は展開しない (assert 等)
-   - ExplicitExpandSymbols は展開する (SvANY 等)
+2. Preprocessor.expand_macro_body_for_inference() でマクロ本体を展開
+   - ExplicitExpandSymbols は展開する (SvANY, SvFLAGS 等)
+   - その他の関数マクロは保存（関数呼び出しとして残す）
+   - MacroBegin/MacroEnd マーカー付きで preserve_call フラグを設定
 3. 展開結果をパース (式 or 文)
-4. def-use 関係を収集
+   - preserve_call=true のマーカーは MacroCall AST ノードに変換
+   - wrapped マクロ (assert 等) は Assert AST ノードに変換
+4. def-use 関係を収集（MacroCall の expanded から uses を収集）
 5. THX 依存・トークン連結の検出
 6. 関数呼び出しの収集
 ```
