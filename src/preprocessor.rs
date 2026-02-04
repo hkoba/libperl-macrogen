@@ -3207,9 +3207,29 @@ impl Preprocessor {
 
                                 // preserve_function_macros モード: explicit_expand に含まれない場合は保存
                                 if !self.explicit_expand_macros.contains(&id) {
-                                    // 展開しない: 識別子と引数をそのまま残す
+                                    // 関数名は保存
                                     result.push(token.clone());
-                                    result.extend(tokens[i + 1..i + 1 + consumed].iter().cloned());
+
+                                    // 引数を展開してから保存
+                                    // 開き括弧
+                                    result.push(Token::new(TokenKind::LParen, token.loc.clone()));
+
+                                    for (arg_idx, arg_tokens) in args.iter().enumerate() {
+                                        if arg_idx > 0 {
+                                            result.push(Token::new(TokenKind::Comma, token.loc.clone()));
+                                        }
+                                        // 引数内のオブジェクトマクロを展開
+                                        let (expanded_arg, arg_called) = self.expand_tokens_for_inference(
+                                            arg_tokens,
+                                            in_progress,
+                                        )?;
+                                        called_macros.extend(arg_called);
+                                        result.extend(expanded_arg);
+                                    }
+
+                                    // 閉じ括弧
+                                    result.push(Token::new(TokenKind::RParen, token.loc.clone()));
+
                                     i += 1 + consumed;
                                     continue;
                                 }

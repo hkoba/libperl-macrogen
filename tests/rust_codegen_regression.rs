@@ -19,6 +19,7 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "CopFILE",
     "PerlIO_seek",
     "PerlIO_tell",
+    "AMG_CALLunary",
 ];
 
 /// 生成された Rust コードから特定の関数を抽出する
