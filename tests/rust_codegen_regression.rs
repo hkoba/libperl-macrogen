@@ -17,6 +17,8 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "OP_CLASS",
     "CvSTASH",
     "CopFILE",
+    "PerlIO_seek",
+    "PerlIO_tell",
 ];
 
 /// 生成された Rust コードから特定の関数を抽出する
@@ -25,6 +27,7 @@ fn extract_function(output: &str, fn_name: &str) -> Option<String> {
     let mut result = Vec::new();
     let mut in_function = false;
     let mut brace_count = 0;
+    let mut seen_open_brace = false;
 
     for (i, line) in lines.iter().enumerate() {
         // 関数の開始を検出（pub unsafe fn NAME）
@@ -54,11 +57,17 @@ fn extract_function(output: &str, fn_name: &str) -> Option<String> {
             result.push(line.to_string());
 
             // ブレースのカウント
-            brace_count += line.chars().filter(|&c| c == '{').count() as i32;
-            brace_count -= line.chars().filter(|&c| c == '}').count() as i32;
+            let open_braces = line.chars().filter(|&c| c == '{').count() as i32;
+            let close_braces = line.chars().filter(|&c| c == '}').count() as i32;
+            brace_count += open_braces;
+            brace_count -= close_braces;
 
-            // 関数の終了
-            if brace_count == 0 && result.len() > 1 {
+            if open_braces > 0 {
+                seen_open_brace = true;
+            }
+
+            // 関数の終了（開きブレースを見た後に閉じたとき）
+            if seen_open_brace && brace_count == 0 {
                 break;
             }
         }
