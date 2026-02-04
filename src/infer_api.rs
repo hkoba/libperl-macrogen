@@ -353,6 +353,9 @@ pub fn run_inference_with_preprocessor(
     let apidoc_from_comments = apidoc_collector.len();
     apidoc_collector.merge_into(&mut apidoc);
 
+    // apidoc 内の型マクロを展開 (Off_t → off_t, Size_t → size_t など)
+    apidoc.expand_type_macros(pp.macros(), pp.interner());
+
     // デバッグ: apidoc マージ後にダンプして早期終了
     if let Some(opts) = debug_opts {
         if let Some(filter) = &opts.dump_apidoc_after_merge {

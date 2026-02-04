@@ -13,6 +13,8 @@ use crate::perl_config::{get_perl_version, PerlConfigError};
 
 use serde::{Deserialize, Serialize};
 
+use crate::intern::StringInterner;
+use crate::macro_def::{MacroKind, MacroTable};
 use crate::preprocessor::CommentCallback;
 use crate::source::FileId;
 use crate::token::Comment;
@@ -714,6 +716,73 @@ impl ApidocDict {
         })?;
         Self::load_json(&path)
     }
+
+    /// apidoc 内の型文字列に含まれるマクロを展開する
+    ///
+    /// C ヘッダー解析完了後に呼び出す。
+    /// Off_t → off_t, Size_t → size_t などの型マクロを展開する。
+    pub fn expand_type_macros(&mut self, macro_table: &MacroTable, interner: &StringInterner) {
+        for entry in self.entries.values_mut() {
+            // 戻り値型を展開
+            if let Some(ref mut return_type) = entry.return_type {
+                *return_type = expand_type_string(return_type, macro_table, interner);
+            }
+            // パラメータ型を展開
+            for arg in &mut entry.args {
+                arg.ty = expand_type_string(&arg.ty, macro_table, interner);
+            }
+        }
+    }
+}
+
+/// 型文字列内の識別子をマクロ展開する
+///
+/// 型文字列をトークン化して、識別子がオブジェクトマクロなら展開。
+/// ポインタ (*) や const などは保持。
+fn expand_type_string(
+    type_str: &str,
+    macro_table: &MacroTable,
+    interner: &StringInterner,
+) -> String {
+    let mut result = String::new();
+    let mut chars = type_str.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c.is_alphabetic() || c == '_' {
+            // 識別子を収集
+            let mut ident = String::from(c);
+            while let Some(&nc) = chars.peek() {
+                if nc.is_alphanumeric() || nc == '_' {
+                    ident.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+
+            // マクロ展開を試みる
+            if let Some(interned) = interner.lookup(&ident) {
+                if let Some(macro_def) = macro_table.get(interned) {
+                    if matches!(macro_def.kind, MacroKind::Object) && !macro_def.body.is_empty() {
+                        // オブジェクトマクロ: 本体を展開
+                        let expanded: String = macro_def
+                            .body
+                            .iter()
+                            .map(|t| t.kind.format(interner))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        result.push_str(&expanded);
+                        continue;
+                    }
+                }
+            }
+            // マクロでなければそのまま
+            result.push_str(&ident);
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 /// apidoc 解決エラー
@@ -1217,5 +1286,90 @@ Cp	|void	|internal_fn	|int x
         let entry = ApidocEntry::parse_line("Amu	|	|XopENTRYCUSTOM	|const OP *o	|token which").unwrap();
         assert!(entry.has_token_arg());
         assert_eq!(entry.name, "XopENTRYCUSTOM");
+    }
+
+    #[test]
+    fn test_expand_type_macros() {
+        use crate::macro_def::MacroDef;
+        use crate::source::SourceLocation;
+        use crate::token::{Token, TokenKind};
+
+        // apidoc を作成
+        let content = r#"
+Adp	|Off_t	|PerlIO_tell	|NN PerlIO *f
+Adp	|Size_t	|PerlIO_read	|NN PerlIO *f	|NN void *buf	|Size_t count
+Adm	|STDCHAR *	|SvPVX	|NN SV *sv
+"#;
+        let mut dict = ApidocDict::parse_embed_fnc_str(content);
+
+        // マクロテーブルとinternerを作成
+        let mut interner = crate::intern::StringInterner::new();
+        let mut macro_table = MacroTable::new();
+        let loc = SourceLocation::default();
+
+        // Off_t → off_t
+        let off_t_name = interner.intern("Off_t");
+        let off_t_body = vec![Token::new(TokenKind::Ident(interner.intern("off_t")), loc.clone())];
+        macro_table.define(MacroDef::object(off_t_name, off_t_body, loc.clone()), &interner);
+
+        // Size_t → size_t
+        let size_t_name = interner.intern("Size_t");
+        let size_t_body = vec![Token::new(TokenKind::Ident(interner.intern("size_t")), loc.clone())];
+        macro_table.define(MacroDef::object(size_t_name, size_t_body, loc.clone()), &interner);
+
+        // STDCHAR → char
+        let stdchar_name = interner.intern("STDCHAR");
+        let stdchar_body = vec![Token::new(TokenKind::Ident(interner.intern("char")), loc.clone())];
+        macro_table.define(MacroDef::object(stdchar_name, stdchar_body, loc), &interner);
+
+        // 展開を実行
+        dict.expand_type_macros(&macro_table, &interner);
+
+        // 検証: Off_t → off_t
+        let tell = dict.get("PerlIO_tell").unwrap();
+        assert_eq!(tell.return_type, Some("off_t".to_string()));
+
+        // 検証: Size_t → size_t (戻り値)
+        let read = dict.get("PerlIO_read").unwrap();
+        assert_eq!(read.return_type, Some("size_t".to_string()));
+
+        // 検証: Size_t → size_t (引数)
+        assert_eq!(read.args[2].ty, "size_t");
+
+        // 検証: STDCHAR * → char *
+        let svpvx = dict.get("SvPVX").unwrap();
+        assert_eq!(svpvx.return_type, Some("char *".to_string()));
+    }
+
+    #[test]
+    fn test_expand_type_string_preserves_non_macros() {
+        use crate::macro_def::MacroDef;
+        use crate::source::SourceLocation;
+        use crate::token::{Token, TokenKind};
+
+        let mut interner = crate::intern::StringInterner::new();
+        let mut macro_table = MacroTable::new();
+        let loc = SourceLocation::default();
+
+        // Off_t → off_t のみ定義
+        let off_t_name = interner.intern("Off_t");
+        let off_t_body = vec![Token::new(TokenKind::Ident(interner.intern("off_t")), loc.clone())];
+        macro_table.define(MacroDef::object(off_t_name, off_t_body, loc), &interner);
+
+        // SV * はマクロではないのでそのまま
+        let result = super::expand_type_string("SV *", &macro_table, &interner);
+        assert_eq!(result, "SV *");
+
+        // const char * もそのまま
+        let result = super::expand_type_string("const char *", &macro_table, &interner);
+        assert_eq!(result, "const char *");
+
+        // Off_t * は展開される
+        let result = super::expand_type_string("Off_t *", &macro_table, &interner);
+        assert_eq!(result, "off_t *");
+
+        // const Off_t * は展開される
+        let result = super::expand_type_string("const Off_t *", &macro_table, &interner);
+        assert_eq!(result, "const off_t *");
     }
 }
