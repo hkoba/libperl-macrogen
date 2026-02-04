@@ -17,6 +17,7 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "OP_CLASS",
     "CvSTASH",
     "CopFILE",
+    "CopFILEAV",
     "PerlIO_seek",
     "PerlIO_tell",
     "AMG_CALLunary",
