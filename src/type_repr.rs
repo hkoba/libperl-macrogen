@@ -52,6 +52,8 @@ pub enum CTypeSource {
     InlineFn { func_name: InternedStr },
     /// parser.rs の parse_type_from_string を使用して解析
     Parser,
+    /// フィールドアクセスからの逆推論
+    FieldInference { field_name: InternedStr },
 }
 
 // ============================================================================
@@ -668,6 +670,7 @@ impl TypeRepr {
                 CTypeSource::Apidoc { .. } => "apidoc",
                 CTypeSource::InlineFn { .. } => "inline-fn",
                 CTypeSource::Parser => "parser",
+                CTypeSource::FieldInference { .. } => "field-inference",
             },
             TypeRepr::RustType { .. } => "rust-bindings",
             TypeRepr::Inferred(_) => "inferred",

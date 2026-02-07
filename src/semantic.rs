@@ -1388,6 +1388,31 @@ impl<'a> SemanticAnalyzer<'a> {
                 let base_ty = self.get_expr_type_str(base.id, type_env);
                 let member_name = self.interner.get(*member);
 
+                // === ベース型の逆推論 ===
+                // フィールド名から一意に構造体を特定できる場合、ベース型を推論
+                if let Some(fields_dict) = self.fields_dict {
+                    // ベース型がまだ不明（unknown または Ident）の場合のみ逆推論を試みる
+                    if base_ty == "/* unknown */" || self.is_ident_expr(base) {
+                        if let Some(struct_name) = fields_dict.lookup_unique(*member) {
+                            let struct_name_str = self.interner.get(struct_name);
+                            let base_type = TypeRepr::CType {
+                                specs: CTypeSpecs::TypedefName(struct_name),
+                                derived: vec![CDerivedType::Pointer {
+                                    is_const: false,
+                                    is_volatile: false,
+                                    is_restrict: false,
+                                }],
+                                source: CTypeSource::FieldInference { field_name: *member },
+                            };
+                            type_env.add_constraint(TypeEnvConstraint::new(
+                                base.id,
+                                base_type,
+                                format!("field {} implies {}*", member_name, struct_name_str),
+                            ));
+                        }
+                    }
+                }
+
                 // フィールド型を TypeRepr として直接取得（文字列変換を介さない）
                 let (field_type, used_consistent_type) = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
                     // ベース型が既知の場合：構造体名でルックアップ
@@ -1685,6 +1710,13 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             false
         }
+    }
+
+    /// 式が単純な識別子かどうかを判定
+    ///
+    /// マクロパラメータのように、まだ型が決まっていない識別子の場合に true を返す。
+    fn is_ident_expr(&self, expr: &Expr) -> bool {
+        matches!(expr.kind, ExprKind::Ident(_))
     }
 
     /// sv_u ユニオンフィールドの型を取得

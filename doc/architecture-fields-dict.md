@@ -254,6 +254,37 @@ pub fn lookup_unique(&self, field_name: InternedStr) -> Option<InternedStr> {
 }
 ```
 
+#### Perl API における lookup_unique の限界
+
+調査の結果、`lookup_unique` による**ベース型の逆推論**は Perl API マクロではあまり有効でない
+可能性がある。理由:
+
+1. **一意なフィールドはキャストパターンで使用される**
+
+   ```c
+   // xav_fill は xpvav に一意だが、キャスト経由でアクセス
+   #define AvFILLp(av)  ((XPVAV*)SvANY(av))->xav_fill
+   ```
+
+   パラメータ `av` に直接 `->xav_fill` でアクセスしていないため、逆推論が適用されない。
+
+2. **直接アクセスパターンは共通フィールドを使用**
+
+   ```c
+   // sv_flags は複数の SV ファミリー構造体に存在
+   #define SvFLAGS(sv)  (sv)->sv_flags
+   ```
+
+   `sv_flags` は `sv`, `av`, `hv`, `cv` 等に存在するため、`lookup_unique` では特定できない。
+
+3. **一意フィールドへの直接アクセスを持つマクロは apidoc がある**
+
+   そもそも apidoc がある場合は、そちらから型情報を取得できるため `lookup_unique` は不要。
+
+**結論**: `lookup_unique` はフィールド型の取得には有効だが、Perl API においては
+パラメータ型の逆推論にはほとんど寄与しない。SV ファミリーの共通フィールドからベース型を
+推論するには、別のアプローチ（`get_consistent_base_type` 等）が必要。
+
 ### get_consistent_field_type
 
 フィールドが全構造体で同じ型を持つ場合、その型を返す（O(1)）:
