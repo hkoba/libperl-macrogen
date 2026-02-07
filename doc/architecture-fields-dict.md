@@ -283,7 +283,52 @@ pub fn lookup_unique(&self, field_name: InternedStr) -> Option<InternedStr> {
 
 **結論**: `lookup_unique` はフィールド型の取得には有効だが、Perl API においては
 パラメータ型の逆推論にはほとんど寄与しない。SV ファミリーの共通フィールドからベース型を
-推論するには、別のアプローチ（`get_consistent_base_type` 等）が必要。
+推論するには、`get_consistent_base_type` が必要。
+
+### get_consistent_base_type
+
+フィールドを持つ構造体群の共通親型を取得:
+
+```rust
+pub fn get_consistent_base_type(&self, field_name: InternedStr, interner: &StringInterner) -> Option<InternedStr> {
+    let structs = self.field_to_structs.get(&field_name)?;
+    if structs.is_empty() {
+        return None;
+    }
+    // 全ての構造体が SV ファミリーメンバーかチェック
+    let all_sv_family = structs.iter().all(|s| self.sv_family_members.contains(s));
+    if all_sv_family {
+        interner.lookup("sv")
+    } else {
+        None
+    }
+}
+```
+
+このメソッドは `lookup_unique` が失敗した場合のフォールバックとして使用される。
+`sv_flags` のように複数の SV ファミリー構造体に存在するフィールドの場合、
+共通の親型 `SV` を返す。
+
+**使用例**:
+- `SvFLAGS(sv)` → `sv->sv_flags` で `sv_flags` を検出 → `*mut SV` を推論
+
+### get_typedef_for_struct
+
+構造体名から typedef 名への逆引き:
+
+```rust
+pub fn get_typedef_for_struct(&self, struct_name: InternedStr) -> Option<InternedStr> {
+    for (typedef_name, s_name) in &self.typedef_to_struct {
+        if *s_name == struct_name {
+            return Some(*typedef_name);
+        }
+    }
+    None
+}
+```
+
+フィールド推論で得られた構造体名（例: `sv`）を typedef 名（例: `SV`）に変換する。
+これにより、生成される Rust コードが既存の型定義と一貫性を持つ。
 
 ### get_consistent_field_type
 

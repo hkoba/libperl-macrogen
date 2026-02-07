@@ -1389,14 +1389,22 @@ impl<'a> SemanticAnalyzer<'a> {
                 let member_name = self.interner.get(*member);
 
                 // === ベース型の逆推論 ===
-                // フィールド名から一意に構造体を特定できる場合、ベース型を推論
+                // フィールド名から構造体を特定できる場合、ベース型を推論
                 if let Some(fields_dict) = self.fields_dict {
                     // ベース型がまだ不明（unknown または Ident）の場合のみ逆推論を試みる
                     if base_ty == "/* unknown */" || self.is_ident_expr(base) {
-                        if let Some(struct_name) = fields_dict.lookup_unique(*member) {
-                            let struct_name_str = self.interner.get(struct_name);
+                        // 1. まず一意なフィールドを試す (Phase 1)
+                        // 2. 次に SV ファミリー共通フィールドを試す (Phase 2)
+                        let inferred_struct = fields_dict.lookup_unique(*member)
+                            .or_else(|| fields_dict.get_consistent_base_type(*member, self.interner));
+
+                        if let Some(struct_name) = inferred_struct {
+                            // typedef 名があれば使用（例: sv → SV）
+                            let type_name = fields_dict.get_typedef_for_struct(struct_name)
+                                .unwrap_or(struct_name);
+                            let type_name_str = self.interner.get(type_name);
                             let base_type = TypeRepr::CType {
-                                specs: CTypeSpecs::TypedefName(struct_name),
+                                specs: CTypeSpecs::TypedefName(type_name),
                                 derived: vec![CDerivedType::Pointer {
                                     is_const: false,
                                     is_volatile: false,
@@ -1407,7 +1415,7 @@ impl<'a> SemanticAnalyzer<'a> {
                             type_env.add_constraint(TypeEnvConstraint::new(
                                 base.id,
                                 base_type,
-                                format!("field {} implies {}*", member_name, struct_name_str),
+                                format!("field {} implies {}*", member_name, type_name_str),
                             ));
                         }
                     }

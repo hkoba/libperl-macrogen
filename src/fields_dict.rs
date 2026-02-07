@@ -271,6 +271,37 @@ impl FieldsDict {
         })
     }
 
+    /// フィールドを持つ構造体群の共通親型を取得
+    ///
+    /// 複数の構造体がフィールドを持つ場合、それらの共通の親型を返す。
+    /// 現在は SV ファミリーのみ対応:
+    /// - フィールドを持つ全構造体が SV ファミリーメンバーの場合、"sv" を返す
+    /// - それ以外の場合は None
+    ///
+    /// # 例
+    ///
+    /// `sv_flags` は `sv`, `av`, `hv`, `cv` 等に存在 → 共通親型は "sv"
+    pub fn get_consistent_base_type(&self, field_name: InternedStr, interner: &StringInterner) -> Option<InternedStr> {
+        let structs = self.field_to_structs.get(&field_name)?;
+
+        // フィールドを持つ構造体がない場合は None
+        if structs.is_empty() {
+            return None;
+        }
+
+        // 全ての構造体が SV ファミリーメンバーかチェック
+        let all_sv_family = structs.iter().all(|s| self.sv_family_members.contains(s));
+
+        if all_sv_family {
+            // "sv" を intern して返す
+            // Note: interner.lookup は既存の文字列のみ返すので、
+            // "sv" が未登録の場合は None になる可能性がある
+            interner.lookup("sv")
+        } else {
+            None
+        }
+    }
+
     /// フィールド名から一意にフィールド型を特定（構造体が1つしかない場合）
     pub fn get_unique_field_type(&self, field_name: InternedStr) -> Option<&FieldType> {
         let struct_name = self.lookup_unique(field_name)?;
@@ -316,6 +347,19 @@ impl FieldsDict {
         for (typedef_name, struct_name) in &self.typedef_to_struct {
             if interner.get(*typedef_name) == typedef_name_str {
                 return Some(*struct_name);
+            }
+        }
+        None
+    }
+
+    /// 構造体名から typedef 名を取得（逆引き）
+    ///
+    /// 同じ構造体に複数の typedef がある場合は最初に見つかったものを返す。
+    /// typedef が登録されていない場合は None。
+    pub fn get_typedef_for_struct(&self, struct_name: InternedStr) -> Option<InternedStr> {
+        for (typedef_name, s_name) in &self.typedef_to_struct {
+            if *s_name == struct_name {
+                return Some(*typedef_name);
             }
         }
         None
