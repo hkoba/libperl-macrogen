@@ -81,11 +81,11 @@ SV 構造体の `sv_u` ユニオンのフィールド型。
 // sv_u.svu_pv → char*
 #define SvPVX(sv)  ((sv)->sv_u.svu_pv)
 
-// sv_u.svu_hash → HE**
-#define SvHASH(sv) ((sv)->sv_u.svu_hash)
+// sv_u.svu_rv → SV*
+#define SvRV(sv)   ((sv)->sv_u.svu_rv)
 
-// sv_u.svu_rx → REGEXP*
-#define SvRX(sv)   ((sv)->sv_u.svu_rx)
+// sv_u.svu_fp → PerlIO* (IO 構造体)
+#define IoIFP(sv)  (sv)->sv_u.svu_fp
 ```
 
 ### 5. SvANY キャストパターン (`sv_head_type_to_struct`)
@@ -108,14 +108,37 @@ SV 構造体の `sv_u` ユニオンのフィールド型。
 | `lookup_unique` | 一意フィールドへのアクセス | `AvARRAY`, `HvKEYS` |
 | `get_consistent_field_type` | 共通フィールドへのアクセス | `SvCUR`, `SvLEN`, `SvFLAGS` |
 | `get_field_type_by_name` | キャスト付きアクセス | `CvSTASH`, `CvROOT` |
-| `sv_u_field_types` | sv_u ユニオンアクセス | `SvPVX`, `SvHASH` |
+| `sv_u_field_types` | sv_u ユニオンアクセス | `SvPVX`, `SvRV`, `IoIFP` |
 | `sv_head_type_to_struct` | SvANY キャスト | `(XPVAV*)SvANY(av)` |
 
 ## 検証フェーズ
 
 ### Phase 1: 現状確認
 
-- [ ] 上記マクロの現在の型推論結果を確認
+各機能について、対象マクロの Rust コード生成結果を確認する。
+
+#### 1.1 lookup_unique の検証
+- [ ] `HvKEYS` の Rust 関数生成結果を確認
+- [ ] パラメータ `hv` の型が `*mut HV` になっているか
+
+#### 1.2 get_consistent_field_type の検証
+- [ ] `SvCUR` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `STRLEN` になっているか
+
+#### 1.3 get_field_type_by_name の検証
+- [ ] `CvSTASH` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `*mut HV` になっているか
+
+#### 1.4 sv_u_field_types の検証
+- [ ] `SvRV` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `*mut SV` になっているか
+- [ ] `IoIFP` の Rust 関数生成結果を確認
+
+#### 1.5 sv_head_type_to_struct の検証
+- [ ] `AvARRAY` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `*mut *mut SV` になっているか
+
+#### 1.6 内部動作の確認
 - [ ] `--debug-type-inference` で制約収集過程を調査
 - [ ] `fields_dict` の各機能が実際に呼ばれているか確認
 
