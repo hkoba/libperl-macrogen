@@ -124,10 +124,14 @@ SV 構造体の `sv_u` ユニオンのフィールド型。
 #### 1.2 get_consistent_field_type の検証
 - [ ] `SvCUR` の Rust 関数生成結果を確認
 - [ ] 戻り値型が `STRLEN` になっているか
+- [ ] `SvFLAGS` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `U32` になっているか
 
 #### 1.3 get_field_type_by_name の検証
 - [ ] `CvSTASH` の Rust 関数生成結果を確認
 - [ ] 戻り値型が `*mut HV` になっているか
+- [ ] `CvROOT` の Rust 関数生成結果を確認
+- [ ] 戻り値型が `*mut OP` になっているか
 
 #### 1.4 sv_u_field_types の検証
 - [ ] `SvRV` の Rust 関数生成結果を確認
