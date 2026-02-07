@@ -645,6 +645,15 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         return_types_cache: &HashMap<String, String>,
     ) {
+        let macro_name_str = interner.get(name);
+        let debug_targets = ["CopLABEL", "HvFILL"];
+        let is_debug_target = debug_targets.contains(&macro_name_str);
+
+        if is_debug_target {
+            eprintln!("\n[DEBUG infer_macro_types] macro={}", macro_name_str);
+            eprintln!("  params: {:?}", params.iter().map(|p| interner.get(*p)).collect::<Vec<_>>());
+        }
+
         let info = match self.macros.get_mut(&name) {
             Some(info) => info,
             None => return,
@@ -678,6 +687,25 @@ impl MacroInferContext {
 
             // 全式の型制約を収集
             analyzer.collect_expr_constraints(expr, &mut info.type_env);
+
+            if is_debug_target {
+                eprintln!("  [type_env after collect_expr_constraints]");
+                for (expr_id, constraints) in &info.type_env.expr_constraints {
+                    for c in constraints {
+                        eprintln!("    expr_id={:?}: {} ({})", expr_id, c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_constraints]");
+                for (param_id, constraints) in &info.type_env.param_constraints {
+                    for c in constraints {
+                        eprintln!("    param_id={:?}: {} ({})", param_id, c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_to_exprs]");
+                for (param, expr_ids) in &info.type_env.param_to_exprs {
+                    eprintln!("    param={}: {:?}", interner.get(*param), expr_ids);
+                }
+            }
 
             // マクロ自体の戻り値型を制約として追加
             if let Some(apidoc_dict) = apidoc {

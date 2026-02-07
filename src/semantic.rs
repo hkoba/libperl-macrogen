@@ -986,11 +986,25 @@ impl<'a> SemanticAnalyzer<'a> {
 
         // apidoc からマクロ情報を取得
         let macro_name_str = self.interner.get(macro_name);
+        let debug_targets = ["CopLABEL", "HvFILL"];
+        let is_debug_target = debug_targets.contains(&macro_name_str);
+
+        if is_debug_target {
+            eprintln!("[DEBUG register_macro_params_from_apidoc] macro={}", macro_name_str);
+            eprintln!("  apidoc available: {}", self.apidoc.is_some());
+        }
+
         if let Some(apidoc) = self.apidoc {
             if let Some(entry) = apidoc.get(macro_name_str) {
+                if is_debug_target {
+                    eprintln!("  apidoc entry found, args: {:?}", entry.args);
+                }
                 // パラメータをシンボルとして登録
                 for (i, &param_name) in params.iter().enumerate() {
                     if let Some(apidoc_arg) = entry.args.get(i) {
+                        if is_debug_target {
+                            eprintln!("    param[{}] {}: apidoc_ty={}", i, self.interner.get(param_name), apidoc_arg.ty);
+                        }
                         // parser で型文字列をパース
                         match parse_type_from_string(
                             &apidoc_arg.ty,
@@ -1000,6 +1014,9 @@ impl<'a> SemanticAnalyzer<'a> {
                         ) {
                             Ok(type_name) => {
                                 let ty = self.resolve_type_name(&type_name);
+                                if is_debug_target {
+                                    eprintln!("      parsed and registered: {:?}", ty.display(self.interner));
+                                }
                                 self.define_symbol(Symbol {
                                     name: param_name,
                                     ty,
@@ -1007,10 +1024,18 @@ impl<'a> SemanticAnalyzer<'a> {
                                     kind: SymbolKind::Variable,
                                 });
                             }
-                            Err(_) => {}
+                            Err(e) => {
+                                if is_debug_target {
+                                    eprintln!("      parse error: {:?}", e);
+                                }
+                            }
                         }
+                    } else if is_debug_target {
+                        eprintln!("    param[{}] {}: no apidoc_arg", i, self.interner.get(param_name));
                     }
                 }
+            } else if is_debug_target {
+                eprintln!("  apidoc entry NOT found");
             }
         }
     }
@@ -1186,12 +1211,22 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::Ident(name) => {
                 let name_str = self.interner.get(*name);
 
+                // デバッグ: 特定のパラメータを追跡
+                let debug_params = ["c", "hv"];
+                let is_debug_param = debug_params.contains(&name_str);
+
                 // シンボルテーブルから型を取得
                 if let Some(sym) = self.lookup_symbol(*name) {
                     let ty_str = sym.ty.display(self.interner);
+                    if is_debug_param {
+                        eprintln!("[DEBUG Ident] name={}, sym.ty.display={}", name_str, ty_str);
+                    }
                     // シンボル参照を示す TypeRepr を作成
                     // resolved_type は文字列からパースした C 型
                     let resolved = TypeRepr::from_apidoc_string(&ty_str, self.interner);
+                    if is_debug_param {
+                        eprintln!("  resolved TypeRepr: {:?}", resolved);
+                    }
                     type_env.add_constraint(TypeEnvConstraint::new(
                         expr.id,
                         TypeRepr::Inferred(InferredType::SymbolLookup {
@@ -1691,11 +1726,36 @@ impl<'a> SemanticAnalyzer<'a> {
 
         let func_name_str = self.interner.get(func_name);
 
+        // デバッグ: 特定の関数呼び出しを追跡
+        let debug_targets = ["Perl_cop_fetch_label", "Perl_hv_fill"];
+        let is_debug_target = debug_targets.contains(&func_name_str);
+
+        if is_debug_target {
+            eprintln!("[DEBUG collect_call_constraints] func={}", func_name_str);
+            for (i, arg) in args.iter().enumerate() {
+                let arg_desc = match &arg.kind {
+                    ExprKind::Ident(name) => {
+                        let name_str = self.interner.get(*name);
+                        let is_param = self.is_macro_param(*name);
+                        format!("Ident({}) [is_macro_param={}]", name_str, is_param)
+                    }
+                    _ => format!("{:?}", arg.kind),
+                };
+                eprintln!("  arg[{}] expr_id={:?}: {}", i, arg.id, arg_desc);
+            }
+        }
+
         // RustDeclDict から引数の型を取得
         if let Some(rust_decl_dict) = self.rust_decl_dict {
             if let Some(rust_fn) = rust_decl_dict.fns.get(func_name_str) {
+                if is_debug_target {
+                    eprintln!("  [RustDeclDict] found {} params", rust_fn.params.len());
+                }
                 for (i, arg) in args.iter().enumerate() {
                     if let Some(param) = rust_fn.params.get(i) {
+                        if is_debug_target {
+                            eprintln!("    param[{}]: {} -> expr_id={:?}", i, param.ty, arg.id);
+                        }
                         let constraint = TypeEnvConstraint::new(
                             arg.id,
                             TypeRepr::RustType {
