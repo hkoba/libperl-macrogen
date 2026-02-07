@@ -24,6 +24,7 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "PerlIO_tell",
     "AMG_CALLunary",
     "newSVpvs",
+    "sv_upgrade",
 ];
 
 /// 生成された Rust コードから特定の関数を抽出する
