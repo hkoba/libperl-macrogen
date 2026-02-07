@@ -122,6 +122,23 @@ pub struct RustCodegen<'a> {
 | `expr_to_rust()` | 式を Rust コードに変換 |
 | `stmt_to_rust()` | 文を Rust コードに変換 |
 | `type_repr_to_rust()` | TypeRepr を Rust 型文字列に変換 |
+| `get_param_type()` | パラメータの型を制約から取得 |
+
+#### パラメータ型の解決
+
+`get_param_type()` は `param_to_exprs` 逆引き辞書を使用して、パラメータを参照する
+式の型制約から型を取得する。複数の制約がある場合、**void 型はスキップ**して
+より具体的な型を優先する。
+
+```rust
+// 例: CopLABEL(c) の場合
+// c に対する制約:
+//   - void (symbol lookup)        ← スキップ
+//   - *mut COP (arg 1 of func())  ← 採用
+```
+
+これにより、シンボルルックアップ時に型が不明だった場合でも、後から関数引数として
+使用された際の制約から正しい型を推論できる。
 
 #### 不完全マーカー
 

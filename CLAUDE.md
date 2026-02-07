@@ -54,6 +54,22 @@ When making changes to `src/macrogen.rs` (especially `generate()` function):
 - Update `doc/macrogen-flow.md` to reflect the changes
 - Keep the processing flow description in sync with the actual code
 
+### Architecture Documentation Updates
+
+**IMPORTANT**: After completing any significant implementation task:
+
+1. **Check if architecture docs need updates**: Review `doc/architecture*.md` files to see if the changes affect documented structures or flows
+2. **Update affected documentation**: If the task modified:
+   - Struct fields or enum variants → Update the corresponding architecture doc
+   - Processing flows or algorithms → Update flow diagrams or descriptions
+   - New methods or APIs → Add to the relevant method tables
+3. **Key architecture files**:
+   - `doc/architecture-semantic-type-inference.md` - Type inference, SemanticAnalyzer, TypeRepr
+   - `doc/architecture-rust-codegen.md` - Code generation, RustCodegen, CodegenDriver
+   - `doc/architecture-macro-expansion-control.md` - Macro expansion rules
+   - `doc/architecture-inline-function-processing.md` - Inline function handling
+   - `doc/architecture-thx-dependency.md` - THX (my_perl) dependency detection
+
 ### Test Files Location
 
 Temporary test files should be placed in `./tmp/` directory, not `/tmp`.

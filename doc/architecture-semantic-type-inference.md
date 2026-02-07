@@ -126,8 +126,13 @@ pub struct SemanticAnalyzer<'a> {
     inline_fn_dict: Option<&'a InlineFnDict>, // インライン関数
     macro_params: HashSet<InternedStr>, // マクロパラメータ
     macro_return_types: Option<&'a HashMap<String, String>>, // 確定済みマクロの戻り値型
+    files: Option<&'a FileRegistry>,        // 型文字列パース用
+    parser_typedefs: Option<&'a HashSet<InternedStr>>, // 型文字列パース用
 }
 ```
+
+`files` と `parser_typedefs` は `register_macro_params_from_apidoc()` で設定され、
+`parse_type_string()` ヘルパーメソッドで完全な C パーサーによる型文字列解析に使用される。
 
 #### 主要機能
 
@@ -223,6 +228,18 @@ pub enum TypeRepr {
 }
 ```
 
+#### 主要メソッド
+
+| メソッド | 役割 |
+|----------|------|
+| `from_apidoc_string()` | 簡易パーサーで型文字列を解析（フォールバック用） |
+| `from_c_type_string()` | 完全な C パーサー（parser.rs）で型文字列を解析 |
+| `from_type_name()` | パーサー出力の TypeName から TypeRepr を作成 |
+| `is_void()` | void 型かどうかを判定（ポインタなしの純粋な void のみ true） |
+
+`from_c_type_string()` は `"COP* const"` のような複雑なパターンも正しく解析できる。
+`from_apidoc_string()` は簡易パーサーを使用するため、一部のパターンで失敗する可能性がある。
+
 #### 出所情報
 
 ```rust
@@ -230,6 +247,7 @@ pub enum CTypeSource {
     Header,                          // C ヘッダー
     Apidoc { raw: String },          // embed.fnc
     InlineFn { func_name: InternedStr }, // インライン関数
+    Parser,                          // parser.rs の parse_type_from_string を使用
 }
 
 pub enum RustTypeSource {
