@@ -189,6 +189,56 @@ impl MacroTable {
     pub fn user_defined(&self) -> impl Iterator<Item = (&InternedStr, &MacroDef)> {
         self.macros.iter().filter(|(_, def)| !def.is_builtin)
     }
+
+    /// 特定のマクロを検索してダンプ（デバッグ用）
+    ///
+    /// `filter` に含まれる文字列を名前に持つマクロを表示。
+    /// `filter` が空の場合は全マクロを表示。
+    pub fn dump_filtered(&self, filter: &str, interner: &crate::intern::StringInterner) {
+        let mut names: Vec<_> = self.macros.keys().collect();
+        names.sort_by_key(|id| interner.get(**id));
+
+        for &name in &names {
+            let name_str = interner.get(*name);
+            if !filter.is_empty() && !name_str.contains(filter) {
+                continue;
+            }
+
+            if let Some(def) = self.macros.get(name) {
+                let kind_str = match &def.kind {
+                    MacroKind::Object => "object".to_string(),
+                    MacroKind::Function { params, is_variadic } => {
+                        let params_str: Vec<_> = params.iter()
+                            .map(|p| interner.get(*p).to_string())
+                            .collect();
+                        if *is_variadic {
+                            format!("function({}...)", params_str.join(", "))
+                        } else {
+                            format!("function({})", params_str.join(", "))
+                        }
+                    }
+                };
+
+                let body_str: String = def.body.iter()
+                    .map(|t| t.kind.format(interner))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                let flags = format!(
+                    "{}{}",
+                    if def.is_target { "T" } else { "" },
+                    if def.is_builtin { "B" } else { "" },
+                );
+
+                println!("#define {} [{}] {} = {}",
+                    name_str,
+                    kind_str,
+                    if flags.is_empty() { "".to_string() } else { format!("({})", flags) },
+                    body_str
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -69,6 +69,11 @@ struct Cli {
     #[arg(long = "dump-fields-dict")]
     dump_fields_dict: bool,
 
+    /// マクロ定義をダンプ（gcc -E -dM 相当）
+    /// フィルタ文字列を指定可能（省略時は全マクロ）
+    #[arg(long = "dump-macros", value_name = "FILTER")]
+    dump_macros: Option<Option<String>>,
+
     /// ApidocファイルをJSONに変換して出力（入力ファイルはapidoc）
     #[arg(long = "apidoc-to-json")]
     apidoc_to_json: bool,
@@ -240,6 +245,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli.dump_fields_dict {
         // --dump-fields-dict: 構造体フィールド辞書をダンプ
         run_dump_fields_dict(preprocessed.preprocessor_mut(), cli.target_dir.as_ref())?;
+    } else if let Some(ref filter_opt) = cli.dump_macros {
+        // --dump-macros: マクロ定義をダンプ
+        // まず全トークンを消費してマクロ定義を収集
+        let filter = filter_opt.as_deref().unwrap_or("");
+        let pp = preprocessed.preprocessor_mut();
+        loop {
+            match pp.next_token() {
+                Ok(token) if matches!(token.kind, libperl_macrogen::TokenKind::Eof) => break,
+                Ok(_) => continue,
+                Err(e) => return Err(format_error(&e, pp).into()),
+            }
+        }
+        pp.macros().dump_filtered(filter, pp.interner());
     } else if cli.sexp {
         // --sexp: S-expression出力（マクロ型推論なし）
         let pp = preprocessed.preprocessor_mut();
