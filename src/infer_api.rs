@@ -142,6 +142,8 @@ pub struct DebugOptions {
     /// apidoc マージ後にダンプして終了
     /// Some(filter) でフィルタ指定（正規表現）、Some("") で全件出力
     pub dump_apidoc_after_merge: Option<String>,
+    /// 型推論デバッグ対象のマクロ名リスト
+    pub debug_type_inference: Vec<String>,
 }
 
 impl DebugOptions {
@@ -366,6 +368,13 @@ pub fn run_inference_with_preprocessor(
 
     // MacroInferContext を作成して解析
     let mut infer_ctx = MacroInferContext::new();
+
+    // デバッグ対象マクロを設定
+    if let Some(opts) = debug_opts {
+        if !opts.debug_type_inference.is_empty() {
+            infer_ctx.set_debug_macros(opts.debug_type_inference.iter().cloned());
+        }
+    }
 
     // THX シンボルを事前に intern
     let sym_athx = pp.interner_mut().intern("aTHX");

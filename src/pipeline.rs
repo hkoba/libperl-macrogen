@@ -170,6 +170,8 @@ pub struct InferConfig {
     pub apidoc_dir: Option<PathBuf>,
     /// apidoc マージ後にダンプして終了
     pub dump_apidoc_after_merge: Option<String>,
+    /// 型推論デバッグ対象のマクロ名リスト
+    pub debug_type_inference: Vec<String>,
 }
 
 impl InferConfig {
@@ -321,6 +323,12 @@ impl PipelineBuilder {
     /// apidoc マージ後にダンプして終了（デバッグ用）
     pub fn with_dump_apidoc(mut self, filter: impl Into<String>) -> Self {
         self.infer.dump_apidoc_after_merge = Some(filter.into());
+        self
+    }
+
+    /// 型推論デバッグ対象のマクロを指定
+    pub fn with_debug_type_inference(mut self, macros: Vec<String>) -> Self {
+        self.infer.debug_type_inference = macros;
         self
     }
 
@@ -507,9 +515,12 @@ impl PreprocessedPipeline {
         ).map_err(|e| PipelineError::Infer(InferError::ApidocResolve(e)))?;
 
         // デバッグオプションを構築
-        let debug_opts = if self.infer_config.dump_apidoc_after_merge.is_some() {
+        let has_debug_opts = self.infer_config.dump_apidoc_after_merge.is_some()
+            || !self.infer_config.debug_type_inference.is_empty();
+        let debug_opts = if has_debug_opts {
             Some(DebugOptions {
                 dump_apidoc_after_merge: self.infer_config.dump_apidoc_after_merge.clone(),
+                debug_type_inference: self.infer_config.debug_type_inference.clone(),
             })
         } else {
             None

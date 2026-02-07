@@ -365,6 +365,10 @@ pub struct SemanticAnalyzer<'a> {
     macro_params: HashSet<InternedStr>,
     /// 確定済みマクロの戻り値型（マクロ名 -> 戻り値型）への参照
     macro_return_types: Option<&'a HashMap<String, String>>,
+    /// ファイルレジストリ（型文字列パース用）
+    files: Option<&'a FileRegistry>,
+    /// typedef 名の集合（型文字列パース用）
+    parser_typedefs: Option<&'a HashSet<InternedStr>>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -403,6 +407,8 @@ impl<'a> SemanticAnalyzer<'a> {
             constraint_mode: false,
             macro_params: HashSet::new(),
             macro_return_types: None,
+            files: None,
+            parser_typedefs: None,
         }
     }
 
@@ -975,9 +981,13 @@ impl<'a> SemanticAnalyzer<'a> {
         &mut self,
         macro_name: InternedStr,
         params: &[InternedStr],
-        files: &FileRegistry,
-        typedefs: &HashSet<InternedStr>,
+        files: &'a FileRegistry,
+        typedefs: &'a HashSet<InternedStr>,
     ) {
+        // files と typedefs を保存（後で型パース時に使用）
+        self.files = Some(files);
+        self.parser_typedefs = Some(typedefs);
+
         // macro_params に名前を登録（既存の動作を維持）
         self.macro_params.clear();
         for &param in params {
@@ -1012,6 +1022,18 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// C 型文字列から TypeRepr を作成
+    ///
+    /// `files` と `parser_typedefs` が設定されている場合は完全な C パーサーを使用。
+    /// 設定されていない場合は簡易パーサーにフォールバック。
+    fn parse_type_string(&self, s: &str) -> TypeRepr {
+        if let (Some(files), Some(typedefs)) = (self.files, self.parser_typedefs) {
+            TypeRepr::from_c_type_string(s, self.interner, files, typedefs)
+        } else {
+            TypeRepr::from_apidoc_string(s, self.interner)
         }
     }
 
@@ -1736,7 +1758,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     if let Some(apidoc_arg) = entry.args.get(i) {
                         let constraint = TypeEnvConstraint::new(
                             arg.id,
-                            TypeRepr::from_apidoc_string(&apidoc_arg.ty, self.interner),
+                            self.parse_type_string(&apidoc_arg.ty),
                             format!("arg {} ({}) of {}()", i, apidoc_arg.name, func_name_str),
                         );
                         type_env.add_constraint(constraint);
@@ -1747,7 +1769,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(ref return_type) = entry.return_type {
                     let return_constraint = TypeEnvConstraint::new(
                         call_expr_id,
-                        TypeRepr::from_apidoc_string(return_type, self.interner),
+                        self.parse_type_string(return_type),
                         format!("return type of {}()", func_name_str),
                     );
                     type_env.add_constraint(return_constraint);

@@ -370,6 +370,9 @@ pub struct MacroInferContext {
 
     /// 型推論不能マクロ
     pub unknown: HashSet<InternedStr>,
+
+    /// デバッグ対象マクロ名（文字列）
+    pub debug_macros: HashSet<String>,
 }
 
 impl MacroInferContext {
@@ -380,7 +383,18 @@ impl MacroInferContext {
             confirmed: HashSet::new(),
             unconfirmed: HashSet::new(),
             unknown: HashSet::new(),
+            debug_macros: HashSet::new(),
         }
+    }
+
+    /// デバッグ対象マクロを設定
+    pub fn set_debug_macros(&mut self, macros: impl IntoIterator<Item = String>) {
+        self.debug_macros = macros.into_iter().collect();
+    }
+
+    /// マクロがデバッグ対象かどうか
+    pub fn is_debug_target(&self, name: &str) -> bool {
+        self.debug_macros.contains(name)
     }
 
     /// マクロ情報を登録
@@ -637,14 +651,22 @@ impl MacroInferContext {
         name: InternedStr,
         params: &[InternedStr],
         interner: &'a StringInterner,
-        files: &FileRegistry,
+        files: &'a FileRegistry,
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
         inline_fn_dict: Option<&'a InlineFnDict>,
-        typedefs: &HashSet<InternedStr>,
+        typedefs: &'a HashSet<InternedStr>,
         return_types_cache: &HashMap<String, String>,
     ) {
+        let macro_name_str = interner.get(name);
+        let is_debug = self.is_debug_target(macro_name_str);
+
+        if is_debug {
+            eprintln!("\n[DEBUG infer_macro_types] macro={}", macro_name_str);
+            eprintln!("  params: {:?}", params.iter().map(|p| interner.get(*p)).collect::<Vec<_>>());
+        }
+
         let info = match self.macros.get_mut(&name) {
             Some(info) => info,
             None => return,
@@ -669,12 +691,32 @@ impl MacroInferContext {
             // 全式の型制約を収集
             analyzer.collect_expr_constraints(expr, &mut info.type_env);
 
+            // デバッグ出力: 型制約の内容
+            if is_debug {
+                eprintln!("  [type_env after collect_expr_constraints]");
+                for (expr_id, constraints) in &info.type_env.expr_constraints {
+                    for c in constraints {
+                        eprintln!("    expr_id={:?}: {} ({})", expr_id, c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_constraints]");
+                for (param_id, constraints) in &info.type_env.param_constraints {
+                    for c in constraints {
+                        eprintln!("    param={}: {} ({})", interner.get(*param_id), c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_to_exprs]");
+                for (param, expr_ids) in &info.type_env.param_to_exprs {
+                    eprintln!("    param={}: {:?}", interner.get(*param), expr_ids);
+                }
+            }
+
             // マクロ自体の戻り値型を制約として追加
             if let Some(apidoc_dict) = apidoc {
                 let macro_name_str = interner.get(name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        let type_repr = TypeRepr::from_apidoc_string(return_type, interner);
+                        let type_repr = TypeRepr::from_c_type_string(return_type, interner, files, typedefs);
                         info.type_env.add_return_constraint(TypeConstraint::new(
                             expr.id,
                             type_repr,

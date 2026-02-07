@@ -479,11 +479,15 @@ impl<'a> RustCodegen<'a> {
         let param_name = param.name;
 
         // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
+        // void 以外の型を優先的に選択する
         if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param_name) {
             for expr_id in expr_ids {
                 if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    if let Some(first) = constraints.first() {
-                        return self.type_repr_to_rust(&first.ty);
+                    // void 以外の型を探す
+                    for c in constraints {
+                        if !c.ty.is_void() {
+                            return self.type_repr_to_rust(&c.ty);
+                        }
                     }
                 }
             }

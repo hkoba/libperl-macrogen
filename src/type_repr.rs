@@ -50,6 +50,8 @@ pub enum CTypeSource {
     Apidoc { raw: String },
     /// inline 関数の AST
     InlineFn { func_name: InternedStr },
+    /// parser.rs の parse_type_from_string を使用して解析
+    Parser,
 }
 
 // ============================================================================
@@ -665,9 +667,34 @@ impl TypeRepr {
                 CTypeSource::Header => "c-header",
                 CTypeSource::Apidoc { .. } => "apidoc",
                 CTypeSource::InlineFn { .. } => "inline-fn",
+                CTypeSource::Parser => "parser",
             },
             TypeRepr::RustType { .. } => "rust-bindings",
             TypeRepr::Inferred(_) => "inferred",
+        }
+    }
+
+    /// void 型かどうかを判定
+    ///
+    /// ポインタを含まない void 型の場合に true を返す。
+    /// `void *` は false を返す（有効なポインタ型のため）。
+    pub fn is_void(&self) -> bool {
+        match self {
+            TypeRepr::CType { specs, derived, .. } => {
+                // ポインタや配列がない純粋な void のみ true
+                derived.is_empty() && matches!(specs, CTypeSpecs::Void)
+            }
+            TypeRepr::RustType { repr, .. } => {
+                matches!(repr, RustTypeRepr::Unit)
+            }
+            TypeRepr::Inferred(inferred) => {
+                match inferred {
+                    InferredType::SymbolLookup { resolved_type, .. } => {
+                        resolved_type.is_void()
+                    }
+                    _ => false,
+                }
+            }
         }
     }
 
@@ -711,6 +738,55 @@ impl TypeRepr {
             specs: c_specs,
             derived,
             source: CTypeSource::Header,
+        }
+    }
+
+    /// TypeName (パーサー出力) から TypeRepr を作成
+    ///
+    /// `parser::parse_type_from_string` の結果から TypeRepr を生成する。
+    /// `from_apidoc_string` の代替として使用し、完全な C パーサーを活用する。
+    pub fn from_type_name(
+        type_name: &crate::ast::TypeName,
+        interner: &crate::intern::StringInterner,
+    ) -> Self {
+        let c_specs = CTypeSpecs::from_decl_specs(&type_name.specs, interner);
+        let derived = type_name.declarator
+            .as_ref()
+            .map(|d| CDerivedType::from_derived_decls(&d.derived))
+            .unwrap_or_default();
+        TypeRepr::CType {
+            specs: c_specs,
+            derived,
+            source: CTypeSource::Parser,
+        }
+    }
+
+    /// C 型文字列から TypeRepr を作成（パーサー版）
+    ///
+    /// `parser.rs` の `parse_type_from_string` を使用して完全な C パーサーで解析する。
+    /// `files` と `typedefs` が必要なため、`SemanticAnalyzer` など型情報が揃っている
+    /// コンテキストでの使用を推奨。
+    ///
+    /// パースに失敗した場合は `from_apidoc_string` と同じ簡易パーサーにフォールバックする。
+    pub fn from_c_type_string(
+        s: &str,
+        interner: &crate::intern::StringInterner,
+        files: &crate::source::FileRegistry,
+        typedefs: &std::collections::HashSet<crate::intern::InternedStr>,
+    ) -> Self {
+        use crate::parser::parse_type_from_string;
+
+        match parse_type_from_string(s, interner, files, typedefs) {
+            Ok(type_name) => Self::from_type_name(&type_name, interner),
+            Err(_) => {
+                // フォールバック: 既存の簡易パーサーを使用
+                let (specs, derived) = Self::parse_c_type_string(s, interner);
+                TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Apidoc { raw: s.to_string() },
+                }
+            }
         }
     }
 

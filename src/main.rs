@@ -137,6 +137,10 @@ struct Cli {
     /// rustfmt 失敗時にエラー終了する
     #[arg(long = "strict-rustfmt")]
     strict_rustfmt: bool,
+
+    /// マクロ型推論のデバッグ出力（カンマ区切りでマクロ名を指定）
+    #[arg(long = "debug-type-inference", value_name = "MACROS")]
+    debug_type_inference: Option<String>,
 }
 
 fn main() {
@@ -218,6 +222,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref filter_opt) = cli.dump_apidoc_after_merge {
         let filter = filter_opt.as_deref().unwrap_or("").to_string();
         builder = builder.with_dump_apidoc(filter);
+    }
+
+    // デバッグオプション: debug_type_inference
+    if let Some(ref macros) = cli.debug_type_inference {
+        let macro_list: Vec<String> = macros
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        builder = builder.with_debug_type_inference(macro_list);
     }
 
     // Codegen 設定
