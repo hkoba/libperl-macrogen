@@ -1,5 +1,16 @@
 # 計画: フィールドアクセスからのベース型逆推論
 
+## 実装ステータス
+
+| Phase | 内容 | 状況 |
+|-------|------|------|
+| Phase 1 | `lookup_unique` による一意フィールドからの推論 | ✅ 完了（効果限定的） |
+| Phase 2 | `get_consistent_base_type` による SV ファミリー対応 | ✅ 完了 |
+| Phase 3 | `Member` (直接アクセス) 対応 | ⏸️ 保留（効果限定的） |
+
+**Phase 2 の成果**: `SvFLAGS`, `SvTYPE`, `SvREFCNT` 等の SV ファミリーマクロで
+パラメータ型 `*mut SV` が正しく推論されるようになった。
+
 ## 背景
 
 ### 問題
@@ -137,6 +148,39 @@ pub enum CTypeSource {
 ### Phase 3: Member (直接アクセス) 対応
 
 `ptr->field` だけでなく `struct.field` パターンにも対応。
+
+#### Phase 3 の調査結果と結論
+
+調査の結果、**Phase 3 を実装しても効果が限定的**であることが判明した。
+
+**理由**:
+
+1. **Perl API のほとんどはポインタパターン（`->`）を使用**
+   ```c
+   #define SvFLAGS(sv)  (sv)->sv_flags     // -> を使用
+   #define HEK_KEY(hek) (hek)->hek_key     // -> を使用
+   ```
+
+2. **`.` パターンは中間アクセスに使用される**
+   ```c
+   #define AvARRAY(av)  ((av)->sv_u.svu_array)
+   //                         ↑ -> の後の . は sv_u 特殊処理で対応済み
+   ```
+
+3. **値渡しパターン（`param.field`）は非常に少ない**
+   ```c
+   #define CX_CURPAD_SAVE(block)  (block).oldcomppad = PL_comppad
+   ```
+   これらには apidoc があり、型は既知。
+
+4. **一部フィールドは収集されていない（別問題）**
+   `xpadn_low`, `xpadn_high` などは `_PADNAME_BASE` マクロ内で定義されており、
+   fields_dict に収集されていない。
+
+**結論**: Phase 3 の実装優先度は低い。
+他に優先すべき改善点:
+- マクロ内で定義されたフィールドの収集
+- キャストパターン (`((TYPE*)SvANY(x))->field`) からのパラメータ型推論
 
 ## 対象マクロと期待結果
 
