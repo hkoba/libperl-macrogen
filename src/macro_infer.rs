@@ -381,6 +381,11 @@ pub struct MacroInferContext {
 
     /// デバッグ対象マクロ名（文字列）
     pub debug_macros: HashSet<String>,
+
+    /// 確定済みマクロのパラメータ型キャッシュ
+    /// マクロ名 → [(パラメータ名, 型文字列)]
+    /// ネストしたマクロ呼び出しからの型伝播に使用
+    pub macro_param_types: HashMap<String, Vec<(String, String)>>,
 }
 
 impl MacroInferContext {
@@ -392,6 +397,7 @@ impl MacroInferContext {
             unconfirmed: HashSet::new(),
             unknown: HashSet::new(),
             debug_macros: HashSet::new(),
+            macro_param_types: HashMap::new(),
         }
     }
 
@@ -501,6 +507,63 @@ impl MacroInferContext {
             info.args_infer_status = InferStatus::TypeComplete;
             info.return_infer_status = InferStatus::TypeComplete;
         }
+    }
+
+    /// マクロのパラメータ型をキャッシュに保存
+    ///
+    /// ネストしたマクロ呼び出しからの型伝播に使用される。
+    /// `mark_confirmed` の後に呼び出す。
+    pub fn cache_param_types(&mut self, name: InternedStr, interner: &StringInterner) {
+        let info = match self.macros.get(&name) {
+            Some(info) => info,
+            None => return,
+        };
+
+        let macro_name = interner.get(name).to_string();
+        let mut param_types = Vec::new();
+
+        for param in &info.params {
+            let param_name = interner.get(param.name).to_string();
+
+            // パラメータの型を取得（param_to_exprs 経由）
+            let type_str = if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param.name) {
+                // 最初の非 void 型制約を使用
+                let mut found_type = None;
+                for expr_id in expr_ids {
+                    if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                        for c in constraints {
+                            if !c.ty.is_void() {
+                                found_type = Some(c.ty.to_rust_string(interner));
+                                break;
+                            }
+                        }
+                    }
+                    if found_type.is_some() {
+                        break;
+                    }
+                }
+                found_type
+            } else {
+                // フォールバック: param.expr の ExprId から取得
+                let expr_id = param.expr_id();
+                info.type_env.expr_constraints.get(&expr_id)
+                    .and_then(|constraints| constraints.first())
+                    .map(|c| c.ty.to_rust_string(interner))
+            };
+
+            if let Some(ty) = type_str {
+                param_types.push((param_name, ty));
+            }
+        }
+
+        if !param_types.is_empty() {
+            self.macro_param_types.insert(macro_name, param_types);
+        }
+    }
+
+    /// マクロのパラメータ型キャッシュを取得
+    pub fn get_macro_param_types(&self) -> &HashMap<String, Vec<(String, String)>> {
+        &self.macro_param_types
     }
 
     /// マクロを未知に移動（引数側）
@@ -1127,6 +1190,7 @@ impl MacroInferContext {
                             return_types_cache.insert(macro_name, return_type);
                         }
                         self.mark_confirmed(name);
+                        self.cache_param_types(name, interner);
                     } else {
                         self.move_to_unknown(name);
                     }
@@ -1165,6 +1229,7 @@ impl MacroInferContext {
                         return_types_cache.insert(macro_name, return_type);
                     }
                     self.mark_confirmed(name);
+                    self.cache_param_types(name, interner);
                 } else {
                     self.move_to_unknown(name);
                 }
@@ -1727,9 +1792,11 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 8);
+        assert_eq!(syms.len(), 10);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
+        assert!(syms.contains(&symbols.cv_flags));
+        assert!(syms.contains(&symbols.hek_flags));
         assert!(syms.contains(&symbols.expect));
         assert!(syms.contains(&symbols.likely));
         assert!(syms.contains(&symbols.unlikely));

@@ -365,6 +365,9 @@ pub struct SemanticAnalyzer<'a> {
     macro_params: HashSet<InternedStr>,
     /// 確定済みマクロの戻り値型（マクロ名 -> 戻り値型）への参照
     macro_return_types: Option<&'a HashMap<String, String>>,
+    /// 確定済みマクロのパラメータ型（マクロ名 -> [(パラメータ名, 型)])への参照
+    /// ネストしたマクロ呼び出しからの型伝播に使用
+    macro_param_types: Option<&'a HashMap<String, Vec<(String, String)>>>,
     /// ファイルレジストリ（型文字列パース用）
     files: Option<&'a FileRegistry>,
     /// typedef 名の集合（型文字列パース用）
@@ -407,6 +410,7 @@ impl<'a> SemanticAnalyzer<'a> {
             constraint_mode: false,
             macro_params: HashSet::new(),
             macro_return_types: None,
+            macro_param_types: None,
             files: None,
             parser_typedefs: None,
         }
@@ -417,11 +421,22 @@ impl<'a> SemanticAnalyzer<'a> {
         self.macro_return_types = Some(cache);
     }
 
+    /// 確定済みマクロのパラメータ型キャッシュへの参照を設定
+    pub fn set_macro_param_types(&mut self, cache: &'a HashMap<String, Vec<(String, String)>>) {
+        self.macro_param_types = Some(cache);
+    }
+
     /// マクロの戻り値型を取得
     pub fn get_macro_return_type(&self, macro_name: &str) -> Option<&str> {
         self.macro_return_types
             .and_then(|cache| cache.get(macro_name))
             .map(|s| s.as_str())
+    }
+
+    /// マクロのパラメータ型を取得
+    pub fn get_macro_param_types(&self, macro_name: &str) -> Option<&Vec<(String, String)>> {
+        self.macro_param_types
+            .and_then(|cache| cache.get(macro_name))
     }
 
     /// 新しいスコープを開始
