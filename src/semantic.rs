@@ -1058,6 +1058,13 @@ impl<'a> SemanticAnalyzer<'a> {
         self.macro_params.contains(&name)
     }
 
+    /// type_env から式の TypeRepr を直接取得
+    fn get_expr_type_repr(&self, expr_id: ExprId, type_env: &TypeEnv) -> Option<TypeRepr> {
+        type_env.expr_constraints.get(&expr_id)
+            .and_then(|c| c.first())
+            .map(|c| c.ty.clone())
+    }
+
     /// type_env から式の型文字列を取得
     fn get_expr_type_str(&self, expr_id: ExprId, type_env: &TypeEnv) -> String {
         if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
@@ -1328,9 +1335,21 @@ impl<'a> SemanticAnalyzer<'a> {
             // キャスト
             ExprKind::Cast { type_name, expr: inner } => {
                 self.collect_expr_constraints(inner, type_env);
-                let ty = self.resolve_type_name(type_name);
-                let ty_str = ty.display(self.interner);
-                let target_type = TypeRepr::from_apidoc_string(&ty_str, self.interner);
+                // AST → TypeRepr 直接変換（Type→String→TypeRepr roundtrip を排除）
+                let specs = CTypeSpecs::from_decl_specs(&type_name.specs, self.interner);
+                let derived: Vec<CDerivedType> = type_name.declarator.as_ref()
+                    .map(|d| {
+                        CDerivedType::from_derived_decls(&d.derived)
+                            .into_iter()
+                            .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let target_type = TypeRepr::CType {
+                    specs,
+                    derived,
+                    source: CTypeSource::Cast,
+                };
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::Cast {
@@ -1380,9 +1399,12 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.lookup_sv_u_field_type(*member)
                         .map(|c_type| Box::new(TypeRepr::from_apidoc_string(&c_type, self.interner)))
                 } else {
-                    // 直接アクセスの場合、base_ty は構造体名そのもの
-                    self.lookup_field_type_repr(&base_ty, *member)
-                        .map(Box::new)
+                    // TypeRepr ベースのフィールドルックアップ
+                    let base_type_repr = self.get_expr_type_repr(base.id, type_env);
+                    let struct_name = base_type_repr.as_ref().and_then(|t| t.type_name());
+                    struct_name
+                        .and_then(|n| self.fields_dict?.get_field_type(n, *member))
+                        .map(|ft| Box::new(ft.type_repr.clone()))
                 };
 
                 type_env.add_constraint(TypeEnvConstraint::new(
@@ -1437,11 +1459,14 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
 
-                // フィールド型を TypeRepr として直接取得（文字列変換を介さない）
-                let (field_type, used_consistent_type) = if let Some(struct_name) = self.extract_struct_name_from_pointer_type(&base_ty) {
-                    // ベース型が既知の場合：構造体名でルックアップ
-                    let ty = self.lookup_field_type_repr(struct_name, *member)
-                        .map(Box::new);
+                // TypeRepr ベースのフィールドルックアップ
+                let base_type_repr = self.get_expr_type_repr(base.id, type_env);
+                let pointee = base_type_repr.as_ref().and_then(|t| t.pointee_name());
+                let (field_type, used_consistent_type) = if let Some(name) = pointee {
+                    // ベース型が既知のポインタ型：構造体名で直接ルックアップ
+                    let ty = self.fields_dict
+                        .and_then(|fd| fd.get_field_type(name, *member))
+                        .map(|ft| Box::new(ft.type_repr.clone()));
                     (ty, false)
                 } else if let Some(fields_dict) = self.fields_dict {
                     // ベース型が不明な場合：一致型があればそれを使用（O(1)）
@@ -1701,44 +1726,6 @@ impl<'a> SemanticAnalyzer<'a> {
         } else {
             None
         }
-    }
-
-    /// ポインタ型文字列から構造体名を抽出（文字列として返す）
-    /// 例: "XPV*" → Some("XPV"), "*mut SV" → Some("SV")
-    fn extract_struct_name_from_pointer_type<'b>(&self, ty_str: &'b str) -> Option<&'b str> {
-        let trimmed = ty_str.trim();
-
-        // "*mut TYPE" 形式（Rust スタイル）
-        if let Some(rest) = trimmed.strip_prefix("*mut ") {
-            return Some(rest.trim());
-        }
-        // "* mut TYPE" 形式（syn の出力形式）
-        if let Some(rest) = trimmed.strip_prefix("* mut ") {
-            return Some(rest.trim());
-        }
-        // "*const TYPE" 形式
-        if let Some(rest) = trimmed.strip_prefix("*const ") {
-            return Some(rest.trim());
-        }
-        // "* const TYPE" 形式
-        if let Some(rest) = trimmed.strip_prefix("* const ") {
-            return Some(rest.trim());
-        }
-
-        // "TYPE*" 形式（C スタイル）
-        if let Some(base) = trimmed.strip_suffix('*') {
-            return Some(base.trim());
-        }
-
-        None
-    }
-
-    /// 構造体メンバーの型を取得（FieldsDict から、構造体名は文字列）
-    /// 構造体名とフィールド名から TypeRepr を検索
-    fn lookup_field_type_repr(&self, struct_name: &str, field_name: InternedStr) -> Option<TypeRepr> {
-        let fields_dict = self.fields_dict?;
-        let field_type = fields_dict.get_field_type_by_name(struct_name, field_name, self.interner)?;
-        Some(field_type.type_repr.clone())
     }
 
     /// base が ->sv_u アクセスかどうかを判定

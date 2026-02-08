@@ -308,6 +308,21 @@ impl FieldsDict {
         self.field_types.get(&(struct_name, field_name))
     }
 
+    /// InternedStr で直接フィールド型を取得（typedef 解決付き）
+    pub fn get_field_type(
+        &self,
+        struct_name: InternedStr,
+        field_name: InternedStr,
+    ) -> Option<&FieldType> {
+        // 直接検索
+        if let Some(ft) = self.field_types.get(&(struct_name, field_name)) {
+            return Some(ft);
+        }
+        // typedef 解決して再検索
+        let resolved = self.resolve_typedef(struct_name)?;
+        self.field_types.get(&(resolved, field_name))
+    }
+
     /// 構造体名（文字列）とフィールド名からフィールド型を取得
     /// StringInterner が immutable な場合に使用する
     /// typedef 名でも検索可能（例: XPV で検索すると xpv のフィールドを返す）

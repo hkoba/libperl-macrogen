@@ -54,6 +54,8 @@ pub enum CTypeSource {
     Parser,
     /// フィールドアクセスからの逆推論
     FieldInference { field_name: InternedStr },
+    /// キャスト式の型名（AST から直接変換）
+    Cast,
 }
 
 // ============================================================================
@@ -671,6 +673,7 @@ impl TypeRepr {
                 CTypeSource::InlineFn { .. } => "inline-fn",
                 CTypeSource::Parser => "parser",
                 CTypeSource::FieldInference { .. } => "field-inference",
+                CTypeSource::Cast => "cast",
             },
             TypeRepr::RustType { .. } => "rust-bindings",
             TypeRepr::Inferred(_) => "inferred",
@@ -949,6 +952,98 @@ impl TypeRepr {
             TypeRepr::RustType { repr, .. } => repr.to_display_string(),
             TypeRepr::Inferred(inferred) => inferred.to_rust_string(interner),
         }
+    }
+}
+
+// ============================================================================
+// 型名抽出メソッド（文字列ラウンドトリップ廃止用）
+// ============================================================================
+
+impl TypeRepr {
+    /// ポインタ型の参照先の構造体/typedef 名を InternedStr で取得
+    ///
+    /// PtrMember (->) の base 型から構造体名を抽出するために使用。
+    /// 例: `*mut SV` → `Some(SV)`, `XPVHV *` → `Some(XPVHV)`
+    pub fn pointee_name(&self) -> Option<InternedStr> {
+        match self {
+            TypeRepr::CType { specs, derived, .. } => {
+                if derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. })) {
+                    specs.type_name()
+                } else {
+                    None
+                }
+            }
+            TypeRepr::RustType { repr, .. } => repr.pointee_name(),
+            TypeRepr::Inferred(inferred) => inferred.resolved_type()?.pointee_name(),
+        }
+    }
+
+    /// 非ポインタ型の構造体/typedef 名を InternedStr で取得
+    ///
+    /// Member (.) の base 型から構造体名を抽出するために使用。
+    /// 例: `union _xhvnameu` → `Some(_xhvnameu)`, `SV` → `Some(SV)`
+    pub fn type_name(&self) -> Option<InternedStr> {
+        match self {
+            TypeRepr::CType { specs, .. } => specs.type_name(),
+            TypeRepr::RustType { repr, .. } => repr.type_name(),
+            TypeRepr::Inferred(inferred) => inferred.resolved_type()?.type_name(),
+        }
+    }
+}
+
+impl CTypeSpecs {
+    /// 構造体/typedef/enum 名を InternedStr で取得
+    pub fn type_name(&self) -> Option<InternedStr> {
+        match self {
+            CTypeSpecs::Struct { name: Some(n), .. } => Some(*n),
+            CTypeSpecs::TypedefName(n) => Some(*n),
+            CTypeSpecs::Enum { name: Some(n) } => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+impl InferredType {
+    /// Inferred ラッパーを解決して内側の TypeRepr を返す
+    ///
+    /// 各 InferredType バリアントが保持する「結果の型」を取得する。
+    /// `pointee_name()` / `type_name()` から再帰的に呼ばれる。
+    pub fn resolved_type(&self) -> Option<&TypeRepr> {
+        match self {
+            InferredType::Cast { target_type } => Some(target_type),
+            InferredType::PtrMemberAccess { field_type: Some(ft), .. } => Some(ft),
+            InferredType::MemberAccess { field_type: Some(ft), .. } => Some(ft),
+            InferredType::ArraySubscript { element_type, .. } => Some(element_type),
+            InferredType::AddressOf { inner_type } => Some(inner_type),
+            InferredType::Dereference { pointer_type } => Some(pointer_type),
+            InferredType::SymbolLookup { resolved_type, .. } => Some(resolved_type),
+            InferredType::IncDec { inner_type } => Some(inner_type),
+            InferredType::Assignment { lhs_type } => Some(lhs_type),
+            InferredType::Comma { rhs_type } => Some(rhs_type),
+            InferredType::Conditional { result_type, .. } => Some(result_type),
+            InferredType::BinaryOp { result_type, .. } => Some(result_type),
+            InferredType::UnaryArithmetic { inner_type } => Some(inner_type),
+            InferredType::CompoundLiteral { type_name } => Some(type_name),
+            InferredType::StmtExpr { last_expr_type } => last_expr_type.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl RustTypeRepr {
+    /// ポインタ型の参照先の型名を InternedStr で取得
+    ///
+    /// RustTypeRepr は String ベースで型名を格納しているため、
+    /// InternedStr の取得には interner が必要。当面は None を返す。
+    fn pointee_name(&self) -> Option<InternedStr> {
+        // RustTypeRepr は String ベースのため InternedStr を直接取得できない。
+        // 将来的に RustTypeRepr 自体を InternedStr ベースに改修する際に対応する。
+        None
+    }
+
+    /// 型名を InternedStr で取得
+    fn type_name(&self) -> Option<InternedStr> {
+        None
     }
 }
 
