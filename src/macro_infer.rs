@@ -514,6 +514,18 @@ impl MacroInferContext {
     /// ネストしたマクロ呼び出しからの型伝播に使用される。
     /// `mark_confirmed` の後に呼び出す。
     pub fn cache_param_types(&mut self, name: InternedStr, interner: &StringInterner) {
+        let mut temp_cache = HashMap::new();
+        self.cache_param_types_to(name, interner, &mut temp_cache);
+        self.macro_param_types.extend(temp_cache);
+    }
+
+    /// パラメータ型を外部キャッシュに保存
+    pub fn cache_param_types_to(
+        &self,
+        name: InternedStr,
+        interner: &StringInterner,
+        cache: &mut HashMap<String, Vec<(String, String)>>,
+    ) {
         let info = match self.macros.get(&name) {
             Some(info) => info,
             None => return,
@@ -557,7 +569,7 @@ impl MacroInferContext {
         }
 
         if !param_types.is_empty() {
-            self.macro_param_types.insert(macro_name, param_types);
+            cache.insert(macro_name, param_types);
         }
     }
 
@@ -717,6 +729,7 @@ impl MacroInferContext {
     ///
     /// 既に登録済みの MacroInferInfo に対して型制約を収集する
     /// `return_types_cache` は確定済みマクロの戻り値型キャッシュ
+    /// `param_types_cache` は確定済みマクロのパラメータ型キャッシュ
     pub fn infer_macro_types<'a>(
         &mut self,
         name: InternedStr,
@@ -729,6 +742,7 @@ impl MacroInferContext {
         inline_fn_dict: Option<&'a InlineFnDict>,
         typedefs: &'a HashSet<InternedStr>,
         return_types_cache: &HashMap<String, String>,
+        param_types_cache: &HashMap<String, Vec<(String, String)>>,
     ) {
         let macro_name_str = interner.get(name);
         let is_debug = self.is_debug_target(macro_name_str);
@@ -755,6 +769,9 @@ impl MacroInferContext {
 
             // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
             analyzer.set_macro_return_types(return_types_cache);
+
+            // 確定済みマクロのパラメータ型を設定（ネストしたマクロ呼び出しからの型伝播用）
+            analyzer.set_macro_param_types(param_types_cache);
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
             analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
@@ -813,6 +830,9 @@ impl MacroInferContext {
 
             // 確定済みマクロの戻り値型を設定（キャッシュへの参照を渡す）
             analyzer.set_macro_return_types(return_types_cache);
+
+            // 確定済みマクロのパラメータ型を設定（ネストしたマクロ呼び出しからの型伝播用）
+            analyzer.set_macro_param_types(param_types_cache);
 
             // apidoc 型情報付きでパラメータをシンボルテーブルに登録
             analyzer.register_macro_params_from_apidoc(name, params, files, typedefs);
@@ -1158,6 +1178,8 @@ impl MacroInferContext {
     ) {
         // 確定済みマクロの戻り値型キャッシュ（O(N²) を避けるため）
         let mut return_types_cache: HashMap<String, String> = HashMap::new();
+        // 確定済みマクロのパラメータ型キャッシュ（ネストしたマクロ呼び出しからの型伝播用）
+        let mut param_types_cache: HashMap<String, Vec<(String, String)>> = HashMap::new();
 
         loop {
             let candidates = self.get_inference_candidates();
@@ -1177,7 +1199,7 @@ impl MacroInferContext {
                     // 型推論を実行（apidoc 型情報を適用）
                     self.infer_macro_types(
                         name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs,
-                        &return_types_cache,
+                        &return_types_cache, &param_types_cache,
                     );
 
                     // apidoc から型が確定した場合は confirmed に
@@ -1190,7 +1212,7 @@ impl MacroInferContext {
                             return_types_cache.insert(macro_name, return_type);
                         }
                         self.mark_confirmed(name);
-                        self.cache_param_types(name, interner);
+                        self.cache_param_types_to(name, interner, &mut param_types_cache);
                     } else {
                         self.move_to_unknown(name);
                     }
@@ -1211,7 +1233,7 @@ impl MacroInferContext {
                 // 型推論を実行（キャッシュを渡す）
                 self.infer_macro_types(
                     name, &params, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs,
-                    &return_types_cache,
+                    &return_types_cache, &param_types_cache,
                 );
 
                 // 推論結果に基づいて分類
@@ -1229,12 +1251,15 @@ impl MacroInferContext {
                         return_types_cache.insert(macro_name, return_type);
                     }
                     self.mark_confirmed(name);
-                    self.cache_param_types(name, interner);
+                    self.cache_param_types_to(name, interner, &mut param_types_cache);
                 } else {
                     self.move_to_unknown(name);
                 }
             }
         }
+
+        // ローカルキャッシュを self.macro_param_types に同期
+        self.macro_param_types = param_types_cache;
     }
 
     /// 式から使用される関数/マクロを再帰的に収集

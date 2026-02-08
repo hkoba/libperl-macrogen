@@ -250,6 +250,32 @@ HEK_FLAGS → HEK_KEY
 3. `macro_param_types` (マクロからの伝播)
 4. フィールドアクセスからの推論
 
+## 実装状況
+
+| Phase | 状態 | 内容 |
+|-------|------|------|
+| Phase 1 | 完了 | `macro_param_types` キャッシュを `MacroInferContext` に追加 |
+| Phase 2 | 完了 | `collect_call_constraints` と `ExprKind::MacroCall` でキャッシュを参照 |
+| Phase 3 | 完了 | 下記マクロで型推論が正常に動作することを確認 |
+
+### 検証結果
+
+| マクロ | 以前の推論結果 | 修正後の推論結果 |
+|--------|---------------|-----------------|
+| `HEK_FLAGS(hek)` | `/* unknown */` | `*mut HEK` |
+| `HEK_UTF8(hek)` | `/* unknown */` | `*mut HEK` |
+| `HeKFLAGS(he)` | `/* unknown */` | `*mut HE` |
+
+### 実装の詳細
+
+1. `cache_param_types_to()`: 確定したマクロのパラメータ型を外部キャッシュに保存
+2. `infer_types_in_dependency_order()`: ローカルな `param_types_cache` を使用し、最後に `self.macro_param_types` に同期
+3. `collect_call_constraints()`: `ExprKind::Call` で呼び出されるマクロのパラメータ型を参照
+4. `ExprKind::MacroCall` ハンドラ: 保存されたマクロ呼び出しのパラメータ型を参照
+
+キャッシュには Rust 形式の型文字列（例: `*mut HEK`）が保存されるため、
+`TypeRepr::from_rust_string()` を使用して型制約を生成する。
+
 ## 関連ドキュメント
 
 - `doc/architecture-semantic-type-inference.md` - 型推論アーキテクチャ

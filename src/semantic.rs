@@ -1655,11 +1655,28 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // マクロ呼び出し（展開結果の型を使用）
-            ExprKind::MacroCall { args, expanded, .. } => {
+            ExprKind::MacroCall { name, args, expanded, .. } => {
                 // 引数の型制約を収集
                 for arg in args {
                     self.collect_expr_constraints(arg, type_env);
                 }
+
+                // 確定済みマクロのパラメータ型を参照（ネストしたマクロ呼び出しからの型伝播）
+                let macro_name_str = self.interner.get(*name);
+                if let Some(param_types) = self.get_macro_param_types(macro_name_str) {
+                    for (i, arg) in args.iter().enumerate() {
+                        if let Some((param_name, type_str)) = param_types.get(i) {
+                            // キャッシュには Rust 形式の型文字列が保存されている
+                            let constraint = TypeEnvConstraint::new(
+                                arg.id,
+                                TypeRepr::from_rust_string(type_str),
+                                format!("arg {} ({}) of macro {}()", i, param_name, macro_name_str),
+                            );
+                            type_env.add_constraint(constraint);
+                        }
+                    }
+                }
+
                 // 展開結果の型制約を収集
                 self.collect_expr_constraints(expanded, type_env);
                 // MacroCall 式全体の型は expanded と同じ
@@ -1866,6 +1883,21 @@ impl<'a> SemanticAnalyzer<'a> {
                     format!("return type of inline {}()", func_name_str),
                 );
                 type_env.add_constraint(return_constraint);
+            }
+        }
+
+        // 確定済みマクロのパラメータ型を参照（ネストしたマクロ呼び出しからの型伝播）
+        if let Some(param_types) = self.get_macro_param_types(func_name_str) {
+            for (i, arg) in args.iter().enumerate() {
+                if let Some((param_name, type_str)) = param_types.get(i) {
+                    // キャッシュには Rust 形式の型文字列が保存されている
+                    let constraint = TypeEnvConstraint::new(
+                        arg.id,
+                        TypeRepr::from_rust_string(type_str),
+                        format!("arg {} ({}) of macro {}()", i, param_name, func_name_str),
+                    );
+                    type_env.add_constraint(constraint);
+                }
             }
         }
 
