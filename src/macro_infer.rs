@@ -68,6 +68,8 @@ pub struct ExplicitExpandSymbols {
     pub sv_flags: InternedStr,
     /// CvFLAGS マクロ（cv->sv_flags に展開、CV 用）
     pub cv_flags: InternedStr,
+    /// HEK_FLAGS マクロ（hek->hek_flags に展開）
+    pub hek_flags: InternedStr,
     /// EXPECT マクロ（__builtin_expect のラッパー）
     pub expect: InternedStr,
     /// LIKELY マクロ（__builtin_expect(cond, 1) のラッパー）
@@ -89,6 +91,7 @@ impl ExplicitExpandSymbols {
             sv_any: interner.intern("SvANY"),
             sv_flags: interner.intern("SvFLAGS"),
             cv_flags: interner.intern("CvFLAGS"),
+            hek_flags: interner.intern("HEK_FLAGS"),
             expect: interner.intern("EXPECT"),
             likely: interner.intern("LIKELY"),
             unlikely: interner.intern("UNLIKELY"),
@@ -104,6 +107,7 @@ impl ExplicitExpandSymbols {
             self.sv_any,
             self.sv_flags,
             self.cv_flags,
+            self.hek_flags,
             self.expect,
             self.likely,
             self.unlikely,
