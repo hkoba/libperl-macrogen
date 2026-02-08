@@ -564,11 +564,18 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     /// InlineFnDict から inline 関数の引数型を取得
-    fn lookup_inline_fn_param_type(&self, func_name: InternedStr, arg_index: usize) -> Option<Type> {
+    /// InlineFnDict から inline 関数のパラメータ型を TypeRepr として直接取得
+    ///
+    /// AST (DeclSpecs + Declarator) から TypeRepr を直接構築する。
+    /// 文字列への変換・再パースを経由しないため、修飾子付きポインタ等も正確に処理できる。
+    fn lookup_inline_fn_param_type_repr(
+        &self,
+        func_name: InternedStr,
+        arg_index: usize,
+    ) -> Option<TypeRepr> {
         let dict = self.inline_fn_dict?;
         let func_def = dict.get(func_name)?;
 
-        // Declarator から ParamList を取得
         let param_list = func_def.declarator.derived.iter()
             .find_map(|d| match d {
                 DerivedDecl::Function(params) => Some(params),
@@ -577,48 +584,42 @@ impl<'a> SemanticAnalyzer<'a> {
 
         let param = param_list.params.get(arg_index)?;
 
-        // ParamDecl から Type を構築
-        let base_ty = self.resolve_decl_specs_readonly(&param.specs);
-        if let Some(ref declarator) = param.declarator {
-            Some(self.apply_declarator(&base_ty, declarator))
-        } else {
-            Some(base_ty)
-        }
+        let specs = CTypeSpecs::from_decl_specs(&param.specs, self.interner);
+        let derived = param.declarator.as_ref()
+            .map(|d| {
+                // Function 派生型より前の部分のみ（パラメータ自体の型）
+                CDerivedType::from_derived_decls(&d.derived)
+                    .into_iter()
+                    .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Some(TypeRepr::CType {
+            specs,
+            derived,
+            source: CTypeSource::InlineFn { func_name },
+        })
     }
 
-    /// InlineFnDict から inline 関数の戻り値型を取得
-    fn lookup_inline_fn_return_type(&self, func_name: InternedStr) -> Option<Type> {
+    /// InlineFnDict から inline 関数の戻り値型を TypeRepr として直接取得
+    fn lookup_inline_fn_return_type_repr(&self, func_name: InternedStr) -> Option<TypeRepr> {
         let dict = self.inline_fn_dict?;
         let func_def = dict.get(func_name)?;
 
-        // DeclSpecs から戻り値の基本型を取得
-        let base_ty = self.resolve_decl_specs_readonly(&func_def.specs);
+        let specs = CTypeSpecs::from_decl_specs(&func_def.specs, self.interner);
 
-        // Declarator のポインタ等を適用（Function より前の derived 部分のみ）
-        Some(self.apply_return_type_declarator(&base_ty, &func_def.declarator))
-    }
+        // Declarator の Function より前の derived 部分のみ（戻り値のポインタ等）
+        let derived: Vec<_> = CDerivedType::from_derived_decls(&func_def.declarator.derived)
+            .into_iter()
+            .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
+            .collect();
 
-    /// 戻り値型用の Declarator 適用（Function より前のポインタ部分のみ）
-    fn apply_return_type_declarator(&self, base_type: &Type, decl: &Declarator) -> Type {
-        let mut ty = base_type.clone();
-
-        for derived in &decl.derived {
-            match derived {
-                DerivedDecl::Pointer(quals) => {
-                    ty = Type::Pointer(Box::new(ty), quals.clone());
-                }
-                DerivedDecl::Array(arr) => {
-                    let _size = &arr.size;
-                    ty = Type::Array(Box::new(ty), None);
-                }
-                DerivedDecl::Function(_) => {
-                    // Function に到達したらポインタの処理は終了
-                    break;
-                }
-            }
-        }
-
-        ty
+        Some(TypeRepr::CType {
+            specs,
+            derived,
+            source: CTypeSource::InlineFn { func_name },
+        })
     }
 
     /// DeclSpecs から Type を構築
@@ -1849,20 +1850,14 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
 
-        // InlineFnDict から型を取得
+        // InlineFnDict から型を取得（AST から TypeRepr を直接構築）
         if self.inline_fn_dict.is_some() {
             // 引数の型
             for (i, arg) in args.iter().enumerate() {
-                if let Some(ty) = self.lookup_inline_fn_param_type(func_name, i) {
-                    let ty_str = ty.display(self.interner);
-                    let (specs, derived) = self.parse_c_type_for_inline_fn(&ty_str);
+                if let Some(type_repr) = self.lookup_inline_fn_param_type_repr(func_name, i) {
                     let constraint = TypeEnvConstraint::new(
                         arg.id,
-                        TypeRepr::CType {
-                            specs,
-                            derived,
-                            source: CTypeSource::InlineFn { func_name },
-                        },
+                        type_repr,
                         format!("arg {} of inline {}()", i, func_name_str),
                     );
                     type_env.add_constraint(constraint);
@@ -1870,16 +1865,10 @@ impl<'a> SemanticAnalyzer<'a> {
             }
 
             // 戻り値型
-            if let Some(ty) = self.lookup_inline_fn_return_type(func_name) {
-                let ty_str = ty.display(self.interner);
-                let (specs, derived) = self.parse_c_type_for_inline_fn(&ty_str);
+            if let Some(type_repr) = self.lookup_inline_fn_return_type_repr(func_name) {
                 let return_constraint = TypeEnvConstraint::new(
                     call_expr_id,
-                    TypeRepr::CType {
-                        specs,
-                        derived,
-                        source: CTypeSource::InlineFn { func_name },
-                    },
+                    type_repr,
                     format!("return type of inline {}()", func_name_str),
                 );
                 type_env.add_constraint(return_constraint);
@@ -1910,16 +1899,6 @@ impl<'a> SemanticAnalyzer<'a> {
                 format!("return type of macro {}()", func_name_str),
             );
             type_env.add_constraint(return_constraint);
-        }
-    }
-
-    /// InlineFn 用に C 型文字列をパース
-    fn parse_c_type_for_inline_fn(&self, ty_str: &str) -> (CTypeSpecs, Vec<CDerivedType>) {
-        // TypeRepr::from_apidoc_string と同じロジックを使用
-        let type_repr = TypeRepr::from_apidoc_string(ty_str, self.interner);
-        match type_repr {
-            TypeRepr::CType { specs, derived, .. } => (specs, derived),
-            _ => (CTypeSpecs::Void, vec![]),
         }
     }
 
