@@ -1902,10 +1902,11 @@ impl<'a> SemanticAnalyzer<'a> {
         }
 
         // 確定済みマクロの戻り値型を参照
-        if self.get_macro_return_type(func_name_str).is_some() {
+        if let Some(return_type_str) = self.get_macro_return_type(func_name_str) {
+            // キャッシュには Rust 形式の型文字列が保存されている
             let return_constraint = TypeEnvConstraint::new(
                 call_expr_id,
-                TypeRepr::Inferred(InferredType::FunctionReturn { func_name }),
+                TypeRepr::from_rust_string(return_type_str),
                 format!("return type of macro {}()", func_name_str),
             );
             type_env.add_constraint(return_constraint);

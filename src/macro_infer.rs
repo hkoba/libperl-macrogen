@@ -850,7 +850,7 @@ impl MacroInferContext {
     pub fn get_macro_return_type(&self, name: InternedStr, interner: &StringInterner) -> Option<(String, String)> {
         self.macros.get(&name).and_then(|info| {
             info.get_return_type().map(|ty| {
-                (interner.get(name).to_string(), ty.to_display_string(interner))
+                (interner.get(name).to_string(), ty.to_rust_string(interner))
             })
         })
     }
