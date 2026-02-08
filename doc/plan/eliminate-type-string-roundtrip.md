@@ -2,181 +2,234 @@
 
 ## 問題の本質
 
-インライン関数のパラメータ型を制約に変換する際、フルスペックの C パーサーが
-生成した AST があるにもかかわらず、**文字列経由の不完全なパーサー** で再パースしている。
+`collect_expr_constraints` 内の多くのハンドラが、式の型を **文字列** で受け渡している。
 
 ```
-現状: AST (ParamDecl) → Type → String → parse_c_type_string → TypeRepr
-                                  ↑
-                          ここで情報が欠落
-                          (例: "SV * const" がパースできない)
+現状: TypeRepr → to_display_string() → String → from_apidoc_string() → TypeRepr
+                      ↑                              ↑
+                  情報が欠落                    不完全なパーサーで再パース
 ```
 
-`TypeRepr::from_decl` という **直接変換パス** が既に存在しており、
-`CTypeSpecs::from_decl_specs` と `CDerivedType::from_derived_decls` は
-AST から直接 `TypeRepr` を構築できる。
+`get_expr_type_str` → `from_apidoc_string` のパターンが **17箇所** あり、
+以下の問題を引き起こしている:
+
+1. `struct xpvhv_with_aux *` → `"struct xpvhv_with_aux *"` → 構造体名に `struct` タグが残り field lookup が失敗
+2. `union _xhvnameu` → `"union _xhvnameu"` → 同上
+3. `SV * const` → `parse_c_type_string` がパースできない（Phase 1 で解決済み）
+
+**文字列操作でタグを除去するのは対症療法であり、根本的解決ではない。**
+
+## あるべき姿
+
+TypeRepr を直接受け渡し、構造体名は `InternedStr` で扱う。
 
 ```
-あるべき姿: AST (ParamDecl) → TypeRepr（直接変換）
+あるべき姿: TypeRepr → (直接参照) → TypeRepr
+            CTypeSpecs::Struct { name: InternedStr } → FieldsDict.field_types[(InternedStr, InternedStr)]
 ```
 
-## 現状のコードフロー
+`FieldsDict` は既に `InternedStr` ベースの API を持っている:
+- `field_types: HashMap<(InternedStr, InternedStr), FieldType>` (line 26)
+- `resolve_typedef(typedef_name: InternedStr) -> Option<InternedStr>` (line 341)
 
-### collect_call_constraints の InlineFnDict セクション
+## 完了済み
 
-```rust
-// semantic.rs (現状)
-if let Some(ty) = self.lookup_inline_fn_param_type(func_name, i) {
-    let ty_str = ty.display(self.interner);                    // Type → String
-    let (specs, derived) = self.parse_c_type_for_inline_fn(&ty_str);  // String → TypeRepr
-    // ...
-}
-```
+### Phase 1: インライン関数パラメータ・戻り値の直接変換 ✅
 
-### lookup_inline_fn_param_type
+AST (ParamDecl/DeclSpecs) → TypeRepr の直接変換パスを構築。
+`lookup_inline_fn_param_type_repr`, `lookup_inline_fn_return_type_repr` を追加し、
+旧 `lookup_inline_fn_param_type`, `lookup_inline_fn_return_type` を削除。
 
-```rust
-// semantic.rs (現状)
-fn lookup_inline_fn_param_type(&self, func_name: InternedStr, arg_index: usize) -> Option<Type> {
-    // ParamDecl を取得
-    let param = param_list.params.get(arg_index)?;
-    // DeclSpecs → Type → apply_declarator → Type
-    let base_ty = self.resolve_decl_specs_readonly(&param.specs);
-    // ...
-}
-```
+### Cast 式の直接変換 ✅
 
-### 既存の直接変換パス
-
-```rust
-// type_repr.rs (既に存在)
-pub fn from_decl(specs: &DeclSpecs, declarator: &Declarator, interner: &StringInterner) -> Self {
-    let c_specs = CTypeSpecs::from_decl_specs(specs, interner);
-    let derived = CDerivedType::from_derived_decls(&declarator.derived);
-    TypeRepr::CType { specs: c_specs, derived, source: CTypeSource::Header }
-}
-```
+`ExprKind::Cast` ハンドラで `resolve_type_name()` → `display()` → `from_apidoc_string()` を
+`CTypeSpecs::from_decl_specs()` + `CDerivedType::from_derived_decls()` に置き換え。
 
 ## 実装計画
 
-### Phase 1: lookup_inline_fn_param_type を TypeRepr 返却に変更
+### Phase 2: TypeRepr 直接受け渡し基盤
 
-`Type` ではなく `TypeRepr` を直接返す関数を追加する。
+`get_expr_type_str` に代わる、TypeRepr を直接返すメソッドを追加する。
+
+#### Step 2a: `get_expr_type_repr` の追加
 
 ```rust
-fn lookup_inline_fn_param_type_repr(
-    &self,
-    func_name: InternedStr,
-    arg_index: usize,
-) -> Option<TypeRepr> {
-    let dict = self.inline_fn_dict?;
-    let func_def = dict.get(func_name)?;
-
-    let param_list = func_def.declarator.derived.iter()
-        .find_map(|d| match d {
-            DerivedDecl::Function(params) => Some(params),
-            _ => None,
-        })?;
-
-    let param = param_list.params.get(arg_index)?;
-
-    // AST → TypeRepr 直接変換（文字列を経由しない）
-    let specs = CTypeSpecs::from_decl_specs(&param.specs, self.interner);
-    let derived = param.declarator.as_ref()
-        .map(|d| CDerivedType::from_derived_decls(&d.derived))
-        .unwrap_or_default();
-
-    // Function 派生型は除外（パラメータ自体の型のみ必要）
-    let derived = derived.into_iter()
-        .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
-        .collect();
-
-    Some(TypeRepr::CType {
-        specs,
-        derived,
-        source: CTypeSource::InlineFn { func_name },
-    })
+fn get_expr_type_repr(&self, expr_id: ExprId, type_env: &TypeEnv) -> Option<TypeRepr> {
+    type_env.expr_constraints.get(&expr_id)
+        .and_then(|c| c.first())
+        .map(|c| c.ty.clone())
 }
 ```
 
-### Phase 2: collect_call_constraints を直接変換に切り替え
+#### Step 2b: `TypeRepr` に型操作メソッドを追加
+
+文字列操作の代わりに、TypeRepr から直接型情報を取得するメソッド群。
 
 ```rust
-// 引数の型
-for (i, arg) in args.iter().enumerate() {
-    if let Some(type_repr) = self.lookup_inline_fn_param_type_repr(func_name, i) {
-        let constraint = TypeEnvConstraint::new(
-            arg.id,
-            type_repr,
-            format!("arg {} of inline {}()", i, func_name_str),
-        );
-        type_env.add_constraint(constraint);
+impl TypeRepr {
+    /// ポインタ型の参照先の構造体/typedef 名を InternedStr で取得
+    /// PtrMember (->), Deref (*) の base 型から構造体名を抽出するために使用
+    fn pointee_name(&self) -> Option<InternedStr> {
+        match self {
+            TypeRepr::CType { specs, derived, .. } => {
+                // ポインタが1段以上ある場合、最外ポインタを剥がした型名を返す
+                if derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. })) {
+                    specs.type_name()
+                } else {
+                    None
+                }
+            }
+            TypeRepr::RustType { repr, .. } => repr.pointee_name(),
+            TypeRepr::Inferred(inferred) => inferred.resolved_type()?.pointee_name(),
+        }
+    }
+
+    /// 非ポインタ型の構造体/typedef 名を InternedStr で取得
+    /// Member (.) の base 型から構造体名を抽出するために使用
+    fn type_name(&self) -> Option<InternedStr> {
+        match self {
+            TypeRepr::CType { specs, .. } => specs.type_name(),
+            TypeRepr::RustType { repr, .. } => repr.type_name(),
+            TypeRepr::Inferred(inferred) => inferred.resolved_type()?.type_name(),
+        }
+    }
+}
+
+impl CTypeSpecs {
+    /// 構造体/typedef 名を InternedStr で取得
+    fn type_name(&self) -> Option<InternedStr> {
+        match self {
+            CTypeSpecs::Struct { name: Some(n), .. } => Some(*n),
+            CTypeSpecs::TypedefName(n) => Some(*n),
+            CTypeSpecs::Enum { name: Some(n) } => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+impl InferredType {
+    /// Inferred ラッパーを解決して内側の TypeRepr を返す
+    fn resolved_type(&self) -> Option<&TypeRepr> {
+        match self {
+            InferredType::Cast { target_type } => Some(target_type),
+            InferredType::PtrMemberAccess { field_type: Some(ft), .. } => Some(ft),
+            InferredType::MemberAccess { field_type: Some(ft), .. } => Some(ft),
+            InferredType::ArraySubscript { element_type, .. } => Some(element_type),
+            InferredType::AddressOf { inner_type } => Some(inner_type),
+            InferredType::Dereference { pointer_type } => Some(pointer_type),
+            InferredType::SymbolLookup { resolved_type, .. } => Some(resolved_type),
+            InferredType::IncDec { inner_type } => Some(inner_type),
+            InferredType::Assignment { lhs_type } => Some(lhs_type),
+            InferredType::Comma { rhs_type } => Some(rhs_type),
+            InferredType::Conditional { result_type, .. } => Some(result_type),
+            InferredType::BinaryOp { result_type, .. } => Some(result_type),
+            InferredType::UnaryArithmetic { inner_type } => Some(inner_type),
+            InferredType::CompoundLiteral { type_name } => Some(type_name),
+            InferredType::StmtExpr { last_expr_type } => last_expr_type.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+impl RustTypeRepr {
+    fn pointee_name(&self) -> Option<InternedStr> { ... }
+    fn type_name(&self) -> Option<InternedStr> { ... }
+}
+```
+
+#### Step 2c: `FieldsDict` に `InternedStr` ベースのフィールド型取得を追加
+
+既存の `field_types.get(&(struct_name, field_name))` (line 308) を公開 API にし、
+typedef 解決も `InternedStr` ベースで行う。
+
+```rust
+impl FieldsDict {
+    /// InternedStr で直接フィールド型を取得（typedef 解決付き）
+    pub fn get_field_type(
+        &self,
+        struct_name: InternedStr,
+        field_name: InternedStr,
+    ) -> Option<&FieldType> {
+        // 直接検索
+        if let Some(ft) = self.field_types.get(&(struct_name, field_name)) {
+            return Some(ft);
+        }
+        // typedef 解決して再検索
+        let resolved = self.resolve_typedef(struct_name)?;
+        self.field_types.get(&(resolved, field_name))
     }
 }
 ```
 
-### Phase 3: 戻り値型も同様に直接変換
+### Phase 3: PtrMember / Member ハンドラの書き換え
 
-`lookup_inline_fn_return_type` も同様に `TypeRepr` を直接返す版を追加。
+`get_expr_type_str` + `extract_struct_name_from_pointer_type` + `lookup_field_type_repr`
+の文字列チェーンを、TypeRepr ベースに置き換える。
+
+#### PtrMember (->)
 
 ```rust
-fn lookup_inline_fn_return_type_repr(
-    &self,
-    func_name: InternedStr,
-) -> Option<TypeRepr> {
-    let dict = self.inline_fn_dict?;
-    let func_def = dict.get(func_name)?;
+// 現状（文字列ベース）
+let base_ty = self.get_expr_type_str(base.id, type_env);       // → "XPVHV *"
+let struct_name = self.extract_struct_name_from_pointer_type(&base_ty); // → "XPVHV"
+let field_type = self.lookup_field_type_repr(struct_name, *member);     // 文字列で検索
 
-    let specs = CTypeSpecs::from_decl_specs(&func_def.specs, self.interner);
-
-    // Declarator の Function より前の derived 部分のみ
-    let derived: Vec<_> = func_def.declarator.derived.iter()
-        .take_while(|d| !matches!(d, DerivedDecl::Function(_)))
-        .map(|d| match d {
-            DerivedDecl::Pointer(quals) => CDerivedType::Pointer {
-                is_const: quals.is_const,
-                is_volatile: quals.is_volatile,
-                is_restrict: quals.is_restrict,
-            },
-            _ => unreachable!(),
-        })
-        .collect();
-
-    Some(TypeRepr::CType {
-        specs,
-        derived,
-        source: CTypeSource::InlineFn { func_name },
-    })
-}
+// 新（TypeRepr ベース）
+let base_type = self.get_expr_type_repr(base.id, type_env);
+let struct_name = base_type.as_ref().and_then(|t| t.pointee_name()); // → InternedStr
+let field_type = struct_name.and_then(|n| {
+    self.fields_dict?.get_field_type(n, *member)
+}).map(|ft| ft.type_repr.clone());
 ```
 
-### Phase 4: 不要になったコードの整理
+#### Member (.)
 
-以下の関数・メソッドの使用箇所を確認し、インライン関数処理でのみ使われていた場合は削除を検討:
+```rust
+// 新（TypeRepr ベース）
+let base_type = self.get_expr_type_repr(base.id, type_env);
+let struct_name = base_type.as_ref().and_then(|t| t.type_name()); // → InternedStr
+let field_type = struct_name.and_then(|n| {
+    self.fields_dict?.get_field_type(n, *member)
+}).map(|ft| ft.type_repr.clone());
+```
 
-| 対象 | 用途 |
+### Phase 4: 残りのハンドラの書き換え
+
+`get_expr_type_str` → `from_apidoc_string` パターンを使う残りの箇所を
+`get_expr_type_repr` に順次切り替え。
+
+| ハンドラ | 現状 | 新 |
+|----------|------|-----|
+| AddrOf | `get_expr_type_str` → `from_apidoc_string` → AddressOf | `get_expr_type_repr` → AddressOf |
+| Deref | 同上 → Dereference | `get_expr_type_repr` → Dereference |
+| Index | 同上 → ArraySubscript | `get_expr_type_repr` → ArraySubscript |
+| Assign | 同上 → Assignment | `get_expr_type_repr` → Assignment |
+| Comma | 同上 → Comma | `get_expr_type_repr` → Comma |
+| IncDec | 同上 → IncDec | `get_expr_type_repr` → IncDec |
+| UnaryMinus/Plus | 同上 → UnaryArithmetic | `get_expr_type_repr` → UnaryArithmetic |
+| BitwiseNot | 同上 → UnaryArithmetic | `get_expr_type_repr` → UnaryArithmetic |
+| Conditional | 同上 → Conditional | `get_expr_type_repr` → Conditional |
+| StmtExpr | 同上 → StmtExpr | `get_expr_type_repr` → StmtExpr |
+
+### Phase 5: 不要コードの整理
+
+| 対象 | 状態 |
 |------|------|
-| `lookup_inline_fn_param_type` (Type 返却版) | 直接変換版で置き換え |
-| `lookup_inline_fn_return_type` (Type 返却版) | 直接変換版で置き換え |
-| `parse_c_type_for_inline_fn` | 不要に |
-| `Type::display` for Pointer/TypedefName | 他で使用されていなければ不要 |
-| `parse_c_type_string` の修飾子パース | apidoc 用途では残る |
+| `get_expr_type_str` | 全箇所が `get_expr_type_repr` に移行後、削除 |
+| `extract_struct_name_from_pointer_type` | TypeRepr::pointee_name() に置き換え後、削除 |
+| `lookup_field_type_repr` (文字列ベース) | InternedStr ベースに置き換え後、削除 |
+| `resolve_typedef_by_name` (文字列ベース) | `resolve_typedef` (InternedStr) のみ残す |
+| `get_field_type_by_name` (文字列ベース) | `get_field_type` (InternedStr) のみ残す |
 
-## 影響範囲
+## RustTypeRepr の課題
 
-| ファイル | 変更内容 |
-|----------|----------|
-| `src/semantic.rs` | `lookup_inline_fn_param_type_repr` 追加、`collect_call_constraints` 書き換え |
-| `src/type_repr.rs` | `CDerivedType::from_derived_decls` を `pub` に（必要なら） |
-
-## 期待される効果
-
-1. **`SV * const` 問題が根本解決**: 文字列パースを経由しないため、修飾子の位置に起因するバグが発生しない
-2. **関数ポインタパラメータも正しく処理**: `parse_c_type_string` が対応できない複雑な型も AST から直接変換
-3. **情報の欠落がなくなる**: `Type::display()` → `parse_c_type_string` の往復で失われていた情報が保持される
-4. **コードの簡潔化**: 変換ステップが減り、バグの入り込む余地が減る
+`RustTypeRepr` は `InternedStr` を持たず `String` ベースで型名を格納している。
+`pointee_name()` / `type_name()` の実装には `interner.lookup()` が必要になるが、
+これは Phase 2 では対応せず、将来的に `RustTypeRepr` 自体を `InternedStr`
+ベースに改修する際に対応する。当面は `None` を返してフォールバックさせる。
 
 ## 注意点
 
-- `parse_c_type_string` は apidoc 文字列のパース（外部入力）にも使われているため、完全に削除はできない
-- `Type` 型自体は意味解析の他の部分で使われているため、`resolve_decl_specs_readonly` 等は残す
+- `from_apidoc_string` は apidoc (embed.fnc) の外部入力パースに使われるため削除しない
+- `get_expr_type_str` は S-expression 出力等の表示目的で残す可能性がある
+- Phase 2-3 で HvNAME_HEK_NN の `()` 問題が解決する
