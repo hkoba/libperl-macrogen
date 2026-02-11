@@ -1056,6 +1056,7 @@ impl MacroInferContext {
         let builtin_fns: std::collections::HashSet<&str> = [
             "__builtin_expect",
             "__builtin_offsetof",
+            "offsetof",
             "__builtin_types_compatible_p",
             "__builtin_constant_p",
             "__builtin_choose_expr",

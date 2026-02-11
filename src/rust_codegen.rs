@@ -626,6 +626,15 @@ impl<'a> RustCodegen<'a> {
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust(&args[0], info);
                     }
+                    // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
+                    if (func_name == "offsetof" || func_name == "__builtin_offsetof")
+                        && args.len() == 2
+                    {
+                        let type_name = self.expr_to_rust(&args[0], info);
+                        if let Some(field_path) = self.expr_to_field_path(&args[1]) {
+                            return format!("std::mem::offset_of!({}, {})", type_name, field_path);
+                        }
+                    }
                 }
                 let f = self.expr_to_rust(func, info);
 
@@ -1520,6 +1529,23 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// offsetof のフィールドパス式をドット区切り文字列に変換
+    /// Ident("xnv_u") → "xnv_u"
+    /// Member(Ident("xnv_u"), "xnv_nv") → "xnv_u.xnv_nv"
+    fn expr_to_field_path(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                Some(self.interner.get(*name).to_string())
+            }
+            ExprKind::Member { expr: base, member } => {
+                let base_path = self.expr_to_field_path(base)?;
+                let member_name = self.interner.get(*member);
+                Some(format!("{}.{}", base_path, member_name))
+            }
+            _ => None,
+        }
+    }
+
     /// 式を Rust コードに変換（インライン関数用）
     fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
         match &expr.kind {
@@ -1560,6 +1586,15 @@ impl<'a> RustCodegen<'a> {
                     let func_name = self.interner.get(*name);
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust_inline(&args[0]);
+                    }
+                    // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
+                    if (func_name == "offsetof" || func_name == "__builtin_offsetof")
+                        && args.len() == 2
+                    {
+                        let type_name = self.expr_to_rust_inline(&args[0]);
+                        if let Some(field_path) = self.expr_to_field_path(&args[1]) {
+                            return format!("std::mem::offset_of!({}, {})", type_name, field_path);
+                        }
                     }
                 }
                 let f = self.expr_to_rust_inline(func);
@@ -2072,6 +2107,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         let builtin_fns = [
             "__builtin_expect",
             "__builtin_offsetof",
+            "offsetof",
             "__builtin_types_compatible_p",
             "__builtin_constant_p",
             "__builtin_choose_expr",
