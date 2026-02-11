@@ -770,8 +770,14 @@ impl<'a> RustCodegen<'a> {
                         BlockItem::Stmt(stmt) => {
                             parts.push(self.stmt_to_rust(stmt, info));
                         }
-                        BlockItem::Decl(_) => {
-                            // 宣言はスキップ
+                        BlockItem::Decl(decl) => {
+                            let decl_str = self.decl_to_rust_let(decl, "");
+                            for line in decl_str.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    parts.push(trimmed.strip_suffix(';').unwrap_or(trimmed).to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -1697,8 +1703,14 @@ impl<'a> RustCodegen<'a> {
                         BlockItem::Stmt(stmt) => {
                             parts.push(self.stmt_to_rust_inline(stmt, ""));
                         }
-                        BlockItem::Decl(_) => {
-                            // 宣言はスキップ（MUTABLE_PTR パターン以外では無視）
+                        BlockItem::Decl(decl) => {
+                            let decl_str = self.decl_to_rust_let(decl, "");
+                            for line in decl_str.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    parts.push(trimmed.strip_suffix(';').unwrap_or(trimmed).to_string());
+                                }
+                            }
                         }
                     }
                 }
