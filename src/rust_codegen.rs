@@ -2,9 +2,11 @@
 //!
 //! 型推論結果から Rust コードを生成する。
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+use crate::intern::InternedStr;
 use crate::enum_dict::EnumDict;
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
@@ -39,6 +41,44 @@ fn escape_rust_keyword(name: &str) -> String {
         // その他はそのまま
         _ => name.to_string(),
     }
+}
+
+/// 単語境界を考慮した文字列置換
+///
+/// 型パラメータ名の置換時に、部分文字列一致を避けるために使用。
+/// 例: "XV" を "T" に置換するとき、"XPVNV" は変更しない。
+fn replace_word(s: &str, word: &str, replacement: &str) -> String {
+    if word.is_empty() {
+        return s.to_string();
+    }
+    let mut result = String::with_capacity(s.len());
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    let word_bytes = word.as_bytes();
+    while let Some(pos) = s[start..].find(word) {
+        let abs_pos = start + pos;
+        // 前方の境界チェック
+        let before_ok = abs_pos == 0 || !is_ident_char(bytes[abs_pos - 1]);
+        // 後方の境界チェック
+        let after_pos = abs_pos + word.len();
+        let after_ok = after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
+
+        if before_ok && after_ok {
+            result.push_str(&s[start..abs_pos]);
+            result.push_str(replacement);
+            start = after_pos;
+        } else {
+            result.push_str(&s[start..abs_pos + word_bytes.len()]);
+            start = abs_pos + word_bytes.len();
+        }
+    }
+    result.push_str(&s[start..]);
+    result
+}
+
+/// 識別子を構成する文字かどうか
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// 二項演算子を Rust 形式に変換
@@ -264,6 +304,9 @@ pub struct RustCodegen<'a> {
     buffer: String,
     /// 不完全マーカーの生成回数
     incomplete_count: usize,
+    /// 現在生成中のマクロの型パラメータマップ
+    /// 仮引数名(InternedStr) → ジェネリック名("T", "U", ...)
+    current_type_param_map: HashMap<InternedStr, String>,
 }
 
 /// コード生成全体を管理する構造体
@@ -294,6 +337,7 @@ impl<'a> RustCodegen<'a> {
             macro_ctx,
             buffer: String::new(),
             incomplete_count: 0,
+            current_type_param_map: HashMap::new(),
         }
     }
 
@@ -365,6 +409,14 @@ impl<'a> RustCodegen<'a> {
     /// マクロ関数を生成（self を消費）
     pub fn generate_macro(mut self, info: &MacroInferInfo) -> GeneratedCode {
         let name_str = self.interner.get(info.name);
+
+        // 型パラメータマップを構築
+        self.current_type_param_map = info.generic_type_params.iter()
+            .filter(|(idx, _)| **idx >= 0)
+            .filter_map(|(idx, generic_name)| {
+                info.params.get(*idx as usize).map(|p| (p.name, generic_name.clone()))
+            })
+            .collect();
 
         // ジェネリック句を生成
         let generic_clause = self.build_generic_clause(info);
@@ -532,8 +584,23 @@ impl<'a> RustCodegen<'a> {
     /// 戻り値に `/*` が含まれていたら不完全型としてカウントする
     fn type_repr_to_rust(&mut self, ty: &crate::type_repr::TypeRepr) -> String {
         let result = ty.to_rust_string(self.interner);
+        let result = self.substitute_type_params(&result);
         if result.contains("/*") {
             self.incomplete_count += 1;
+        }
+        result
+    }
+
+    /// 型文字列中の型パラメータ名を generic 名に置換
+    fn substitute_type_params(&self, type_str: &str) -> String {
+        if self.current_type_param_map.is_empty() {
+            return type_str.to_string();
+        }
+        let mut result = type_str.to_string();
+        for (param_name, generic_name) in &self.current_type_param_map {
+            let name_str = self.interner.get(*param_name);
+            // 単語境界を考慮した置換（部分文字列一致を避ける）
+            result = replace_word(&result, name_str, generic_name);
         }
         result
     }
@@ -871,6 +938,10 @@ impl<'a> RustCodegen<'a> {
         // typedef 名を優先
         for spec in &specs.type_specs {
             if let TypeSpec::TypedefName(name) = spec {
+                // 型パラメータなら generic 名に置換
+                if let Some(generic_name) = self.current_type_param_map.get(name) {
+                    return generic_name.clone();
+                }
                 return self.interner.get(*name).to_string();
             }
         }

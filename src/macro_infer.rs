@@ -14,7 +14,9 @@ use crate::intern::{InternedStr, StringInterner};
 use crate::macro_def::{MacroDef, MacroKind, MacroTable};
 use crate::parser::{
     parse_expression_from_tokens_ref_with_stats,
+    parse_expression_from_tokens_ref_with_generic_params,
     parse_statement_from_tokens_ref_with_stats,
+    parse_statement_from_tokens_ref_with_generic_params,
     ParseStats,
 };
 use crate::rust_decl::RustDeclDict;
@@ -691,10 +693,31 @@ impl MacroInferContext {
         // パースを試行（pp から interner と files を取得）
         let interner = pp.interner();
         let files = pp.files();
-        let (parse_result, stats) = self.try_parse_tokens(&expanded_tokens, interner, files, typedefs);
+
+        // 関数マクロの場合、全仮引数を generic_params として渡す
+        let generic_params: HashMap<InternedStr, usize> = params.iter()
+            .enumerate()
+            .map(|(i, &name)| (name, i))
+            .collect();
+
+        let (parse_result, stats, detected_type_params) = self.try_parse_tokens(
+            &expanded_tokens, interner, files, typedefs, generic_params,
+        );
         info.parse_result = parse_result;
         info.function_call_count = stats.function_call_count;
         info.deref_count = stats.deref_count;
+
+        // 検出された型パラメータを generic_type_params にマッピング
+        if !detected_type_params.is_empty() {
+            let param_names = ['T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+            let mut idx = 0;
+            for (i, param) in params.iter().enumerate() {
+                if detected_type_params.contains(param) && idx < param_names.len() {
+                    info.generic_type_params.insert(i as i32, param_names[idx].to_string());
+                    idx += 1;
+                }
+            }
+        }
 
         // パース成功した場合、assert 呼び出しを Assert 式に変換
         match &mut info.parse_result {
@@ -881,9 +904,10 @@ impl MacroInferContext {
         interner: &StringInterner,
         files: &FileRegistry,
         typedefs: &HashSet<InternedStr>,
-    ) -> (ParseResult, ParseStats) {
+        generic_params: HashMap<InternedStr, usize>,
+    ) -> (ParseResult, ParseStats, HashSet<InternedStr>) {
         if tokens.is_empty() {
-            return (ParseResult::Unparseable(Some("empty token sequence".to_string())), ParseStats::default());
+            return (ParseResult::Unparseable(Some("empty token sequence".to_string())), ParseStats::default(), HashSet::new());
         }
 
         // 空白・改行をスキップして最初の有効なトークンを探す
@@ -895,24 +919,50 @@ impl MacroInferContext {
         let is_statement_start = first_significant
             .is_some_and(|t| matches!(t.kind, TokenKind::KwDo | TokenKind::KwIf));
         if is_statement_start {
-            match parse_statement_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
-                Ok((stmt, stats)) => {
-                    return (
-                        ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
-                        stats,
-                    );
+            if generic_params.is_empty() {
+                match parse_statement_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
+                    Ok((stmt, stats)) => {
+                        return (
+                            ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+                            stats,
+                            HashSet::new(),
+                        );
+                    }
+                    Err(_) => {} // フォールスルーして式としてパース
                 }
-                Err(_) => {} // フォールスルーして式としてパース
+            } else {
+                match parse_statement_from_tokens_ref_with_generic_params(tokens.to_vec(), interner, files, typedefs, generic_params.clone()) {
+                    Ok((stmt, stats, detected)) => {
+                        return (
+                            ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+                            stats,
+                            detected,
+                        );
+                    }
+                    Err(_) => {} // フォールスルーして式としてパース
+                }
             }
         }
 
         // 式としてパースを試行
-        match parse_expression_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
-            Ok((expr, stats)) => (
-                ParseResult::Expression(Box::new(expr)),
-                stats,
-            ),
-            Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), ParseStats::default()),
+        if generic_params.is_empty() {
+            match parse_expression_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
+                Ok((expr, stats)) => (
+                    ParseResult::Expression(Box::new(expr)),
+                    stats,
+                    HashSet::new(),
+                ),
+                Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), ParseStats::default(), HashSet::new()),
+            }
+        } else {
+            match parse_expression_from_tokens_ref_with_generic_params(tokens.to_vec(), interner, files, typedefs, generic_params) {
+                Ok((expr, stats, detected)) => (
+                    ParseResult::Expression(Box::new(expr)),
+                    stats,
+                    detected,
+                ),
+                Err(err) => (ParseResult::Unparseable(Some(err.format_with_files(files))), ParseStats::default(), HashSet::new()),
+            }
         }
     }
 

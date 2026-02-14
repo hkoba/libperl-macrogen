@@ -2,7 +2,7 @@
 //!
 //! tinyccのparser部分に相当。再帰下降パーサーで実装。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::error::{CompileError, ParseError, Result};
@@ -99,6 +99,11 @@ pub struct Parser<'a, S: TokenSource> {
     pub function_call_count: usize,
     /// パース中に検出したポインタデリファレンスの数
     pub deref_count: usize,
+    /// マクロ仮引数の辞書（マクロ本体パース時のみ使用）
+    /// key: 仮引数名, value: パラメータインデックス
+    generic_params: HashMap<InternedStr, usize>,
+    /// パース中に型として使用が検出された generic param
+    detected_type_params: HashSet<InternedStr>,
 }
 
 /// Preprocessor 専用の後方互換コンストラクタ
@@ -167,6 +172,8 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             allow_missing_semi: false,
             function_call_count: 0,
             deref_count: 0,
+            generic_params: HashMap::new(),
+            detected_type_params: HashSet::new(),
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -185,6 +192,8 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             allow_missing_semi: false,
             function_call_count: 0,
             deref_count: 0,
+            generic_params: HashMap::new(),
+            detected_type_params: HashSet::new(),
         };
         // マーカーをスキップして最初のトークンを取得
         parser.current = parser.inner_next_token()?;
@@ -1647,43 +1656,23 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             let loc = self.current.loc.clone();
             self.advance()?; // (
 
+            // 1. 確定的な型名（キーワード/typedef/既検出の generic param）
             if self.is_type_start() {
-                // キャストまたは複合リテラル
-                let type_name = self.parse_type_name()?;
-                self.expect(&TokenKind::RParen)?;
+                return self.finish_parse_cast_or_compound_lit(loc);
+            }
 
-                // 複合リテラルのチェック
-                if self.check(&TokenKind::LBrace) {
-                    self.advance()?;
-                    let mut items = Vec::new();
-                    while !self.check(&TokenKind::RBrace) {
-                        let designation = self.parse_designation()?;
-                        let init = self.parse_initializer()?;
-                        items.push(InitializerItem { designation, init });
-                        if !self.check(&TokenKind::Comma) {
-                            break;
-                        }
-                        self.advance()?;
-                    }
-                    self.expect(&TokenKind::RBrace)?;
-                    return Ok(Expr::new(
-                        ExprKind::CompoundLit {
-                            type_name: Box::new(type_name),
-                            init: items,
-                        },
-                        loc,
-                    ));
+            // 2. 未検出の generic param → 先読みで判定
+            if let Some(id) = self.current_ident() {
+                if self.generic_params.contains_key(&id)
+                    && self.looks_like_generic_cast()
+                {
+                    // 型パラメータとして記録
+                    self.detected_type_params.insert(id);
+                    return self.finish_parse_cast_or_compound_lit(loc);
                 }
+            }
 
-                let expr = self.parse_cast_expr()?;
-                return Ok(Expr::new(
-                    ExprKind::Cast {
-                        type_name: Box::new(type_name),
-                        expr: Box::new(expr),
-                    },
-                    loc,
-                ));
-            } else if self.check(&TokenKind::LBrace) {
+            if self.check(&TokenKind::LBrace) {
                 // GCC拡張: ステートメント式 ({ ... })
                 let stmt = self.parse_compound_stmt()?;
                 self.expect(&TokenKind::RParen)?;
@@ -1702,6 +1691,96 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         }
 
         self.parse_unary_expr()
+    }
+
+    /// キャスト式または複合リテラルのパースを完了する
+    ///
+    /// `parse_cast_expr` で `(` を消費し、current が型名の先頭にある状態で呼ぶ。
+    fn finish_parse_cast_or_compound_lit(&mut self, loc: SourceLocation) -> Result<Expr> {
+        let type_name = self.parse_type_name()?;
+        self.expect(&TokenKind::RParen)?;
+
+        // 複合リテラルのチェック
+        if self.check(&TokenKind::LBrace) {
+            self.advance()?;
+            let mut items = Vec::new();
+            while !self.check(&TokenKind::RBrace) {
+                let designation = self.parse_designation()?;
+                let init = self.parse_initializer()?;
+                items.push(InitializerItem { designation, init });
+                if !self.check(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance()?;
+            }
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(Expr::new(
+                ExprKind::CompoundLit {
+                    type_name: Box::new(type_name),
+                    init: items,
+                },
+                loc,
+            ));
+        }
+
+        let expr = self.parse_cast_expr()?;
+        Ok(Expr::new(
+            ExprKind::Cast {
+                type_name: Box::new(type_name),
+                expr: Box::new(expr),
+            },
+            loc,
+        ))
+    }
+
+    /// generic param がキャスト式の型として使われているかを先読みで判定
+    ///
+    /// 呼び出し時点: current = generic param の Ident
+    /// TokenSource::next_token + unget_token で先読み
+    fn looks_like_generic_cast(&mut self) -> bool {
+        // 先読み1: param の次のトークン
+        let next1 = match self.source.next_token() {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+
+        let result = match &next1.kind {
+            // (PARAM *...) — ポインタキャスト
+            TokenKind::Star => true,
+
+            // (PARAM) — 値キャスト候補、後続の文脈で判定
+            TokenKind::RParen => {
+                let next2 = match self.source.next_token() {
+                    Ok(t) => t,
+                    Err(_) => {
+                        self.source.unget_token(next1);
+                        return false;
+                    }
+                };
+                // ) の後に式の開始トークンが続くならキャスト
+                let is_cast = matches!(&next2.kind,
+                    TokenKind::LParen       // (PARAM)(expr)
+                    | TokenKind::Ident(_)   // (PARAM)ident
+                    | TokenKind::IntLit(_) | TokenKind::UIntLit(_)
+                    | TokenKind::FloatLit(_)
+                    | TokenKind::StringLit(_) | TokenKind::CharLit(_)
+                    | TokenKind::Star       // (PARAM)*ptr (deref)
+                    | TokenKind::Amp        // (PARAM)&x
+                    | TokenKind::Minus      // (PARAM)-x
+                    | TokenKind::Bang       // (PARAM)!x
+                    | TokenKind::Tilde      // (PARAM)~x
+                    | TokenKind::KwSizeof   // (PARAM)sizeof(x)
+                );
+                self.source.unget_token(next2);
+                is_cast
+            }
+
+            // (PARAM + ...) など — 括弧付き式
+            _ => false,
+        };
+
+        self.source.unget_token(next1);
+        result
     }
 
     /// 既存の式に対してpostfix操作をパース
@@ -2436,8 +2515,10 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             TokenKind::KwStruct | TokenKind::KwUnion | TokenKind::KwEnum => true,
             // typeof
             TokenKind::KwTypeof | TokenKind::KwTypeof2 | TokenKind::KwTypeof3 => true,
-            // typedef名
-            TokenKind::Ident(id) => self.typedefs.contains(id),
+            // typedef名 or 検出済みの generic 型パラメータ
+            TokenKind::Ident(id) => {
+                self.typedefs.contains(id) || self.detected_type_params.contains(id)
+            }
             _ => false,
         }
     }
@@ -2657,6 +2738,32 @@ pub fn parse_expression_from_tokens_ref_with_stats(
     Ok((expr, stats))
 }
 
+/// トークン列から式をパース（generic_params 付き）
+///
+/// マクロ本体のパースに使用。マクロの仮引数名を generic_params として渡し、
+/// キャスト式での型パラメータ使用を自動検出する。
+///
+/// # Returns
+/// (パースされた式, 統計情報, 検出された型パラメータ)
+pub fn parse_expression_from_tokens_ref_with_generic_params(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+    generic_params: HashMap<InternedStr, usize>,
+) -> Result<(Expr, ParseStats, HashSet<InternedStr>)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.generic_params = generic_params;
+    let expr = parser.parse_expr_only()?;
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
+    };
+    let detected = parser.detected_type_params;
+    Ok((expr, stats, detected))
+}
+
 /// トークン列を文としてパース（統計情報付き・参照ベース版）
 ///
 /// `parse_statement_from_tokens_ref` と同様だが、
@@ -2685,6 +2792,32 @@ pub fn parse_statement_from_tokens_ref_with_stats(
         deref_count: parser.deref_count,
     };
     Ok((stmt, stats))
+}
+
+/// トークン列を文としてパース（generic_params 付き）
+///
+/// マクロ本体のパースに使用。マクロの仮引数名を generic_params として渡し、
+/// キャスト式での型パラメータ使用を自動検出する。
+///
+/// # Returns
+/// (パースされた文, 統計情報, 検出された型パラメータ)
+pub fn parse_statement_from_tokens_ref_with_generic_params(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+    generic_params: HashMap<InternedStr, usize>,
+) -> Result<(Stmt, ParseStats, HashSet<InternedStr>)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.generic_params = generic_params;
+    let stmt = parser.parse_stmt_allow_missing_semi()?;
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
+    };
+    let detected = parser.detected_type_params;
+    Ok((stmt, stats, detected))
 }
 
 /// 型文字列から TypeName をパース
