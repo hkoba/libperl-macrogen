@@ -84,6 +84,8 @@ pub struct ExplicitExpandSymbols {
     pub assert_underscore_: InternedStr,
     /// STR_WITH_LEN マクロ（文字列リテラルと長さのペア）
     pub str_with_len: InternedStr,
+    /// INT2PTR マクロ（整数からポインタへのキャスト）
+    pub int2ptr: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -100,6 +102,7 @@ impl ExplicitExpandSymbols {
             cbool: interner.intern("cBOOL"),
             assert_underscore_: interner.intern("__ASSERT_"),
             str_with_len: interner.intern("STR_WITH_LEN"),
+            int2ptr: interner.intern("INT2PTR"),
         }
     }
 
@@ -116,6 +119,7 @@ impl ExplicitExpandSymbols {
             self.cbool,
             self.assert_underscore_,
             self.str_with_len,
+            self.int2ptr,
         ].into_iter()
     }
 }
@@ -1134,6 +1138,9 @@ impl MacroInferContext {
             "strncmp",
             "strcpy",
             "strncpy",
+            "ASSERT_IS_LITERAL",
+            "ASSERT_IS_PTR",
+            "ASSERT_NOT_PTR",
         ].into_iter().collect();
 
         // マクロ名の集合
@@ -1868,7 +1875,7 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 10);
+        assert_eq!(syms.len(), 11);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.cv_flags));

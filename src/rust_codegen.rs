@@ -706,6 +706,15 @@ impl<'a> RustCodegen<'a> {
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust(&args[0], info);
                     }
+                    // ASSERT_IS_LITERAL(s) -> s, ASSERT_IS_PTR(x) -> x, ASSERT_NOT_PTR(x) -> x
+                    // コンパイル時型チェックマクロ。Rust では不要なので引数をそのまま返す
+                    if (func_name == "ASSERT_IS_LITERAL"
+                        || func_name == "ASSERT_IS_PTR"
+                        || func_name == "ASSERT_NOT_PTR")
+                        && args.len() == 1
+                    {
+                        return self.expr_to_rust(&args[0], info);
+                    }
                     // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
                     if (func_name == "offsetof" || func_name == "__builtin_offsetof")
                         && args.len() == 2
@@ -1695,6 +1704,14 @@ impl<'a> RustCodegen<'a> {
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust_inline(&args[0]);
                     }
+                    // ASSERT_IS_LITERAL(s) -> s, ASSERT_IS_PTR(x) -> x, ASSERT_NOT_PTR(x) -> x
+                    if (func_name == "ASSERT_IS_LITERAL"
+                        || func_name == "ASSERT_IS_PTR"
+                        || func_name == "ASSERT_NOT_PTR")
+                        && args.len() == 1
+                    {
+                        return self.expr_to_rust_inline(&args[0]);
+                    }
                     // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
                     if (func_name == "offsetof" || func_name == "__builtin_offsetof")
                         && args.len() == 2
@@ -2267,6 +2284,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             "strncmp",
             "strcpy",
             "strncpy",
+            "ASSERT_IS_LITERAL",
+            "ASSERT_IS_PTR",
+            "ASSERT_NOT_PTR",
         ];
 
         if builtin_fns.contains(&fn_name) {
