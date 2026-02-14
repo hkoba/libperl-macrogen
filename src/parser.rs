@@ -524,8 +524,8 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 TokenKind::KwAttribute | TokenKind::KwAttribute2 => {
                     self.skip_attribute()?;
                 }
-                // typedef名
-                TokenKind::Ident(id) if self.typedefs.contains(id) => {
+                // typedef名 or 検出済みの generic 型パラメータ
+                TokenKind::Ident(id) if self.typedefs.contains(id) || self.detected_type_params.contains(id) => {
                     let id = *id;
                     specs.type_specs.push(TypeSpec::TypedefName(id));
                     self.advance()?;
