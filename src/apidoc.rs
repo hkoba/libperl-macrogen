@@ -441,6 +441,14 @@ impl ApidocEntry {
         self.returns_type_param() || !self.type_param_indices().is_empty()
     }
 
+    /// 引数がリテラル文字列型かどうか（apidoc で `"..."` 形式の引数）
+    ///
+    /// 例: `"literal string"`, `"key"`, `"message"`
+    /// Rust では `&str` として扱う。
+    pub fn is_literal_string_keyword(ty: &str) -> bool {
+        ty.starts_with('"')
+    }
+
     /// 引数に `token` 型を持つかどうか
     ///
     /// `token` 型の引数は `##` によるトークン合成に使われるため、

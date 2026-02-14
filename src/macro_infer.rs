@@ -185,6 +185,19 @@ impl Default for InferStatus {
     }
 }
 
+/// apidoc からリテラル文字列パラメータを収集
+///
+/// `"..."` 形式の引数を持つパラメータを記録する。
+fn collect_literal_string_params(entry: &crate::apidoc::ApidocEntry, info: &mut MacroInferInfo) {
+    use crate::apidoc::ApidocEntry;
+
+    for (i, arg) in entry.args.iter().enumerate() {
+        if ApidocEntry::is_literal_string_keyword(&arg.ty) {
+            info.literal_string_params.insert(i);
+        }
+    }
+}
+
 /// apidoc からジェネリック型パラメータを収集
 ///
 /// `type` や `cast` キーワードを持つパラメータをジェネリック型として扱う。
@@ -266,6 +279,12 @@ pub struct MacroInferInfo {
     /// value: 型パラメータ名 ("T", "U", etc.)
     pub generic_type_params: HashMap<i32, String>,
 
+    /// リテラル文字列パラメータのインデックス集合
+    ///
+    /// apidoc で `"..."` 形式の引数として宣言されたパラメータ。
+    /// Rust では `&str` 型として出力する。
+    pub literal_string_params: HashSet<usize>,
+
     /// 関数呼び出しの数（パース時に検出）
     pub function_call_count: usize,
     /// ポインタデリファレンスの数（パース時に検出）
@@ -295,6 +314,7 @@ impl MacroInferInfo {
             args_infer_status: InferStatus::Pending,
             return_infer_status: InferStatus::Pending,
             generic_type_params: HashMap::new(),
+            literal_string_params: HashSet::new(),
             function_call_count: 0,
             deref_count: 0,
             called_functions: HashSet::new(),
@@ -841,6 +861,9 @@ impl MacroInferContext {
 
                     // ジェネリック型パラメータを収集
                     collect_generic_params(entry, info);
+
+                    // リテラル文字列パラメータを収集
+                    collect_literal_string_params(entry, info);
                 }
             }
         }

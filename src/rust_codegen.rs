@@ -541,6 +541,11 @@ impl<'a> RustCodegen<'a> {
             return generic_name.clone();
         }
 
+        // リテラル文字列パラメータかチェック（apidoc の "..." 引数）
+        if info.literal_string_params.contains(&param_index) {
+            return "&str".to_string();
+        }
+
         let param_name = param.name;
 
         // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
