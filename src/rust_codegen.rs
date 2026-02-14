@@ -2,7 +2,7 @@
 //!
 //! 型推論結果から Rust コードを生成する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
@@ -307,6 +307,8 @@ pub struct RustCodegen<'a> {
     /// 現在生成中のマクロの型パラメータマップ
     /// 仮引数名(InternedStr) → ジェネリック名("T", "U", ...)
     current_type_param_map: HashMap<InternedStr, String>,
+    /// 現在生成中のマクロのリテラル文字列パラメータ名の集合
+    current_literal_string_params: HashSet<InternedStr>,
 }
 
 /// コード生成全体を管理する構造体
@@ -338,6 +340,7 @@ impl<'a> RustCodegen<'a> {
             buffer: String::new(),
             incomplete_count: 0,
             current_type_param_map: HashMap::new(),
+            current_literal_string_params: HashSet::new(),
         }
     }
 
@@ -370,6 +373,53 @@ impl<'a> RustCodegen<'a> {
         } else {
             None
         }
+    }
+
+    /// 呼び出し先マクロの特定の引数位置がリテラル文字列パラメータかチェック
+    fn callee_expects_literal_string(&self, func_name: InternedStr, arg_index: usize) -> bool {
+        if let Some(callee_info) = self.macro_ctx.macros.get(&func_name) {
+            return callee_info.literal_string_params.contains(&arg_index);
+        }
+        false
+    }
+
+    /// 式の最内部にある literal_string_param の Ident を探す
+    /// identity builtin（ASSERT_IS_LITERAL 等）を透過して中身をチェック
+    fn find_literal_string_ident<'b>(&self, expr: &'b Expr) -> Option<&'b InternedStr> {
+        match &expr.kind {
+            ExprKind::Ident(name) if self.current_literal_string_params.contains(name) => {
+                Some(name)
+            }
+            ExprKind::Call { func, args } if args.len() == 1 => {
+                // identity builtin (ASSERT_IS_LITERAL, ASSERT_IS_PTR, ASSERT_NOT_PTR)
+                if let ExprKind::Ident(fname) = &func.kind {
+                    let func_name = self.interner.get(*fname);
+                    if func_name == "ASSERT_IS_LITERAL"
+                        || func_name == "ASSERT_IS_PTR"
+                        || func_name == "ASSERT_NOT_PTR"
+                    {
+                        return self.find_literal_string_ident(&args[0]);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// 式を Rust コードに変換し、literal_string_param の Ident に .as_ptr() を付与
+    fn expr_to_rust_arg(&mut self, expr: &Expr, info: &MacroInferInfo, callee: Option<InternedStr>, arg_index: usize) -> String {
+        if let Some(name) = self.find_literal_string_ident(expr) {
+            // 呼び出し先も &str を受ける場合は変換不要
+            if let Some(callee_name) = callee {
+                if self.callee_expects_literal_string(callee_name, arg_index) {
+                    return escape_rust_keyword(self.interner.get(*name));
+                }
+            }
+            let param = escape_rust_keyword(self.interner.get(*name));
+            return format!("{}.as_ptr()", param);
+        }
+        self.expr_to_rust(expr, info)
     }
 
     /// マクロ呼び出し形式で出力すべきかを判定
@@ -429,6 +479,11 @@ impl<'a> RustCodegen<'a> {
             .filter_map(|(idx, generic_name)| {
                 info.params.get(*idx as usize).map(|p| (p.name, generic_name.clone()))
             })
+            .collect();
+
+        // リテラル文字列パラメータの名前集合を構築
+        self.current_literal_string_params = info.literal_string_params.iter()
+            .filter_map(|&idx| info.params.get(idx).map(|p| p.name))
             .collect();
 
         // ジェネリック句を生成
@@ -691,6 +746,19 @@ impl<'a> RustCodegen<'a> {
                 format!("c\"{}\"", escape_string(s))
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                // sizeof(literal_string_param) - 1 → param.len()
+                if *op == BinOp::Sub {
+                    if let ExprKind::Sizeof(inner) = &lhs.kind {
+                        if let ExprKind::Ident(name) = &inner.kind {
+                            if self.current_literal_string_params.contains(name) {
+                                if let ExprKind::IntLit(1) = &rhs.kind {
+                                    let param = escape_rust_keyword(self.interner.get(*name));
+                                    return format!("{}.len()", param);
+                                }
+                            }
+                        }
+                    }
+                }
                 let l = self.expr_to_rust(lhs, info);
                 let r = self.expr_to_rust(rhs, info);
                 // 論理演算子の場合、オペランドを bool に変換
@@ -732,19 +800,21 @@ impl<'a> RustCodegen<'a> {
                 }
                 let f = self.expr_to_rust(func, info);
 
-                // THX マクロで my_perl が不足しているかチェック
-                let needs_my_perl = if let ExprKind::Ident(name) = &func.kind {
-                    self.needs_my_perl_for_call(*name, args.len())
-                } else {
-                    false
-                };
-
-                // ジェネリック型パラメータのチェック
-                let callee_generics = if let ExprKind::Ident(name) = &func.kind {
-                    self.get_callee_generic_params(*name).cloned()
+                // 呼び出し先の名前を取得（literal_string 変換の判定に使用）
+                let callee_name = if let ExprKind::Ident(name) = &func.kind {
+                    Some(*name)
                 } else {
                     None
                 };
+
+                // THX マクロで my_perl が不足しているかチェック
+                let needs_my_perl = callee_name
+                    .map(|name| self.needs_my_perl_for_call(name, args.len()))
+                    .unwrap_or(false);
+
+                // ジェネリック型パラメータのチェック
+                let callee_generics = callee_name
+                    .and_then(|name| self.get_callee_generic_params(name).cloned());
 
                 if let Some(ref generics) = callee_generics {
                     let mut type_args = Vec::new();
@@ -753,11 +823,13 @@ impl<'a> RustCodegen<'a> {
                     } else {
                         vec![]
                     };
+                    let mut value_idx = if needs_my_perl { 1usize } else { 0 };
                     for (i, arg) in args.iter().enumerate() {
                         if generics.contains_key(&(i as i32)) {
                             type_args.push(self.expr_to_rust(arg, info));
                         } else {
-                            value_args.push(self.expr_to_rust(arg, info));
+                            value_args.push(self.expr_to_rust_arg(arg, info, callee_name, value_idx));
+                            value_idx += 1;
                         }
                     }
                     return format!("{}::<{}>({})", f, type_args.join(", "), value_args.join(", "));
@@ -768,7 +840,10 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     vec![]
                 };
-                a.extend(args.iter().map(|arg| self.expr_to_rust(arg, info)));
+                let arg_offset = if needs_my_perl { 1usize } else { 0 };
+                a.extend(args.iter().enumerate().map(|(i, arg)| {
+                    self.expr_to_rust_arg(arg, info, callee_name, i + arg_offset)
+                }));
                 format!("{}({})", f, a.join(", "))
             }
             ExprKind::Member { expr: base, member } => {
@@ -838,6 +913,14 @@ impl<'a> RustCodegen<'a> {
                 format!("(!{})", cond)
             }
             ExprKind::Sizeof(inner) => {
+                // sizeof(literal_string_param) → param.len() + 1
+                // C の sizeof はリテラル文字列の null 終端を含むサイズを返す
+                if let ExprKind::Ident(name) = &inner.kind {
+                    if self.current_literal_string_params.contains(name) {
+                        let param = escape_rust_keyword(self.interner.get(*name));
+                        return format!("({}.len() + 1)", param);
+                    }
+                }
                 let e = self.expr_to_rust(inner, info);
                 format!("std::mem::size_of_val(&{})", e)
             }
