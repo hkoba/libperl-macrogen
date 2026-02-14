@@ -359,6 +359,19 @@ impl<'a> RustCodegen<'a> {
         false
     }
 
+    /// 呼び出し先マクロのジェネリック型パラメータ情報を取得
+    fn get_callee_generic_params(&self, func_name: InternedStr) -> Option<&HashMap<i32, String>> {
+        let callee_info = self.macro_ctx.macros.get(&func_name)?;
+        if callee_info.generic_type_params.is_empty() {
+            return None;
+        }
+        if callee_info.generic_type_params.keys().any(|&k| k >= 0) {
+            Some(&callee_info.generic_type_params)
+        } else {
+            None
+        }
+    }
+
     /// マクロ呼び出し形式で出力すべきかを判定
     ///
     /// 以下の場合にマクロ呼び出し形式で出力する：
@@ -711,6 +724,30 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     false
                 };
+
+                // ジェネリック型パラメータのチェック
+                let callee_generics = if let ExprKind::Ident(name) = &func.kind {
+                    self.get_callee_generic_params(*name).cloned()
+                } else {
+                    None
+                };
+
+                if let Some(ref generics) = callee_generics {
+                    let mut type_args = Vec::new();
+                    let mut value_args: Vec<String> = if needs_my_perl {
+                        vec!["my_perl".to_string()]
+                    } else {
+                        vec![]
+                    };
+                    for (i, arg) in args.iter().enumerate() {
+                        if generics.contains_key(&(i as i32)) {
+                            type_args.push(self.expr_to_rust(arg, info));
+                        } else {
+                            value_args.push(self.expr_to_rust(arg, info));
+                        }
+                    }
+                    return format!("{}::<{}>({})", f, type_args.join(", "), value_args.join(", "));
+                }
 
                 let mut a: Vec<String> = if needs_my_perl {
                     vec!["my_perl".to_string()]
@@ -1676,6 +1713,30 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     false
                 };
+
+                // ジェネリック型パラメータのチェック
+                let callee_generics = if let ExprKind::Ident(name) = &func.kind {
+                    self.get_callee_generic_params(*name).cloned()
+                } else {
+                    None
+                };
+
+                if let Some(ref generics) = callee_generics {
+                    let mut type_args = Vec::new();
+                    let mut value_args: Vec<String> = if needs_my_perl {
+                        vec!["my_perl".to_string()]
+                    } else {
+                        vec![]
+                    };
+                    for (i, arg) in args.iter().enumerate() {
+                        if generics.contains_key(&(i as i32)) {
+                            type_args.push(self.expr_to_rust_inline(arg));
+                        } else {
+                            value_args.push(self.expr_to_rust_inline(arg));
+                        }
+                    }
+                    return format!("{}::<{}>({})", f, type_args.join(", "), value_args.join(", "));
+                }
 
                 let mut a: Vec<String> = if needs_my_perl {
                     vec!["my_perl".to_string()]

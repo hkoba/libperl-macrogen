@@ -1,157 +1,144 @@
-# Plan: Expand Object Macros Within Preserved Function Macro Arguments
+# Plan: ジェネリックマクロ呼び出しの turbofish 構文生成
 
-## Goal
+## Context
 
-関数マクロを保存（展開しない）モードで処理する際、引数内のオブジェクトマクロを展開する。
-
-例: `amagic_call(sv, &PL_sv_undef, meth, flags)` において、
-`amagic_call` は保存しつつ `PL_sv_undef` は展開する。
-
-## Background
-
-### 問題
-
-`expand_tokens_for_inference` において、`explicit_expand_macros` に含まれない関数マクロは
-「保存」される。しかし、引数トークンが生のままコピーされるため、引数内のオブジェクトマクロが
-展開されない。
-
-**現象の例**:
-```c
-// 入力: AMG_CALLunary マクロを展開すると
-amagic_call(sv, &PL_sv_undef, method, flags)
-
-// 期待: PL_sv_undef が展開される
-amagic_call(sv, &(PL_interpvar_table->Isv_undef), method, flags)
-
-// 現状: 生トークンがそのまま残る
-amagic_call(sv, &PL_sv_undef, method, flags)  // ← 未展開
-```
-
-### 原因箇所
-
-`src/preprocessor.rs:3208-3214`:
+`xV_FROM_REF(XV, ref)` は `fn xV_FROM_REF<T>(r#ref: *mut SV) -> *mut T` として正しく
+定義されるようになった。しかし、呼び出し側（例: `AV_FROM_REF(ref)` → `xV_FROM_REF(AV, ref)`）
+では型引数が通常の値引数として出力されている:
 
 ```rust
-// preserve_function_macros モード: explicit_expand に含まれない場合は保存
-if !self.explicit_expand_macros.contains(&id) {
-    // 展開しない: 識別子と引数をそのまま残す
-    result.push(token.clone());
-    result.extend(tokens[i + 1..i + 1 + consumed].iter().cloned());  // ← 生トークン
-    i += 1 + consumed;
-    continue;
+// 現状（不正）
+xV_FROM_REF(AV, r#ref)
+
+// 期待
+xV_FROM_REF::<AV>(r#ref)
+```
+
+## 設計
+
+### アプローチ
+
+`expr_to_rust` / `expr_to_rust_inline` の `ExprKind::Call` ハンドラで、
+呼び出し先が `generic_type_params` を持つマクロの場合、型パラメータに対応する引数を
+turbofish 構文に分離する。
+
+`needs_my_perl_for_call` と同じパターンで `macro_ctx` から呼び出し先のメタデータを参照する。
+
+### 処理フロー
+
+```
+ExprKind::Call { func: Ident("xV_FROM_REF"), args: [Ident("AV"), Ident("ref")] }
+
+1. macro_ctx.macros.get("xV_FROM_REF")
+   → callee_info.generic_type_params = { 0 => "T" }
+
+2. 引数を分類:
+   - args[0] ("AV"): generic_type_params に index 0 がある → 型引数
+   - args[1] ("ref"): generic_type_params に index 1 がない → 値引数
+
+3. 型引数を expr_to_rust で文字列化: "AV"
+4. 値引数を expr_to_rust で文字列化: "r#ref"
+
+5. 出力: "xV_FROM_REF::<AV>(r#ref)"
+```
+
+## 実装
+
+### ファイル: `src/rust_codegen.rs`
+
+#### 1. ヘルパーメソッド追加
+
+```rust
+/// 呼び出し先マクロのジェネリック型パラメータ情報を取得
+/// Returns: Some(generic_type_params) if callee has type params, None otherwise
+fn get_callee_generic_params(&self, func_name: InternedStr) -> Option<&HashMap<i32, String>> {
+    let callee_info = self.macro_ctx.macros.get(&func_name)?;
+    if callee_info.generic_type_params.is_empty() {
+        return None;
+    }
+    // 値パラメータ用の型引数のみ（index >= 0）
+    if callee_info.generic_type_params.keys().any(|&k| k >= 0) {
+        Some(&callee_info.generic_type_params)
+    } else {
+        None
+    }
 }
 ```
 
-### 既存の正しいパターン
+#### 2. `expr_to_rust` の Call ハンドラ修正
 
-`expand_macro_body_for_inference` では引数を展開してから使用している:
-
-```rust
-let (expanded_arg, arg_called) = self.expand_tokens_for_inference(
-    arg_tokens,
-    in_progress,
-)?;
-```
-
-## Design
-
-### 修正方針
-
-`try_collect_args_from_tokens` で収集した引数 `args` に対して、各引数を
-`expand_tokens_for_inference` で展開してから保存する。
-
-### 実装
-
-**File**: `src/preprocessor.rs`
-
-**修正箇所**: `expand_tokens_for_inference` 関数内、関数マクロ保存の分岐
+既存の `needs_my_perl` チェックの後に、ジェネリック型引数の分離ロジックを追加:
 
 ```rust
-// preserve_function_macros モード: explicit_expand に含まれない場合は保存
-if !self.explicit_expand_macros.contains(&id) {
-    // 関数名は保存
-    result.push(token.clone());
+ExprKind::Call { func, args } => {
+    // ... 既存の __builtin_expect, offsetof 処理 ...
 
-    // 引数を展開してから保存
-    // 開き括弧
-    result.push(Token::new(TokenKind::LParen, token.loc.clone()));
+    // ジェネリック型パラメータのチェック
+    let callee_generics = if let ExprKind::Ident(name) = &func.kind {
+        self.get_callee_generic_params(*name)
+            .map(|g| g.clone())
+    } else {
+        None
+    };
 
-    for (arg_idx, arg_tokens) in args.iter().enumerate() {
-        if arg_idx > 0 {
-            result.push(Token::new(TokenKind::Comma, token.loc.clone()));
+    if let Some(ref generics) = callee_generics {
+        // 型引数と値引数を分離
+        let mut type_args = Vec::new();
+        let mut value_args = Vec::new();
+
+        for (i, arg) in args.iter().enumerate() {
+            if generics.contains_key(&(i as i32)) {
+                type_args.push(self.expr_to_rust(arg, info));
+            } else {
+                value_args.push(self.expr_to_rust(arg, info));
+            }
         }
-        // 引数内のオブジェクトマクロを展開
-        let (expanded_arg, arg_called) = self.expand_tokens_for_inference(
-            arg_tokens,
-            in_progress,
-        )?;
-        called_macros.extend(arg_called);
-        result.extend(expanded_arg);
+
+        // THX my_perl 注入
+        if needs_my_perl {
+            value_args.insert(0, "my_perl".to_string());
+        }
+
+        let f = self.expr_to_rust(func, info);
+        return format!("{}::<{}>({})",
+            f,
+            type_args.join(", "),
+            value_args.join(", "));
     }
 
-    // 閉じ括弧
-    result.push(Token::new(TokenKind::RParen, token.loc.clone()));
-
-    i += 1 + consumed;
-    continue;
+    // ... 既存の通常関数呼び出し処理 ...
 }
 ```
 
-## Implementation Steps
+#### 3. `expr_to_rust_inline` にも同様の修正
 
-### Step 1: 修正の実装
+同じロジックを `expr_to_rust_inline` の `ExprKind::Call` ハンドラにも適用。
 
-`src/preprocessor.rs` の `expand_tokens_for_inference` 関数内で、
-関数マクロを保存する分岐を修正する。
+## 変更ファイル一覧
 
-### Step 2: テスト
+| ファイル | 変更内容 |
+|----------|----------|
+| `src/rust_codegen.rs` | `get_callee_generic_params` 追加、`expr_to_rust` / `expr_to_rust_inline` の Call ハンドラにジェネリック型引数の分離ロジック追加 |
 
-既存のテストが通ることを確認し、新しい動作を検証。
+## 検証
 
-## Files to Modify
+1. `cargo build` / `cargo test`
 
-| File | Changes |
-|------|---------|
-| `src/preprocessor.rs` | `expand_tokens_for_inference` の関数マクロ保存分岐を修正 |
-
-## Verification
-
-1. **ビルド確認**:
+2. 出力確認:
    ```bash
-   cargo build
+   cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
+     | grep -E 'xV_FROM_REF|AV_FROM_REF|CV_FROM_REF|HV_FROM_REF|INT2PTR|NUM2PTR|PTR2IV|PTR2UV'
    ```
+   - `xV_FROM_REF::<AV>(r#ref)` 形式で出力されること
+   - `INT2PTR::<IV>(p)` 形式で出力されること
 
-2. **テスト**:
-   ```bash
-   cargo test
-   ```
+3. 回帰テスト: `cargo test rust_codegen_regression`
 
-3. **出力確認**:
-   ```bash
-   cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null | grep -E 'PL_sv_undef|PL_defgv'
-   ```
+## エッジケース
 
-   期待: `PL_sv_undef`, `PL_defgv` が展開された形式で出力される
+1. **呼び出し先が macro_ctx に存在しない**: `get_callee_generic_params` が `None` を返す → 通常の関数呼び出しとして処理
 
-4. **回帰テスト**:
-   ```bash
-   cargo test rust_codegen_regression
-   ```
+2. **THX + ジェネリック**: `needs_my_perl` と `callee_generics` が同時に適用される場合
+   → 値引数に `my_perl` を先頭に追加
 
-## Edge Cases
-
-1. **ネストした関数マクロ**: `foo(bar(PL_sv_undef))`
-   - `bar` も保存対象の場合、`bar` の引数も再帰的に展開される
-
-2. **空の引数**: `foo()`
-   - 空の引数リストでもエラーにならないこと
-
-3. **可変引数**: `foo(a, b, ...)`
-   - 全ての引数が展開されること
-
-## Notes
-
-- この変更は `expand_tokens_for_inference` のみに影響
-- 通常のマクロ展開（`expand_token_list`）には影響しない
-- `wrapped_macros` の処理では既に `expand_token_list_preserve_fn` で引数を展開しているため、
-  同様のパターンに従う
+3. **全引数が型パラメータ**: 値引数が空になる → `func::<T>()` として生成（正しい）

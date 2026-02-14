@@ -119,7 +119,83 @@ fn generate_rust_code() -> Result<String, String> {
         .map_err(|e| format!("Invalid UTF-8 output: {}", e))
 }
 
-/// 空白の正規化（比較用）
+/// rustfmt による正規化（比較用）
+///
+/// コードスニペットをダミーモジュールで囲み、rustfmt で整形してから抽出する。
+/// rustfmt が利用できない場合や整形に失敗した場合は、空白のみの正規化にフォールバックする。
+fn normalize_with_rustfmt(s: &str) -> String {
+    let trimmed = s.trim();
+
+    // ダミーの型定義を追加して rustfmt が型名エラーで失敗しないようにする
+    let wrapped = format!(
+        "#![allow(unused, non_snake_case, non_camel_case_types)]\nmod __dummy {{\n{}\n}}\n",
+        trimmed
+    );
+
+    let mut child = match Command::new("rustfmt")
+        .args(["--edition", "2024", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return normalize_whitespace(trimmed),
+    };
+
+    use std::io::Write;
+    if let Some(ref mut stdin) = child.stdin {
+        let _ = stdin.write_all(wrapped.as_bytes());
+    }
+    drop(child.stdin.take());
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => return normalize_whitespace(trimmed),
+    };
+
+    if !output.status.success() {
+        return normalize_whitespace(trimmed);
+    }
+
+    let formatted = String::from_utf8_lossy(&output.stdout);
+
+    // "mod __dummy {" と最後の "}" を除去して中身を抽出
+    let lines: Vec<&str> = formatted.lines().collect();
+    let start = lines.iter().position(|l| l.contains("mod __dummy"));
+    let end = lines.iter().rposition(|l| l.trim() == "}");
+
+    match (start, end) {
+        (Some(s), Some(e)) if s < e => {
+            // mod __dummy { の次の行から最後の } の前まで
+            let body_start = s + 1;
+            let inner: Vec<&str> = lines[body_start..e].to_vec();
+            // rustfmt がインデントを追加するので、共通インデントを除去
+            let min_indent = inner
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.len() - l.trim_start().len())
+                .min()
+                .unwrap_or(0);
+            inner
+                .iter()
+                .map(|l| {
+                    if l.len() > min_indent {
+                        &l[min_indent..]
+                    } else {
+                        l.trim()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        }
+        _ => normalize_whitespace(trimmed),
+    }
+}
+
+/// 空白の正規化（フォールバック用）
 fn normalize_whitespace(s: &str) -> String {
     s.lines()
         .map(|line| line.trim_end())
@@ -156,13 +232,13 @@ fn test_rust_codegen_regression() {
             }
         };
 
-        // 比較（空白を正規化）
-        let expected_normalized = normalize_whitespace(&expected);
-        let actual_normalized = normalize_whitespace(&actual);
+        // 比較（rustfmt で正規化）
+        let expected_normalized = normalize_with_rustfmt(&expected);
+        let actual_normalized = normalize_with_rustfmt(&actual);
 
         if expected_normalized != actual_normalized {
             failures.push(format!(
-                "{}: Output mismatch\n--- Expected ---\n{}\n--- Actual ---\n{}",
+                "{}: Output mismatch\n--- Expected (rustfmt normalized) ---\n{}\n--- Actual (rustfmt normalized) ---\n{}",
                 fn_name, expected_normalized, actual_normalized
             ));
         } else {
@@ -206,8 +282,8 @@ mod individual_tests {
         let actual = extract_function(&generated, fn_name)
             .expect(&format!("Function {} not found in generated output", fn_name));
 
-        let expected_normalized = normalize_whitespace(&expected);
-        let actual_normalized = normalize_whitespace(&actual);
+        let expected_normalized = normalize_with_rustfmt(&expected);
+        let actual_normalized = normalize_with_rustfmt(&actual);
 
         assert_eq!(
             expected_normalized, actual_normalized,
