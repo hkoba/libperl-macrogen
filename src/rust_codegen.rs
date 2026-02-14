@@ -417,7 +417,7 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             let param = escape_rust_keyword(self.interner.get(*name));
-            return format!("{}.as_ptr()", param);
+            return format!("{}.as_ptr() as *const c_char", param);
         }
         self.expr_to_rust(expr, info)
     }
