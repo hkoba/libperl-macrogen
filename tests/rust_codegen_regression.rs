@@ -15,6 +15,8 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "Perl_CvDEPTH",
     "Perl_cx_topblock",
     "OP_CLASS",
+    "CvDEPTH",
+    "CvGV",
     "CvSTASH",
     "CopFILE",
     "CopFILEAV",
