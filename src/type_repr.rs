@@ -56,6 +56,8 @@ pub enum CTypeSource {
     FieldInference { field_name: InternedStr },
     /// キャスト式の型名（AST から直接変換）
     Cast,
+    /// SV ファミリーキャストからの型推論
+    SvFamilyCast,
 }
 
 // ============================================================================
@@ -674,6 +676,7 @@ impl TypeRepr {
                 CTypeSource::Parser => "parser",
                 CTypeSource::FieldInference { .. } => "field-inference",
                 CTypeSource::Cast => "cast",
+                CTypeSource::SvFamilyCast => "sv-family-cast",
             },
             TypeRepr::RustType { .. } => "rust-bindings",
             TypeRepr::Inferred(_) => "inferred",

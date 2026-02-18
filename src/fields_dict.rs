@@ -417,6 +417,19 @@ impl FieldsDict {
         self.sv_head_type_to_struct.get(normalized).copied()
     }
 
+    /// 型名（typedef 名または構造体名）が SV ファミリーかどうかを判定
+    pub fn is_sv_family_type(&self, type_name: InternedStr) -> bool {
+        // 構造体名で直接チェック
+        if self.sv_family_members.contains(&type_name) {
+            return true;
+        }
+        // typedef 名 → 構造体名に解決してチェック
+        if let Some(struct_name) = self.typedef_to_struct.get(&type_name) {
+            return self.sv_family_members.contains(struct_name);
+        }
+        false
+    }
+
     /// 動的に検出された SV ファミリーメンバーの数を取得
     pub fn sv_family_members_count(&self) -> usize {
         self.sv_family_members.len()

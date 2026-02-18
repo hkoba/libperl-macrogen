@@ -1058,6 +1058,17 @@ impl<'a> SemanticAnalyzer<'a> {
         self.macro_params.contains(&name)
     }
 
+    /// *mut SV を表す TypeRepr を作成
+    fn make_sv_ptr_type(&self) -> TypeRepr {
+        let sv_name = self.interner.lookup("SV")
+            .expect("SV should be interned");
+        TypeRepr::CType {
+            specs: CTypeSpecs::TypedefName(sv_name),
+            derived: vec![CDerivedType::Pointer { is_const: false, is_volatile: false, is_restrict: false }],
+            source: CTypeSource::SvFamilyCast,
+        }
+    }
+
     /// type_env から式の TypeRepr を直接取得
     fn get_expr_type_repr(&self, expr_id: ExprId, type_env: &TypeEnv) -> Option<TypeRepr> {
         type_env.expr_constraints.get(&expr_id)
@@ -1346,8 +1357,8 @@ impl<'a> SemanticAnalyzer<'a> {
                     })
                     .unwrap_or_default();
                 let target_type = TypeRepr::CType {
-                    specs,
-                    derived,
+                    specs: specs.clone(),
+                    derived: derived.clone(),
                     source: CTypeSource::Cast,
                 };
                 type_env.add_constraint(TypeEnvConstraint::new(
@@ -1357,6 +1368,29 @@ impl<'a> SemanticAnalyzer<'a> {
                     }),
                     "cast expression",
                 ));
+
+                // SV ファミリーキャストからのパラメータ型推論
+                // (SV_FAMILY_TYPE *)param → param に *mut SV 制約を追加
+                if let Some(fields_dict) = self.fields_dict {
+                    let is_single_ptr = derived.len() == 1
+                        && matches!(derived[0], CDerivedType::Pointer { .. });
+                    if is_single_ptr {
+                        if let Some(type_name_id) = specs.type_name() {
+                            if fields_dict.is_sv_family_type(type_name_id) {
+                                if let ExprKind::Ident(param_name) = &inner.kind {
+                                    if self.is_macro_param(*param_name) {
+                                        let sv_type = self.make_sv_ptr_type();
+                                        type_env.add_constraint(TypeEnvConstraint::new(
+                                            inner.id,
+                                            sv_type,
+                                            "SV family cast",
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 配列添字
