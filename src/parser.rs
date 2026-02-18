@@ -1023,7 +1023,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
     }
 
     /// ブロック項目をパース
-    fn parse_block_item(&mut self) -> Result<BlockItem> {
+    pub(crate) fn parse_block_item(&mut self) -> Result<BlockItem> {
         if self.is_declaration_start() {
             Ok(BlockItem::Decl(self.parse_declaration()?))
         } else {
@@ -2818,6 +2818,60 @@ pub fn parse_statement_from_tokens_ref_with_generic_params(
     };
     let detected = parser.detected_type_params;
     Ok((stmt, stats, detected))
+}
+
+/// トークン列を複数のブロック項目としてパース
+///
+/// セミコロン区切りの複数文を含むマクロ本体のパースに使用。
+/// `{ }` なしの BlockItem リストをパースし、EOF まで読む。
+///
+/// # Returns
+/// (パースされたブロック項目リスト, 統計情報)
+pub fn parse_block_items_from_tokens_ref_with_stats(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<(Vec<BlockItem>, ParseStats)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.allow_missing_semi = true;
+    let mut items = Vec::new();
+    while !parser.check(&TokenKind::Eof) {
+        items.push(parser.parse_block_item()?);
+    }
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
+    };
+    Ok((items, stats))
+}
+
+/// トークン列を複数のブロック項目としてパース（generic_params 付き）
+///
+/// # Returns
+/// (パースされたブロック項目リスト, 統計情報, 検出された型パラメータ)
+pub fn parse_block_items_from_tokens_ref_with_generic_params(
+    tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+    generic_params: HashMap<InternedStr, usize>,
+) -> Result<(Vec<BlockItem>, ParseStats, HashSet<InternedStr>)> {
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    parser.allow_missing_semi = true;
+    parser.generic_params = generic_params;
+    let mut items = Vec::new();
+    while !parser.check(&TokenKind::Eof) {
+        items.push(parser.parse_block_item()?);
+    }
+    let stats = ParseStats {
+        function_call_count: parser.function_call_count,
+        deref_count: parser.deref_count,
+    };
+    let detected = parser.detected_type_params;
+    Ok((items, stats, detected))
 }
 
 /// 型文字列から TypeName をパース

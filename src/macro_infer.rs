@@ -17,6 +17,8 @@ use crate::parser::{
     parse_expression_from_tokens_ref_with_generic_params,
     parse_statement_from_tokens_ref_with_stats,
     parse_statement_from_tokens_ref_with_generic_params,
+    parse_block_items_from_tokens_ref_with_stats,
+    parse_block_items_from_tokens_ref_with_generic_params,
     ParseStats,
 };
 use crate::rust_decl::RustDeclDict;
@@ -935,6 +937,22 @@ impl MacroInferContext {
         }
     }
 
+    /// トークン列のトップレベル（括弧の外側）にセミコロンがあるか判定
+    fn has_toplevel_semicolon(tokens: &[Token]) -> bool {
+        let mut depth = 0;
+        for t in tokens {
+            match t.kind {
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                    if depth > 0 { depth -= 1; }
+                }
+                TokenKind::Semi if depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// トークン列を式または文としてパース試行
     ///
     /// # Returns
@@ -976,6 +994,33 @@ impl MacroInferContext {
                     Ok((stmt, stats, detected)) => {
                         return (
                             ParseResult::Statement(vec![BlockItem::Stmt(stmt)]),
+                            stats,
+                            detected,
+                        );
+                    }
+                    Err(_) => {} // フォールスルーして式としてパース
+                }
+            }
+        }
+
+        // トップレベルにセミコロンがあれば複数文パースを試行
+        if Self::has_toplevel_semicolon(tokens) {
+            if generic_params.is_empty() {
+                match parse_block_items_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
+                    Ok((items, stats)) => {
+                        return (
+                            ParseResult::Statement(items),
+                            stats,
+                            HashSet::new(),
+                        );
+                    }
+                    Err(_) => {} // フォールスルーして式としてパース
+                }
+            } else {
+                match parse_block_items_from_tokens_ref_with_generic_params(tokens.to_vec(), interner, files, typedefs, generic_params.clone()) {
+                    Ok((items, stats, detected)) => {
+                        return (
+                            ParseResult::Statement(items),
                             stats,
                             detected,
                         );
