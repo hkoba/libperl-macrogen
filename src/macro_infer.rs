@@ -23,7 +23,7 @@ use crate::rust_decl::RustDeclDict;
 use crate::semantic::SemanticAnalyzer;
 use crate::preprocessor::Preprocessor;
 use crate::source::FileRegistry;
-use crate::token::TokenKind;
+use crate::token::{Token, TokenKind};
 use crate::type_env::{TypeConstraint, TypeEnv};
 use crate::type_repr::TypeRepr;
 
@@ -86,6 +86,10 @@ pub struct ExplicitExpandSymbols {
     pub str_with_len: InternedStr,
     /// INT2PTR マクロ（整数からポインタへのキャスト）
     pub int2ptr: InternedStr,
+    /// assert_not_ROK マクロ（assert_ ラッパー）
+    pub assert_not_rok: InternedStr,
+    /// assert_not_glob マクロ（assert_ ラッパー）
+    pub assert_not_glob: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -103,6 +107,8 @@ impl ExplicitExpandSymbols {
             assert_underscore_: interner.intern("__ASSERT_"),
             str_with_len: interner.intern("STR_WITH_LEN"),
             int2ptr: interner.intern("INT2PTR"),
+            assert_not_rok: interner.intern("assert_not_ROK"),
+            assert_not_glob: interner.intern("assert_not_glob"),
         }
     }
 
@@ -120,6 +126,8 @@ impl ExplicitExpandSymbols {
             self.assert_underscore_,
             self.str_with_len,
             self.int2ptr,
+            self.assert_not_rok,
+            self.assert_not_glob,
         ].into_iter()
     }
 }
@@ -697,6 +705,12 @@ impl MacroInferContext {
                 (def.body.clone(), HashSet::new())
             }
         };
+
+        // assert_(cond) の後にカンマを注入（パースエラー防止）
+        let expanded_tokens = inject_comma_after_assert_underscore(
+            &expanded_tokens,
+            &no_expand,
+        );
 
         // def-use 関係を収集（呼び出されたマクロの集合から）
         self.collect_uses_from_called(&called_macros, &mut info);
@@ -1550,6 +1564,78 @@ impl Default for MacroInferContext {
     }
 }
 
+/// `assert_(cond)` 呼び出しの後にカンマトークンを注入
+///
+/// C の `assert_(what)` は DEBUGGING 時に `assert(what),`（末尾カンマ付き）に展開される。
+/// マクロ推論では `assert_` を展開せずに残すため、`assert_(c1) assert_(c2) expr` のように
+/// カンマなしで隣接してパースエラーになる。この関数は元の意味論を再現するために
+/// `assert_(...)` の後にカンマを注入する。
+fn inject_comma_after_assert_underscore(
+    tokens: &[Token],
+    no_expand: &NoExpandSymbols,
+) -> Vec<Token> {
+    let assert_underscore = no_expand.assert_;
+
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+
+    while i < tokens.len() {
+        if matches!(tokens[i].kind, TokenKind::Ident(name) if name == assert_underscore) {
+            // assert_ トークンをコピー
+            result.push(tokens[i].clone());
+            i += 1;
+
+            // 空白をスキップしつつコピー
+            while i < tokens.len() && matches!(tokens[i].kind, TokenKind::Space | TokenKind::Newline) {
+                result.push(tokens[i].clone());
+                i += 1;
+            }
+
+            // ( ... ) を括弧の深さを追跡しながらコピー
+            if i < tokens.len() && matches!(tokens[i].kind, TokenKind::LParen) {
+                let mut depth = 0;
+                loop {
+                    if i >= tokens.len() {
+                        break;
+                    }
+                    match tokens[i].kind {
+                        TokenKind::LParen => depth += 1,
+                        TokenKind::RParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                result.push(tokens[i].clone());
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    result.push(tokens[i].clone());
+                    i += 1;
+                }
+
+                // RParen の後にカンマを注入（後続が式の開始の場合のみ）
+                let next_significant = tokens[i..].iter()
+                    .find(|t| !matches!(t.kind, TokenKind::Space | TokenKind::Newline));
+                let needs_comma = next_significant
+                    .is_some_and(|t| !matches!(t.kind,
+                        TokenKind::Comma | TokenKind::RParen | TokenKind::Eof
+                        | TokenKind::Semi));
+                if needs_comma {
+                    let loc = result.last().map(|t| t.loc.clone())
+                        .unwrap_or_default();
+                    result.push(Token::new(TokenKind::Comma, loc));
+                }
+            }
+        } else {
+            result.push(tokens[i].clone());
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// マクロ名がアサーションマクロかどうかを判定
 pub fn detect_assert_kind(name: &str) -> Option<AssertKind> {
     match name {
@@ -1890,6 +1976,8 @@ mod tests {
         assert_eq!(interner.get(symbols.cbool), "cBOOL");
         assert_eq!(interner.get(symbols.assert_underscore_), "__ASSERT_");
         assert_eq!(interner.get(symbols.str_with_len), "STR_WITH_LEN");
+        assert_eq!(interner.get(symbols.assert_not_rok), "assert_not_ROK");
+        assert_eq!(interner.get(symbols.assert_not_glob), "assert_not_glob");
     }
 
     #[test]
@@ -1898,7 +1986,7 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 11);
+        assert_eq!(syms.len(), 13);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.cv_flags));
@@ -1909,5 +1997,7 @@ mod tests {
         assert!(syms.contains(&symbols.cbool));
         assert!(syms.contains(&symbols.assert_underscore_));
         assert!(syms.contains(&symbols.str_with_len));
+        assert!(syms.contains(&symbols.assert_not_rok));
+        assert!(syms.contains(&symbols.assert_not_glob));
     }
 }

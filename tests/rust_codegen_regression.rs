@@ -27,6 +27,8 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "AMG_CALLunary",
     "newSVpvs",
     "sv_upgrade",
+    "SvOK_off",
+    "SvIOK_only_UV",
 ];
 
 /// 生成された Rust コードから特定の関数を抽出する
