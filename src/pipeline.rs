@@ -41,7 +41,7 @@ use std::path::PathBuf;
 
 use crate::perl_config::{get_perl_config, PerlConfigError, get_default_target_dir};
 use crate::preprocessor::{PPConfig, Preprocessor};
-use crate::rust_codegen::{CodegenConfig as RustCodegenConfig, CodegenDriver, CodegenStats};
+use crate::rust_codegen::{BindingsInfo, CodegenConfig as RustCodegenConfig, CodegenDriver, CodegenStats};
 use crate::infer_api::{InferResult, InferError};
 use crate::error::CompileError;
 
@@ -607,11 +607,16 @@ impl InferredPipeline {
     pub fn generate<W: Write>(self, mut writer: W) -> Result<GeneratedPipeline, PipelineError> {
         let rust_codegen_config = self.codegen_config.to_rust_codegen_config();
 
+        let bindings_info = self.result.rust_decl_dict.as_ref()
+            .map(|d| BindingsInfo::from_rust_decl_dict(d))
+            .unwrap_or_default();
+
         let mut driver = CodegenDriver::new(
             &mut writer,
             self.result.preprocessor.interner(),
             &self.result.enum_dict,
             &self.result.infer_ctx,
+            bindings_info,
             rust_codegen_config,
         );
 

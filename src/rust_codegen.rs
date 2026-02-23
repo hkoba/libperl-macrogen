@@ -11,7 +11,27 @@ use crate::enum_dict::EnumDict;
 use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferContext, MacroInferInfo, MacroParam, ParseResult};
+use crate::rust_decl::RustDeclDict;
 use crate::sexp::SexpPrinter;
+
+/// bindings.rs から抽出した codegen 用情報
+#[derive(Debug, Default, Clone)]
+pub struct BindingsInfo {
+    /// 配列型の extern static 変数名の集合
+    pub static_arrays: HashSet<String>,
+    /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
+    pub bitfield_methods: HashMap<String, HashSet<String>>,
+}
+
+impl BindingsInfo {
+    /// RustDeclDict から BindingsInfo を構築
+    pub fn from_rust_decl_dict(dict: &RustDeclDict) -> Self {
+        Self {
+            static_arrays: dict.static_arrays.clone(),
+            bitfield_methods: dict.bitfield_methods.clone(),
+        }
+    }
+}
 
 /// Rust の予約語リスト（strict keywords + reserved keywords）
 /// 注: true/false はリテラルなので含めない
@@ -353,6 +373,8 @@ pub struct RustCodegen<'a> {
     enum_dict: &'a EnumDict,
     /// マクロ推論コンテキスト（THX マクロ呼び出し判定用）
     macro_ctx: &'a MacroInferContext,
+    /// bindings.rs から抽出した情報
+    bindings_info: BindingsInfo,
     /// 内部バッファ（生成結果を蓄積）
     buffer: String,
     /// 不完全マーカーの生成回数
@@ -377,6 +399,8 @@ pub struct CodegenDriver<'a, W: Write> {
     enum_dict: &'a EnumDict,
     /// マクロ推論コンテキスト（THX マクロ呼び出し判定用）
     macro_ctx: &'a MacroInferContext,
+    /// bindings.rs から抽出した情報
+    bindings_info: BindingsInfo,
     config: CodegenConfig,
     stats: CodegenStats,
 }
@@ -387,11 +411,13 @@ impl<'a> RustCodegen<'a> {
         interner: &'a StringInterner,
         enum_dict: &'a EnumDict,
         macro_ctx: &'a MacroInferContext,
+        bindings_info: BindingsInfo,
     ) -> Self {
         Self {
             interner,
             enum_dict,
             macro_ctx,
+            bindings_info,
             buffer: String::new(),
             incomplete_count: 0,
             current_type_param_map: HashMap::new(),
@@ -416,6 +442,24 @@ impl<'a> RustCodegen<'a> {
             }
         }
         false
+    }
+
+    /// 式が既知の static 配列名かどうかをチェック
+    fn is_static_array_expr(&self, expr: &Expr) -> bool {
+        if let ExprKind::Ident(name) = &expr.kind {
+            let name_str = self.interner.get(*name);
+            self.bindings_info.static_arrays.contains(name_str)
+        } else {
+            false
+        }
+    }
+
+    /// フィールド名がビットフィールドメソッドかどうかをチェック
+    ///
+    /// 構造体名が不明な場合は、全構造体のビットフィールドメソッド名を検索
+    fn is_bitfield_method(&self, member_name: &str) -> bool {
+        self.bindings_info.bitfield_methods.values()
+            .any(|methods| methods.contains(member_name))
     }
 
     /// 呼び出し先マクロのジェネリック型パラメータ情報を取得
@@ -942,17 +986,29 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Member { expr: base, member } => {
                 let e = self.expr_to_rust(base, info);
                 let m = self.interner.get(*member);
-                format!("({}).{}", e, m)
+                if self.is_bitfield_method(m) {
+                    format!("({}).{}()", e, m)
+                } else {
+                    format!("({}).{}", e, m)
+                }
             }
             ExprKind::PtrMember { expr: base, member } => {
                 let e = self.expr_to_rust(base, info);
                 let m = self.interner.get(*member);
-                format!("(*{}).{}", e, m)
+                if self.is_bitfield_method(m) {
+                    format!("(*{}).{}()", e, m)
+                } else {
+                    format!("(*{}).{}", e, m)
+                }
             }
             ExprKind::Index { expr: base, index } => {
                 let b = self.expr_to_rust(base, info);
                 let i = self.expr_to_rust(index, info);
-                format!("(*{}.offset({} as isize))", b, i)
+                if self.is_static_array_expr(base) {
+                    format!("(*{}.as_ptr().offset({} as isize))", b, i)
+                } else {
+                    format!("(*{}.offset({} as isize))", b, i)
+                }
             }
             ExprKind::Cast { type_name, expr: inner } => {
                 let e = self.expr_to_rust(inner, info);
@@ -976,19 +1032,36 @@ impl<'a> RustCodegen<'a> {
                 format!("(&mut {})", e)
             }
             ExprKind::PreInc(inner) => {
-                let e = self.expr_to_rust(inner, info);
+                // lvalue が MacroCall の場合は展開形式を使用
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust(expanded, info)
+                } else {
+                    self.expr_to_rust(inner, info)
+                };
                 format!("{{ {} += 1; {} }}", e, e)
             }
             ExprKind::PreDec(inner) => {
-                let e = self.expr_to_rust(inner, info);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust(expanded, info)
+                } else {
+                    self.expr_to_rust(inner, info)
+                };
                 format!("{{ {} -= 1; {} }}", e, e)
             }
             ExprKind::PostInc(inner) => {
-                let e = self.expr_to_rust(inner, info);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust(expanded, info)
+                } else {
+                    self.expr_to_rust(inner, info)
+                };
                 format!("{{ let _t = {}; {} += 1; _t }}", e, e)
             }
             ExprKind::PostDec(inner) => {
-                let e = self.expr_to_rust(inner, info);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust(expanded, info)
+                } else {
+                    self.expr_to_rust(inner, info)
+                };
                 format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
             }
             ExprKind::UnaryPlus(inner) => {
@@ -1039,7 +1112,12 @@ impl<'a> RustCodegen<'a> {
                 format!("{{ {}; {} }}", l, r)
             }
             ExprKind::Assign { op, lhs, rhs } => {
-                let l = self.expr_to_rust(lhs, info);
+                // LHS が MacroCall の場合は展開形式で lvalue アクセス
+                let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
+                    self.expr_to_rust(expanded, info)
+                } else {
+                    self.expr_to_rust(lhs, info)
+                };
                 let r = self.expr_to_rust(rhs, info);
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
@@ -1571,7 +1649,12 @@ impl<'a> RustCodegen<'a> {
             Stmt::Expr(Some(expr), _) => {
                 // 代入式は値を返さない形式で出力
                 if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
-                    let l = self.expr_to_rust_inline(lhs);
+                    // LHS が MacroCall の場合は展開形式で lvalue アクセス
+                    let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
+                        self.expr_to_rust_inline(expanded)
+                    } else {
+                        self.expr_to_rust_inline(lhs)
+                    };
                     let r = self.expr_to_rust_inline(rhs);
                     match op {
                         AssignOp::Assign => format!("{}{} = {};", indent, l, r),
@@ -2031,17 +2114,29 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Member { expr: base, member } => {
                 let e = self.expr_to_rust_inline(base);
                 let m = self.interner.get(*member);
-                format!("({}).{}", e, m)
+                if self.is_bitfield_method(m) {
+                    format!("({}).{}()", e, m)
+                } else {
+                    format!("({}).{}", e, m)
+                }
             }
             ExprKind::PtrMember { expr: base, member } => {
                 let e = self.expr_to_rust_inline(base);
                 let m = self.interner.get(*member);
-                format!("(*{}).{}", e, m)
+                if self.is_bitfield_method(m) {
+                    format!("(*{}).{}()", e, m)
+                } else {
+                    format!("(*{}).{}", e, m)
+                }
             }
             ExprKind::Index { expr: base, index } => {
                 let b = self.expr_to_rust_inline(base);
                 let i = self.expr_to_rust_inline(index);
-                format!("(*{}.offset({} as isize))", b, i)
+                if self.is_static_array_expr(base) {
+                    format!("(*{}.as_ptr().offset({} as isize))", b, i)
+                } else {
+                    format!("(*{}.offset({} as isize))", b, i)
+                }
             }
             ExprKind::Cast { type_name, expr: inner } => {
                 let e = self.expr_to_rust_inline(inner);
@@ -2065,19 +2160,35 @@ impl<'a> RustCodegen<'a> {
                 format!("(&mut {})", e)
             }
             ExprKind::PreInc(inner) => {
-                let e = self.expr_to_rust_inline(inner);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust_inline(expanded)
+                } else {
+                    self.expr_to_rust_inline(inner)
+                };
                 format!("{{ {} += 1; {} }}", e, e)
             }
             ExprKind::PreDec(inner) => {
-                let e = self.expr_to_rust_inline(inner);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust_inline(expanded)
+                } else {
+                    self.expr_to_rust_inline(inner)
+                };
                 format!("{{ {} -= 1; {} }}", e, e)
             }
             ExprKind::PostInc(inner) => {
-                let e = self.expr_to_rust_inline(inner);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust_inline(expanded)
+                } else {
+                    self.expr_to_rust_inline(inner)
+                };
                 format!("{{ let _t = {}; {} += 1; _t }}", e, e)
             }
             ExprKind::PostDec(inner) => {
-                let e = self.expr_to_rust_inline(inner);
+                let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
+                    self.expr_to_rust_inline(expanded)
+                } else {
+                    self.expr_to_rust_inline(inner)
+                };
                 format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
             }
             ExprKind::UnaryPlus(inner) => self.expr_to_rust_inline(inner),
@@ -2118,7 +2229,12 @@ impl<'a> RustCodegen<'a> {
                 format!("{{ {}; {} }}", l, r)
             }
             ExprKind::Assign { op, lhs, rhs } => {
-                let l = self.expr_to_rust_inline(lhs);
+                // LHS が MacroCall の場合は展開形式で lvalue アクセス
+                let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
+                    self.expr_to_rust_inline(expanded)
+                } else {
+                    self.expr_to_rust_inline(lhs)
+                };
                 let r = self.expr_to_rust_inline(rhs);
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
@@ -2211,6 +2327,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         interner: &'a StringInterner,
         enum_dict: &'a EnumDict,
         macro_ctx: &'a MacroInferContext,
+        bindings_info: BindingsInfo,
         config: CodegenConfig,
     ) -> Self {
         Self {
@@ -2218,6 +2335,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             interner,
             enum_dict,
             macro_ctx,
+            bindings_info,
             config,
             stats: CodegenStats::default(),
         }
@@ -2327,7 +2445,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
 
             // 新しい RustCodegen を使って inline 関数を生成
-            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx);
+            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone());
             let generated = codegen.generate_inline_fn(*name, func_def);
 
             if generated.is_complete() {
@@ -2368,7 +2486,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx);
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone());
                     let generated = codegen.generate_macro(info);
 
                     if generated.is_complete() {

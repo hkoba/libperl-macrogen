@@ -62,6 +62,10 @@ pub struct RustDeclDict {
     pub structs: HashMap<String, RustStruct>,
     pub types: HashMap<String, RustTypeAlias>,
     pub enums: HashSet<String>,
+    /// 配列型の extern static 変数名の集合
+    pub static_arrays: HashSet<String>,
+    /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
+    pub bitfield_methods: HashMap<String, HashSet<String>>,
 }
 
 impl RustDeclDict {
@@ -129,14 +133,24 @@ impl RustDeclDict {
                 }
             }
             Item::ForeignMod(foreign_mod) => {
-                // extern "C" { ... } ブロック内の関数
+                // extern "C" { ... } ブロック内の関数と static 変数
                 for foreign_item in &foreign_mod.items {
-                    if let syn::ForeignItem::Fn(fn_item) = foreign_item {
-                        if Self::is_pub(&fn_item.vis) {
-                            if let Some(rust_fn) = Self::extract_fn(&fn_item.sig) {
-                                self.fns.insert(rust_fn.name.clone(), rust_fn);
+                    match foreign_item {
+                        syn::ForeignItem::Fn(fn_item) => {
+                            if Self::is_pub(&fn_item.vis) {
+                                if let Some(rust_fn) = Self::extract_fn(&fn_item.sig) {
+                                    self.fns.insert(rust_fn.name.clone(), rust_fn);
+                                }
                             }
                         }
+                        syn::ForeignItem::Static(static_item) => {
+                            let name = static_item.ident.to_string();
+                            let ty_str = Self::type_to_string(&static_item.ty);
+                            if ty_str.starts_with("[") {
+                                self.static_arrays.insert(name);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -145,9 +159,24 @@ impl RustDeclDict {
                     self.enums.insert(item_enum.ident.to_string());
                 }
             }
-            Item::Impl(_) => {
-                // impl ブロック内のpubメソッドも収集可能（必要なら）
-                // 今回はスキップ
+            Item::Impl(item_impl) => {
+                // ビットフィールドのゲッターメソッドを収集
+                let struct_name = Self::type_to_string(&item_impl.self_ty);
+                for impl_item in &item_impl.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        let body_str = method.block.to_token_stream().to_string();
+                        if Self::has_self_receiver(&method.sig)
+                            && body_str.contains("_bitfield_")
+                            && method.sig.inputs.len() == 1  // getter: &self のみ
+                        {
+                            let method_name = method.sig.ident.to_string();
+                            self.bitfield_methods
+                                .entry(struct_name.clone())
+                                .or_default()
+                                .insert(method_name);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -156,6 +185,11 @@ impl RustDeclDict {
     /// 可視性がpubかどうか
     fn is_pub(vis: &Visibility) -> bool {
         matches!(vis, Visibility::Public(_))
+    }
+
+    /// 関数シグネチャが &self レシーバを持つかどうか
+    fn has_self_receiver(sig: &syn::Signature) -> bool {
+        sig.inputs.first().is_some_and(|arg| matches!(arg, FnArg::Receiver(_)))
     }
 
     /// 型を文字列に変換
