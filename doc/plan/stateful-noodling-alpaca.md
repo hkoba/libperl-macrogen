@@ -1,144 +1,251 @@
-# Plan: ジェネリックマクロ呼び出しの turbofish 構文生成
+# Plan: Phase 2 — 型システム変換の根本改修
 
 ## Context
 
-`xV_FROM_REF(XV, ref)` は `fn xV_FROM_REF<T>(r#ref: *mut SV) -> *mut T` として正しく
-定義されるようになった。しかし、呼び出し側（例: `AV_FROM_REF(ref)` → `xV_FROM_REF(AV, ref)`）
-では型引数が通常の値引数として出力されている:
+`libperl-macrogen` の生成コードを `libperl-sys` に統合するにあたり、
+C と Rust の型システムの違いに起因するコンパイルエラーが ~1,143 件発生している。
+Phase 1 で低コスト修正（c_uchar, GCC builtins, MUTABLE_PTR, goto 除外）を完了し、
+1,929→1,895 エラーまで削減した。
 
+Phase 2 では codegen レイヤー（`rust_codegen.rs`）に体系的な型変換ルールを追加し、
+最大 ~900 エラーの削減を目指す。
+
+## 設計方針
+
+### 戻り値型コンテキストの伝搬
+
+現在 `expr_to_rust` / `expr_to_rust_inline` は型コンテキストを受け取らないため、
+`0` を `null_mut()` や `false` に変換できない。
+
+**アプローチ**: `RustCodegen` 構造体に `current_return_type: Option<String>` フィールドを追加。
+関数生成開始時にセットし、`return` 文・条件式・トップレベル式で参照する。
+
+シグネチャ変更なし → 既存の全呼び出しサイトに影響しない。
+
+## 実装ステップ
+
+### Step 1: 基盤 — `current_return_type` フィールド追加
+
+**ファイル**: `src/rust_codegen.rs`
+
+`RustCodegen` 構造体（L326-341）に追加:
 ```rust
-// 現状（不正）
-xV_FROM_REF(AV, r#ref)
-
-// 期待
-xV_FROM_REF::<AV>(r#ref)
+current_return_type: Option<String>,
 ```
 
-## 設計
+セットする箇所:
+- `generate_macro` (L502): `self.current_return_type = Some(return_type.clone())`
+- `generate_inline_fn` (L1305): `self.current_return_type = Some(return_type.clone())`
 
-### アプローチ
-
-`expr_to_rust` / `expr_to_rust_inline` の `ExprKind::Call` ハンドラで、
-呼び出し先が `generic_type_params` を持つマクロの場合、型パラメータに対応する引数を
-turbofish 構文に分離する。
-
-`needs_my_perl_for_call` と同じパターンで `macro_ctx` から呼び出し先のメタデータを参照する。
-
-### 処理フロー
-
-```
-ExprKind::Call { func: Ident("xV_FROM_REF"), args: [Ident("AV"), Ident("ref")] }
-
-1. macro_ctx.macros.get("xV_FROM_REF")
-   → callee_info.generic_type_params = { 0 => "T" }
-
-2. 引数を分類:
-   - args[0] ("AV"): generic_type_params に index 0 がある → 型引数
-   - args[1] ("ref"): generic_type_params に index 1 がない → 値引数
-
-3. 型引数を expr_to_rust で文字列化: "AV"
-4. 値引数を expr_to_rust で文字列化: "r#ref"
-
-5. 出力: "xV_FROM_REF::<AV>(r#ref)"
-```
-
-## 実装
-
-### ファイル: `src/rust_codegen.rs`
-
-#### 1. ヘルパーメソッド追加
-
+ヘルパー関数（モジュールレベル）:
 ```rust
-/// 呼び出し先マクロのジェネリック型パラメータ情報を取得
-/// Returns: Some(generic_type_params) if callee has type params, None otherwise
-fn get_callee_generic_params(&self, func_name: InternedStr) -> Option<&HashMap<i32, String>> {
-    let callee_info = self.macro_ctx.macros.get(&func_name)?;
-    if callee_info.generic_type_params.is_empty() {
-        return None;
+fn is_pointer_type_str(ty: &str) -> bool {
+    ty.starts_with("*mut ") || ty.starts_with("*const ") || ty == "*mut c_void"
+}
+fn is_const_pointer_type_str(ty: &str) -> bool {
+    ty.starts_with("*const ")
+}
+```
+
+### Step 2: Enum キャスト → transmute (~109 エラー, E0605)
+
+**ファイル**: `src/enum_dict.rs`, `src/rust_codegen.rs`
+
+`EnumDict` に追加:
+```rust
+pub fn is_target_enum(&self, name: InternedStr) -> bool {
+    self.target_enums.contains(&name)
+}
+```
+
+`ExprKind::Cast` ハンドラ（`expr_to_rust` L911, `expr_to_rust_inline` L1934）で:
+```rust
+// TypeSpec::TypedefName が enum_dict の target_enum なら transmute
+if self.is_enum_cast_target(type_name) {
+    return format!("std::mem::transmute::<_, {}>({})", t, e);
+}
+// TypeSpec::Enum なら transmute
+if self.is_explicit_enum_cast(type_name) {
+    return format!("std::mem::transmute::<_, {}>({})", t, e);
+}
+```
+
+ヘルパーメソッド:
+```rust
+fn is_enum_cast_target(&self, type_name: &TypeName) -> bool {
+    for spec in &type_name.specs.type_specs {
+        match spec {
+            TypeSpec::TypedefName(name) => return self.enum_dict.is_target_enum(*name),
+            TypeSpec::Enum(_) => return true,
+            _ => {}
+        }
     }
-    // 値パラメータ用の型引数のみ（index >= 0）
-    if callee_info.generic_type_params.keys().any(|&k| k >= 0) {
-        Some(&callee_info.generic_type_params)
+    false
+}
+```
+
+### Step 3: `as bool` → `!= 0` (~17 エラー, E0054)
+
+**ファイル**: `src/rust_codegen.rs`
+
+同じ `ExprKind::Cast` ハンドラで、`t == "bool"` の場合:
+```rust
+if t == "bool" {
+    return format!("(({}) != 0)", e);
+}
+```
+
+これを enum チェックの後、既存の `as` キャスト生成の前に挿入。
+
+### Step 4: NULL リテラル → null_mut()/null() (~265 エラー, E0308 の主要部分)
+
+**ファイル**: `src/rust_codegen.rs`
+
+NULL 判定ヘルパー:
+```rust
+fn is_null_literal(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::IntLit(0))
+}
+```
+
+変換ヘルパー:
+```rust
+fn null_ptr_expr(return_type: &str) -> String {
+    if is_const_pointer_type_str(return_type) {
+        "std::ptr::null()".to_string()
     } else {
-        None
+        "std::ptr::null_mut()".to_string()
     }
 }
 ```
 
-#### 2. `expr_to_rust` の Call ハンドラ修正
+適用箇所 (4 箇所 × 2 コードパス = 最大 8 箇所):
 
-既存の `needs_my_perl` チェックの後に、ジェネリック型引数の分離ロジックを追加:
-
+**A. `Stmt::Return`** (`stmt_to_rust` L1086, `stmt_to_rust_inline` L1485):
 ```rust
-ExprKind::Call { func, args } => {
-    // ... 既存の __builtin_expect, offsetof 処理 ...
-
-    // ジェネリック型パラメータのチェック
-    let callee_generics = if let ExprKind::Ident(name) = &func.kind {
-        self.get_callee_generic_params(*name)
-            .map(|g| g.clone())
-    } else {
-        None
-    };
-
-    if let Some(ref generics) = callee_generics {
-        // 型引数と値引数を分離
-        let mut type_args = Vec::new();
-        let mut value_args = Vec::new();
-
-        for (i, arg) in args.iter().enumerate() {
-            if generics.contains_key(&(i as i32)) {
-                type_args.push(self.expr_to_rust(arg, info));
-            } else {
-                value_args.push(self.expr_to_rust(arg, info));
-            }
+Stmt::Return(Some(expr), _) => {
+    if let Some(ref rt) = self.current_return_type {
+        if is_pointer_type_str(rt) && is_null_literal(expr) {
+            return format!("return {};", null_ptr_expr(rt));
         }
-
-        // THX my_perl 注入
-        if needs_my_perl {
-            value_args.insert(0, "my_perl".to_string());
-        }
-
-        let f = self.expr_to_rust(func, info);
-        return format!("{}::<{}>({})",
-            f,
-            type_args.join(", "),
-            value_args.join(", "));
     }
-
-    // ... 既存の通常関数呼び出し処理 ...
+    format!("return {};", self.expr_to_rust(expr, info))
 }
 ```
 
-#### 3. `expr_to_rust_inline` にも同様の修正
+**B. `ExprKind::Conditional`** (`expr_to_rust` L978, `expr_to_rust_inline` L1991):
+```rust
+ExprKind::Conditional { cond, then_expr, else_expr } => {
+    let c = self.expr_to_rust(cond, info);
+    let cond_str = wrap_as_bool_condition(cond, &c);
+    let type_hint = self.current_return_type.clone();
+    let t = self.expr_with_null_hint(then_expr, info, type_hint.as_deref());
+    let e = self.expr_with_null_hint(else_expr, info, type_hint.as_deref());
+    format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
+}
+```
 
-同じロジックを `expr_to_rust_inline` の `ExprKind::Call` ハンドラにも適用。
+ヘルパー:
+```rust
+fn expr_with_null_hint(&mut self, expr: &Expr, info: &MacroInferInfo, type_hint: Option<&str>) -> String {
+    if let Some(ty) = type_hint {
+        if is_pointer_type_str(ty) && is_null_literal(expr) {
+            return null_ptr_expr(ty);
+        }
+    }
+    self.expr_to_rust(expr, info)
+}
+// expr_to_rust_inline 用も同様
+fn expr_with_null_hint_inline(&mut self, expr: &Expr, type_hint: Option<&str>) -> String {
+    if let Some(ty) = type_hint {
+        if is_pointer_type_str(ty) && is_null_literal(expr) {
+            return null_ptr_expr(ty);
+        }
+    }
+    self.expr_to_rust_inline(expr)
+}
+```
+
+**C. マクロのトップレベル式** (`generate_macro` L562):
+```rust
+ParseResult::Expression(expr) => {
+    if let Some(ref rt) = self.current_return_type {
+        if is_pointer_type_str(rt) && is_null_literal(expr) {
+            self.writeln(&format!("{}{}", body_indent, null_ptr_expr(rt)));
+        } else {
+            let rust_expr = self.expr_to_rust(expr, info);
+            self.writeln(&format!("{}{}", body_indent, rust_expr));
+        }
+    } else {
+        let rust_expr = self.expr_to_rust(expr, info);
+        self.writeln(&format!("{}{}", body_indent, rust_expr));
+    }
+}
+```
+
+### Step 5: Bool リテラル in return context (~50 エラー, E0308)
+
+**ファイル**: `src/rust_codegen.rs`
+
+Step 4 と同じ箇所に追加:
+
+**A. `Stmt::Return`**:
+```rust
+if rt == "bool" {
+    match &expr.kind {
+        ExprKind::IntLit(0) => return format!("return false;"),
+        ExprKind::IntLit(1) => return format!("return true;"),
+        _ => {}
+    }
+}
+```
+
+**B. `ExprKind::Conditional`**: 同様の type_hint 伝搬で
+`IntLit(0)` → `false`, `IntLit(1)` → `true`
+
+**C. マクロのトップレベル式**: 同様
+
+### Step 6: void 関数の末尾式処理 (~100 エラー, E0308)
+
+**ファイル**: `src/rust_codegen.rs`
+
+`generate_macro` (L561-566) で、`ParseResult::Expression` かつ return_type が `()` の場合:
+```rust
+ParseResult::Expression(expr) => {
+    let rust_expr = self.expr_to_rust(expr, info);
+    if self.current_return_type.as_deref() == Some("()") {
+        // void 関数: 式の結果を捨てる
+        self.writeln(&format!("{}{}; // void", body_indent, rust_expr));
+    } else {
+        self.writeln(&format!("{}{}", body_indent, rust_expr));
+    }
+}
+```
 
 ## 変更ファイル一覧
 
 | ファイル | 変更内容 |
 |----------|----------|
-| `src/rust_codegen.rs` | `get_callee_generic_params` 追加、`expr_to_rust` / `expr_to_rust_inline` の Call ハンドラにジェネリック型引数の分離ロジック追加 |
+| `src/rust_codegen.rs` | `current_return_type` フィールド、enum/bool/NULL/void 変換ロジック |
+| `src/enum_dict.rs` | `is_target_enum()` メソッド追加 |
 
 ## 検証
 
 1. `cargo build` / `cargo test`
-
-2. 出力確認:
+2. 回帰テスト: `cargo test rust_codegen_regression`
+3. 統合ビルド:
+   ```bash
+   ~/blob/libperl-rs/12-macrogen-2-build.zsh
+   ```
+   エラー数が 1,895 から大幅に減少すること（目標: ~1,000 以下）
+4. 出力サンプル確認:
    ```bash
    cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
-     | grep -E 'xV_FROM_REF|AV_FROM_REF|CV_FROM_REF|HV_FROM_REF|INT2PTR|NUM2PTR|PTR2IV|PTR2UV'
+     | grep -E 'null_mut|null\(\)|transmute|!= 0|false|true'
    ```
-   - `xV_FROM_REF::<AV>(r#ref)` 形式で出力されること
-   - `INT2PTR::<IV>(p)` 形式で出力されること
 
-3. 回帰テスト: `cargo test rust_codegen_regression`
+## Phase 2 でスコープ外とするもの
 
-## エッジケース
-
-1. **呼び出し先が macro_ctx に存在しない**: `get_callee_generic_params` が `None` を返す → 通常の関数呼び出しとして処理
-
-2. **THX + ジェネリック**: `needs_my_perl` と `callee_generics` が同時に適用される場合
-   → 値引数に `my_perl` を先頭に追加
-
-3. **全引数が型パラメータ**: 値引数が空になる → `func::<T>()` として生成（正しい）
+- **ポインタ算術** (2-5): 式の中間型追跡が必要。Phase 3 以降
+- **整数幅の暗黙キャスト** (2-6): 同上
+- **ビットフィールド getter** (2-D): bindings.rs 解析が必要。Phase 3 以降

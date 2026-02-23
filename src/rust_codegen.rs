@@ -189,6 +189,30 @@ fn wrap_as_bool_condition(expr: &Expr, expr_str: &str) -> String {
     format!("(({}) != 0)", expr_str)
 }
 
+/// 型文字列がポインタ型かどうか判定
+fn is_pointer_type_str(ty: &str) -> bool {
+    ty.starts_with("*mut ") || ty.starts_with("*const ")
+}
+
+/// 型文字列が const ポインタ型かどうか判定
+fn is_const_pointer_type_str(ty: &str) -> bool {
+    ty.starts_with("*const ")
+}
+
+/// 式が NULL リテラル（整数 0）かどうか判定
+fn is_null_literal(expr: &Expr) -> bool {
+    matches!(expr.kind, ExprKind::IntLit(0))
+}
+
+/// ポインタ型に対応する null ポインタ式を生成
+fn null_ptr_expr(return_type: &str) -> String {
+    if is_const_pointer_type_str(return_type) {
+        "std::ptr::null()".to_string()
+    } else {
+        "std::ptr::null_mut()".to_string()
+    }
+}
+
 /// コード生成の設定
 #[derive(Debug, Clone)]
 pub struct CodegenConfig {
@@ -338,6 +362,8 @@ pub struct RustCodegen<'a> {
     current_type_param_map: HashMap<InternedStr, String>,
     /// 現在生成中のマクロのリテラル文字列パラメータ名の集合
     current_literal_string_params: HashSet<InternedStr>,
+    /// 現在生成中の関数の戻り値型文字列
+    current_return_type: Option<String>,
 }
 
 /// コード生成全体を管理する構造体
@@ -370,6 +396,7 @@ impl<'a> RustCodegen<'a> {
             incomplete_count: 0,
             current_type_param_map: HashMap::new(),
             current_literal_string_params: HashSet::new(),
+            current_return_type: None,
         }
     }
 
@@ -402,6 +429,18 @@ impl<'a> RustCodegen<'a> {
         } else {
             None
         }
+    }
+
+    /// キャスト先の型が enum 型かどうか判定
+    fn is_enum_cast_target(&self, type_name: &crate::ast::TypeName) -> bool {
+        for spec in &type_name.specs.type_specs {
+            match spec {
+                TypeSpec::TypedefName(name) => return self.enum_dict.is_target_enum(*name),
+                TypeSpec::Enum(_) => return true,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// 呼び出し先マクロの特定の引数位置がリテラル文字列パラメータかチェック
@@ -522,8 +561,9 @@ impl<'a> RustCodegen<'a> {
         // type/cast パラメータは値引数ではないので除外
         let params_with_types = self.build_param_list(info);
 
-        // 戻り値の型を取得
+        // 戻り値の型を取得（current_return_type にもセット）
         let return_type = self.get_return_type(info);
+        self.current_return_type = Some(return_type.clone());
 
         // THX 依存の場合は my_perl パラメータを追加
         let thx_param = if info.is_thx_dependent {
@@ -560,8 +600,14 @@ impl<'a> RustCodegen<'a> {
 
         match &info.parse_result {
             ParseResult::Expression(expr) => {
-                let rust_expr = self.expr_to_rust(expr, info);
-                self.writeln(&format!("{}{}", body_indent, rust_expr));
+                let type_hint = self.current_return_type.clone();
+                let rust_expr = self.expr_with_type_hint(expr, info, type_hint.as_deref());
+                if self.current_return_type.as_deref() == Some("()") {
+                    // void 関数: 式の結果を捨てる
+                    self.writeln(&format!("{}{};", body_indent, rust_expr));
+                } else {
+                    self.writeln(&format!("{}{}", body_indent, rust_expr));
+                }
             }
             ParseResult::Statement(block_items) => {
                 for item in block_items {
@@ -914,6 +960,9 @@ impl<'a> RustCodegen<'a> {
                 // void キャストは式の値を捨てる（(expr as ()) は無効）
                 if t == "()" {
                     format!("{{ {}; }}", e)
+                } else if self.is_enum_cast_target(type_name) {
+                    // enum へのキャストは transmute を使用
+                    format!("std::mem::transmute::<_, {}>({})", t, e)
                 } else {
                     format!("({} as {})", e, t)
                 }
@@ -977,10 +1026,11 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let c = self.expr_to_rust(cond, info);
-                let t = self.expr_to_rust(then_expr, info);
-                let e = self.expr_to_rust(else_expr, info);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_str = wrap_as_bool_condition(cond, &c);
+                let type_hint = self.current_return_type.clone();
+                let t = self.expr_with_type_hint(then_expr, info, type_hint.as_deref());
+                let e = self.expr_with_type_hint(else_expr, info, type_hint.as_deref());
                 format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
@@ -1076,6 +1126,43 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// 式を Rust コードに変換（型ヒント付き）
+    ///
+    /// 型ヒントがポインタ型で式が IntLit(0) なら null_mut()/null() に変換。
+    /// 型ヒントが bool で式が IntLit(0)/IntLit(1) なら false/true に変換。
+    fn expr_with_type_hint(&mut self, expr: &Expr, info: &MacroInferInfo, type_hint: Option<&str>) -> String {
+        if let Some(ty) = type_hint {
+            if is_pointer_type_str(ty) && is_null_literal(expr) {
+                return null_ptr_expr(ty);
+            }
+            if ty == "bool" {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return "false".to_string(),
+                    ExprKind::IntLit(1) => return "true".to_string(),
+                    _ => {}
+                }
+            }
+        }
+        self.expr_to_rust(expr, info)
+    }
+
+    /// 式を Rust コードに変換（型ヒント付き、inline 関数用）
+    fn expr_with_type_hint_inline(&mut self, expr: &Expr, type_hint: Option<&str>) -> String {
+        if let Some(ty) = type_hint {
+            if is_pointer_type_str(ty) && is_null_literal(expr) {
+                return null_ptr_expr(ty);
+            }
+            if ty == "bool" {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return "false".to_string(),
+                    ExprKind::IntLit(1) => return "true".to_string(),
+                    _ => {}
+                }
+            }
+        }
+        self.expr_to_rust_inline(expr)
+    }
+
     /// 文を Rust コードに変換
     fn stmt_to_rust(&mut self, stmt: &Stmt, info: &MacroInferInfo) -> String {
         match stmt {
@@ -1084,6 +1171,18 @@ impl<'a> RustCodegen<'a> {
             }
             Stmt::Expr(None, _) => ";".to_string(),
             Stmt::Return(Some(expr), _) => {
+                if let Some(ref rt) = self.current_return_type {
+                    if is_pointer_type_str(rt) && is_null_literal(expr) {
+                        return format!("return {};", null_ptr_expr(rt));
+                    }
+                    if rt == "bool" {
+                        match &expr.kind {
+                            ExprKind::IntLit(0) => return "return false;".to_string(),
+                            ExprKind::IntLit(1) => return "return true;".to_string(),
+                            _ => {}
+                        }
+                    }
+                }
                 format!("return {};", self.expr_to_rust(expr, info))
             }
             Stmt::Return(None, _) => "return;".to_string(),
@@ -1319,6 +1418,7 @@ impl<'a> RustCodegen<'a> {
             .cloned()
             .collect();
         let return_type = self.apply_derived_to_type(&return_type, &return_derived);
+        self.current_return_type = Some(return_type.clone());
 
         // THX 依存性を判定
         let is_thx_dependent = self.is_inline_fn_thx_dependent(&func_def.declarator.derived);
@@ -1483,6 +1583,18 @@ impl<'a> RustCodegen<'a> {
             }
             Stmt::Expr(None, _) => format!("{};", indent),
             Stmt::Return(Some(expr), _) => {
+                if let Some(ref rt) = self.current_return_type {
+                    if is_pointer_type_str(rt) && is_null_literal(expr) {
+                        return format!("{}return {};", indent, null_ptr_expr(rt));
+                    }
+                    if rt == "bool" {
+                        match &expr.kind {
+                            ExprKind::IntLit(0) => return format!("{}return false;", indent),
+                            ExprKind::IntLit(1) => return format!("{}return true;", indent),
+                            _ => {}
+                        }
+                    }
+                }
                 format!("{}return {};", indent, self.expr_to_rust_inline(expr))
             }
             Stmt::Return(None, _) => format!("{}return;", indent),
@@ -1937,6 +2049,9 @@ impl<'a> RustCodegen<'a> {
                 // void キャストは式の値を捨てる（(expr as ()) は無効）
                 if t == "()" {
                     format!("{{ {}; }}", e)
+                } else if self.is_enum_cast_target(type_name) {
+                    // enum へのキャストは transmute を使用
+                    format!("std::mem::transmute::<_, {}>({})", t, e)
                 } else {
                     format!("({} as {})", e, t)
                 }
@@ -1990,10 +2105,11 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let c = self.expr_to_rust_inline(cond);
-                let t = self.expr_to_rust_inline(then_expr);
-                let e = self.expr_to_rust_inline(else_expr);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_str = wrap_as_bool_condition(cond, &c);
+                let type_hint = self.current_return_type.clone();
+                let t = self.expr_with_type_hint_inline(then_expr, type_hint.as_deref());
+                let e = self.expr_with_type_hint_inline(else_expr, type_hint.as_deref());
                 format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {

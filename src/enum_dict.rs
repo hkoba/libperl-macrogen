@@ -123,6 +123,11 @@ impl EnumDict {
         self.variant_to_enum.contains_key(&name)
     }
 
+    /// target ディレクトリで定義された enum 名かどうかをチェック
+    pub fn is_target_enum(&self, name: InternedStr) -> bool {
+        self.target_enums.contains(&name)
+    }
+
     /// target ディレクトリで定義された enum のイテレータ
     pub fn target_enums(&self) -> impl Iterator<Item = InternedStr> + '_ {
         self.target_enums.iter().copied()
