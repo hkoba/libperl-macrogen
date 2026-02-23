@@ -221,7 +221,7 @@ impl CodegenConfig {
     /// `size_t` などは Rust 組み込み型のエイリアスとして定義。
     pub fn default_use_statements() -> Vec<String> {
         vec![
-            "use std::ffi::{c_void, c_char, c_int, c_uint, c_long, c_ulong, c_short, c_ushort}".to_string(),
+            "use std::ffi::{c_void, c_char, c_uchar, c_int, c_uint, c_long, c_ulong, c_short, c_ushort}".to_string(),
             "#[allow(non_camel_case_types)] type size_t = usize".to_string(),
             "#[allow(non_camel_case_types)] type ssize_t = isize".to_string(),
             "#[allow(non_camel_case_types)] type SSize_t = isize".to_string(),
@@ -252,8 +252,37 @@ pub enum GenerateStatus {
     TypeIncomplete,
     /// 利用不可関数を呼び出す（コメント出力）
     CallsUnavailable,
+    /// goto を含む（生成対象から除外）
+    ContainsGoto,
     /// スキップ（対象外）
     Skip,
+}
+
+/// 文が goto を含むか再帰的に検査
+fn stmt_contains_goto(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Goto(_, _) => true,
+        Stmt::Compound(cs) => block_items_contain_goto(&cs.items),
+        Stmt::If { then_stmt, else_stmt, .. } => {
+            stmt_contains_goto(then_stmt)
+                || else_stmt.as_ref().is_some_and(|s| stmt_contains_goto(s))
+        }
+        Stmt::Switch { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::For { body, .. } => stmt_contains_goto(body),
+        Stmt::DoWhile { body, .. } => stmt_contains_goto(body),
+        Stmt::Label { stmt, .. } => stmt_contains_goto(stmt),
+        Stmt::Case { stmt, .. } | Stmt::Default { stmt, .. } => stmt_contains_goto(stmt),
+        _ => false,
+    }
+}
+
+/// ブロック項目リストが goto を含むか検査
+fn block_items_contain_goto(items: &[BlockItem]) -> bool {
+    items.iter().any(|item| match item {
+        BlockItem::Stmt(stmt) => stmt_contains_goto(stmt),
+        BlockItem::Decl(_) => false,
+    })
 }
 
 /// コード生成統計
@@ -778,6 +807,24 @@ impl<'a> RustCodegen<'a> {
                     let func_name = self.interner.get(*name);
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust(&args[0], info);
+                    }
+                    // __builtin_unreachable() -> std::hint::unreachable_unchecked()
+                    if func_name == "__builtin_unreachable" {
+                        return "std::hint::unreachable_unchecked()".to_string();
+                    }
+                    // __builtin_ctz(x) / __builtin_ctzl(x) -> (x).trailing_zeros()
+                    if (func_name == "__builtin_ctz" || func_name == "__builtin_ctzl")
+                        && args.len() == 1
+                    {
+                        let arg = self.expr_to_rust(&args[0], info);
+                        return format!("({}).trailing_zeros()", arg);
+                    }
+                    // __builtin_clz(x) / __builtin_clzl(x) -> (x).leading_zeros()
+                    if (func_name == "__builtin_clz" || func_name == "__builtin_clzl")
+                        && args.len() == 1
+                    {
+                        let arg = self.expr_to_rust(&args[0], info);
+                        return format!("({}).leading_zeros()", arg);
                     }
                     // ASSERT_IS_LITERAL(s) -> s, ASSERT_IS_PTR(x) -> x, ASSERT_NOT_PTR(x) -> x
                     // コンパイル時型チェックマクロ。Rust では不要なので引数をそのまま返す
@@ -1792,6 +1839,24 @@ impl<'a> RustCodegen<'a> {
                     if func_name == "__builtin_expect" && args.len() >= 1 {
                         return self.expr_to_rust_inline(&args[0]);
                     }
+                    // __builtin_unreachable() -> std::hint::unreachable_unchecked()
+                    if func_name == "__builtin_unreachable" {
+                        return "std::hint::unreachable_unchecked()".to_string();
+                    }
+                    // __builtin_ctz(x) / __builtin_ctzl(x) -> (x).trailing_zeros()
+                    if (func_name == "__builtin_ctz" || func_name == "__builtin_ctzl")
+                        && args.len() == 1
+                    {
+                        let arg = self.expr_to_rust_inline(&args[0]);
+                        return format!("({}).trailing_zeros()", arg);
+                    }
+                    // __builtin_clz(x) / __builtin_clzl(x) -> (x).leading_zeros()
+                    if (func_name == "__builtin_clz" || func_name == "__builtin_clzl")
+                        && args.len() == 1
+                    {
+                        let arg = self.expr_to_rust_inline(&args[0]);
+                        return format!("({}).leading_zeros()", arg);
+                    }
                     // ASSERT_IS_LITERAL(s) -> s, ASSERT_IS_PTR(x) -> x, ASSERT_NOT_PTR(x) -> x
                     if (func_name == "ASSERT_IS_LITERAL"
                         || func_name == "ASSERT_IS_PTR"
@@ -2137,6 +2202,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         fns.sort_by_key(|(name, _)| self.interner.get(**name));
 
         for (name, func_def) in fns {
+            // goto を含む inline 関数は除外
+            if block_items_contain_goto(&func_def.body.items) {
+                let name_str = self.interner.get(*name);
+                writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
+                writeln!(self.writer)?;
+                continue;
+            }
+
             // 新しい RustCodegen を使って inline 関数を生成
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx);
             let generated = codegen.generate_inline_fn(*name, func_def);
@@ -2210,6 +2283,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     self.generate_macro_calls_unavailable(info, result)?;
                     self.stats.macros_calls_unavailable += 1;
                 }
+                GenerateStatus::ContainsGoto => {
+                    let name_str = self.interner.get(info.name);
+                    writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
+                    writeln!(self.writer)?;
+                }
                 GenerateStatus::Skip => {
                     // 何もしない
                     let _ = name;
@@ -2245,7 +2323,18 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         match &info.parse_result {
             ParseResult::Unparseable(_) => GenerateStatus::ParseFailed,
-            ParseResult::Expression(_) | ParseResult::Statement(_) => {
+            ParseResult::Statement(items) => {
+                // goto を含むマクロは除外
+                if block_items_contain_goto(items) {
+                    return GenerateStatus::ContainsGoto;
+                }
+                if info.is_fully_confirmed() {
+                    GenerateStatus::Success
+                } else {
+                    GenerateStatus::TypeIncomplete
+                }
+            }
+            ParseResult::Expression(_) => {
                 if info.is_fully_confirmed() {
                     GenerateStatus::Success
                 } else {

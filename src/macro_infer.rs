@@ -92,6 +92,8 @@ pub struct ExplicitExpandSymbols {
     pub assert_not_rok: InternedStr,
     /// assert_not_glob マクロ（assert_ ラッパー）
     pub assert_not_glob: InternedStr,
+    /// MUTABLE_PTR マクロ（identity キャスト）
+    pub mutable_ptr: InternedStr,
 }
 
 impl ExplicitExpandSymbols {
@@ -111,6 +113,7 @@ impl ExplicitExpandSymbols {
             int2ptr: interner.intern("INT2PTR"),
             assert_not_rok: interner.intern("assert_not_ROK"),
             assert_not_glob: interner.intern("assert_not_glob"),
+            mutable_ptr: interner.intern("MUTABLE_PTR"),
         }
     }
 
@@ -130,6 +133,7 @@ impl ExplicitExpandSymbols {
             self.int2ptr,
             self.assert_not_rok,
             self.assert_not_glob,
+            self.mutable_ptr,
         ].into_iter()
     }
 }
@@ -2023,6 +2027,7 @@ mod tests {
         assert_eq!(interner.get(symbols.str_with_len), "STR_WITH_LEN");
         assert_eq!(interner.get(symbols.assert_not_rok), "assert_not_ROK");
         assert_eq!(interner.get(symbols.assert_not_glob), "assert_not_glob");
+        assert_eq!(interner.get(symbols.mutable_ptr), "MUTABLE_PTR");
     }
 
     #[test]
@@ -2031,7 +2036,7 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 13);
+        assert_eq!(syms.len(), 14);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.cv_flags));
@@ -2044,5 +2049,6 @@ mod tests {
         assert!(syms.contains(&symbols.str_with_len));
         assert!(syms.contains(&symbols.assert_not_rok));
         assert!(syms.contains(&symbols.assert_not_glob));
+        assert!(syms.contains(&symbols.mutable_ptr));
     }
 }
