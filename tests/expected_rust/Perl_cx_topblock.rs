@@ -2,7 +2,7 @@
 #[inline]
 pub unsafe fn Perl_cx_topblock(my_perl: *mut PerlInterpreter, cx: *mut PERL_CONTEXT) -> () {
     unsafe {
-        assert!((cx) != 0);
+        assert!(!cx.is_null());
         ;
         ;
         (*my_perl).Imarkstack_ptr = ((*my_perl).Imarkstack + (((*cx).cx_u).cx_blk).blku_oldmarksp);

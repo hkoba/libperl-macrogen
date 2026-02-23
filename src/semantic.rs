@@ -1103,6 +1103,15 @@ impl<'a> SemanticAnalyzer<'a> {
 
     /// 通常の算術型変換（文字列ベース）
     fn usual_arithmetic_conversion_str(&self, lhs: &str, rhs: &str) -> String {
+        // ポインタ型が含まれる場合はポインタ型を優先
+        let is_ptr = |ty: &str| ty.contains('*');
+        if is_ptr(lhs) && !is_ptr(rhs) {
+            return lhs.to_string();
+        }
+        if is_ptr(rhs) && !is_ptr(lhs) {
+            return rhs.to_string();
+        }
+
         // 簡易的な実装：ランク付けで大きい方を返す
         let rank = |ty: &str| -> u8 {
             match ty {
