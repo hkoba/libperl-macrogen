@@ -33,6 +33,121 @@ impl BindingsInfo {
     }
 }
 
+/// コード生成時に解決可能なシンボルの集合
+///
+/// bindings.rs、マクロ辞書、inline 関数辞書、ビルトイン関数等から
+/// 既知のシンボル名を収集する。コード生成時に `ExprKind::Ident` が
+/// この集合に含まれない場合、未解決シンボルとして検出する。
+pub struct KnownSymbols {
+    names: HashSet<String>,
+}
+
+impl KnownSymbols {
+    /// InferResult から既知シンボル集合を構築
+    pub fn new(result: &InferResult, interner: &StringInterner) -> Self {
+        let mut names = HashSet::new();
+
+        // bindings.rs の関数名
+        if let Some(ref dict) = result.rust_decl_dict {
+            for name in dict.fns.keys() {
+                names.insert(name.clone());
+            }
+            for name in dict.consts.keys() {
+                names.insert(name.clone());
+            }
+            for name in dict.types.keys() {
+                names.insert(name.clone());
+            }
+            for name in dict.structs.keys() {
+                names.insert(name.clone());
+            }
+            for name in &dict.enums {
+                names.insert(name.clone());
+            }
+            for name in &dict.static_arrays {
+                names.insert(name.clone());
+            }
+        }
+
+        // マクロ名（関数呼び出しとして保持されるもの）
+        for (name_id, info) in &result.infer_ctx.macros {
+            let name_str = interner.get(*name_id);
+            // parseable なマクロはすべて既知とする
+            // (calls_unavailable でも名前自体は既知)
+            if info.has_body {
+                names.insert(name_str.to_string());
+            }
+        }
+
+        // inline 関数名
+        for (name_id, _) in result.inline_fn_dict.iter() {
+            let name_str = interner.get(*name_id);
+            names.insert(name_str.to_string());
+        }
+
+        // ビルトイン関数（is_function_available と同じリスト）
+        let builtins = [
+            "__builtin_expect",
+            "__builtin_offsetof",
+            "offsetof",
+            "__builtin_types_compatible_p",
+            "__builtin_constant_p",
+            "__builtin_choose_expr",
+            "__builtin_unreachable",
+            "__builtin_trap",
+            "__builtin_assume",
+            "__builtin_bswap16",
+            "__builtin_bswap32",
+            "__builtin_bswap64",
+            "__builtin_popcount",
+            "__builtin_clz",
+            "__builtin_ctz",
+            "__errno_location",
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "pthread_rwlock_rdlock",
+            "pthread_rwlock_wrlock",
+            "pthread_rwlock_unlock",
+            "pthread_getspecific",
+            "pthread_cond_wait",
+            "pthread_cond_signal",
+            "memchr",
+            "memcpy",
+            "memmove",
+            "memset",
+            "strlen",
+            "strcmp",
+            "strncmp",
+            "strcpy",
+            "strncpy",
+            "getenv",
+            "ASSERT_IS_LITERAL",
+            "ASSERT_IS_PTR",
+            "ASSERT_NOT_PTR",
+        ];
+        for name in builtins {
+            names.insert(name.to_string());
+        }
+
+        // Rust プリミティブ / 標準識別子
+        let rust_primitives = [
+            "true", "false", "std", "crate", "self", "super",
+            "null_mut", "null",
+            "PerlInterpreter", "my_perl",
+        ];
+        for name in rust_primitives {
+            names.insert(name.to_string());
+        }
+
+        Self { names }
+    }
+
+    /// シンボル名が既知かどうかチェック
+    fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+}
+
 /// Rust の予約語リスト（strict keywords + reserved keywords）
 /// 注: true/false はリテラルなので含めない
 const RUST_KEYWORDS: &[&str] = &[
@@ -352,10 +467,14 @@ pub struct CodegenStats {
     pub macros_type_incomplete: usize,
     /// 利用不可関数呼び出しマクロ数
     pub macros_calls_unavailable: usize,
+    /// 未解決シンボルを含むマクロ数
+    pub macros_unresolved_names: usize,
     /// 正常生成された inline 関数数
     pub inline_fns_success: usize,
     /// 型推論失敗 inline 関数数
     pub inline_fns_type_incomplete: usize,
+    /// 未解決シンボルを含む inline 関数数
+    pub inline_fns_unresolved_names: usize,
 }
 
 /// 一つの関数の生成結果
@@ -365,12 +484,19 @@ pub struct GeneratedCode {
     pub code: String,
     /// 不完全マーカーの数
     pub incomplete_count: usize,
+    /// 検出された未解決シンボル名（重複なし、出現順）
+    pub unresolved_names: Vec<String>,
 }
 
 impl GeneratedCode {
     /// 生成が完全かどうか（不完全マーカーがないか）
     pub fn is_complete(&self) -> bool {
         self.incomplete_count == 0
+    }
+
+    /// 未解決シンボルがあるかどうか
+    pub fn has_unresolved_names(&self) -> bool {
+        !self.unresolved_names.is_empty()
     }
 }
 
@@ -413,6 +539,12 @@ pub struct RustCodegen<'a> {
     /// 現在生成中の関数のパラメータ型情報
     /// パラメータ名 → Rust型文字列
     current_param_types: HashMap<InternedStr, String>,
+    /// 既知シンボル集合への参照（未解決シンボル検出用）
+    known_symbols: &'a KnownSymbols,
+    /// 現在の関数のローカルスコープ（パラメータ名 + ローカル変数名）
+    current_local_names: HashSet<InternedStr>,
+    /// 検出された未解決シンボル名（重複なし、出現順）
+    unresolved_names: Vec<String>,
 }
 
 /// コード生成全体を管理する構造体
@@ -439,6 +571,7 @@ impl<'a> RustCodegen<'a> {
         enum_dict: &'a EnumDict,
         macro_ctx: &'a MacroInferContext,
         bindings_info: BindingsInfo,
+        known_symbols: &'a KnownSymbols,
     ) -> Self {
         Self {
             interner,
@@ -452,6 +585,9 @@ impl<'a> RustCodegen<'a> {
             current_return_type: None,
             param_substitutions: HashMap::new(),
             current_param_types: HashMap::new(),
+            known_symbols,
+            current_local_names: HashSet::new(),
+            unresolved_names: Vec::new(),
         }
     }
 
@@ -795,6 +931,15 @@ impl<'a> RustCodegen<'a> {
         "/* type */"
     }
 
+    /// Declaration から変数名を収集して current_local_names に追加
+    fn collect_decl_names(&mut self, decl: &Declaration) {
+        for init_decl in &decl.declarators {
+            if let Some(name) = init_decl.declarator.name {
+                self.current_local_names.insert(name);
+            }
+        }
+    }
+
     /// バッファに行を書き込み
     fn writeln(&mut self, s: &str) {
         self.buffer.push_str(s);
@@ -806,12 +951,18 @@ impl<'a> RustCodegen<'a> {
         GeneratedCode {
             code: self.buffer,
             incomplete_count: self.incomplete_count,
+            unresolved_names: self.unresolved_names,
         }
     }
 
     /// マクロ関数を生成（self を消費）
     pub fn generate_macro(mut self, info: &MacroInferInfo) -> GeneratedCode {
         let name_str = self.interner.get(info.name);
+
+        // ローカルスコープ: マクロのパラメータ名を登録
+        for p in &info.params {
+            self.current_local_names.insert(p.name);
+        }
 
         // 型パラメータマップを構築
         self.current_type_param_map = info.generic_type_params.iter()
@@ -1079,7 +1230,19 @@ impl<'a> RustCodegen<'a> {
                 if let Some(subst) = self.param_substitutions.get(name) {
                     return subst.clone();
                 }
-                escape_rust_keyword(self.interner.get(*name))
+                let name_str = self.interner.get(*name);
+                // 未解決シンボルチェック
+                if !self.current_local_names.contains(name)
+                    && !self.current_type_param_map.contains_key(name)
+                    && !self.enum_dict.is_enum_variant(*name)
+                    && !self.known_symbols.contains(name_str)
+                {
+                    let s = name_str.to_string();
+                    if !self.unresolved_names.contains(&s) {
+                        self.unresolved_names.push(s);
+                    }
+                }
+                escape_rust_keyword(name_str)
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -1802,7 +1965,7 @@ impl<'a> RustCodegen<'a> {
         let return_type = self.apply_derived_to_type(&return_type, &return_derived);
         self.current_return_type = Some(return_type.clone());
 
-        // パラメータの型情報を収集
+        // パラメータの型情報を収集 + ローカルスコープに登録
         for d in &func_def.declarator.derived {
             if let DerivedDecl::Function(param_list) = d {
                 for p in &param_list.params {
@@ -1810,9 +1973,17 @@ impl<'a> RustCodegen<'a> {
                         if let Some(param_name) = declarator.name {
                             let ty = self.param_type_only(p);
                             self.current_param_types.insert(param_name, ty);
+                            self.current_local_names.insert(param_name);
                         }
                     }
                 }
+            }
+        }
+
+        // 本体のローカル変数宣言もスコープに追加
+        for item in &func_def.body.items {
+            if let BlockItem::Decl(decl) = item {
+                self.collect_decl_names(decl);
             }
         }
 
@@ -2322,7 +2493,19 @@ impl<'a> RustCodegen<'a> {
                 if let Some(subst) = self.param_substitutions.get(name) {
                     return subst.clone();
                 }
-                escape_rust_keyword(self.interner.get(*name))
+                let name_str = self.interner.get(*name);
+                // 未解決シンボルチェック
+                if !self.current_local_names.contains(name)
+                    && !self.current_type_param_map.contains_key(name)
+                    && !self.enum_dict.is_enum_variant(*name)
+                    && !self.known_symbols.contains(name_str)
+                {
+                    let s = name_str.to_string();
+                    if !self.unresolved_names.contains(&s) {
+                        self.unresolved_names.push(s);
+                    }
+                }
+                escape_rust_keyword(name_str)
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -2700,6 +2883,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     // const BUILD_TIMESTAMP: &'static str = "2025-01-24T17:50:00+09:00";
 
     pub fn generate(&mut self, result: &InferResult) -> io::Result<()> {
+        // 既知シンボル集合を構築（未解決シンボル検出用）
+        let known_symbols = KnownSymbols::new(result, self.interner);
+
         // ヘッダーコメント
         writeln!(self.writer, "// Auto-generated Rust bindings")?;
         // デバッグ用: タイムスタンプを出力する場合はコメントを外す
@@ -2715,12 +2901,12 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         // inline 関数セクション
         if self.config.emit_inline_fns {
-            self.generate_inline_fns(result)?;
+            self.generate_inline_fns(result, &known_symbols)?;
         }
 
         // マクロセクション
         if self.config.emit_macros {
-            self.generate_macros(result)?;
+            self.generate_macros(result, &known_symbols)?;
         }
 
         Ok(())
@@ -2772,7 +2958,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     }
 
     /// inline 関数セクションを生成
-    pub fn generate_inline_fns(&mut self, result: &InferResult) -> io::Result<()> {
+    pub fn generate_inline_fns(&mut self, result: &InferResult, known_symbols: &KnownSymbols) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
         writeln!(self.writer, "// Inline Functions")?;
         writeln!(self.writer, "// =============================================================================")?;
@@ -2794,10 +2980,20 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
 
             // 新しい RustCodegen を使って inline 関数を生成
-            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone());
+            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols);
             let generated = codegen.generate_inline_fn(*name, func_def);
 
-            if generated.is_complete() {
+            if generated.has_unresolved_names() {
+                // 未解決シンボルあり：コメントアウトして出力
+                let name_str = self.interner.get(*name);
+                writeln!(self.writer, "// [UNRESOLVED_NAMES] {} - inline function", name_str)?;
+                writeln!(self.writer, "// Unresolved: {}", generated.unresolved_names.join(", "))?;
+                for line in generated.code.lines() {
+                    writeln!(self.writer, "// {}", line)?;
+                }
+                writeln!(self.writer)?;
+                self.stats.inline_fns_unresolved_names += 1;
+            } else if generated.is_complete() {
                 // 完全な生成：そのまま出力
                 write!(self.writer, "{}", generated.code)?;
                 self.stats.inline_fns_success += 1;
@@ -2818,7 +3014,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     }
 
     /// マクロセクションを生成
-    pub fn generate_macros(&mut self, result: &InferResult) -> io::Result<()> {
+    pub fn generate_macros(&mut self, result: &InferResult, known_symbols: &KnownSymbols) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
         writeln!(self.writer, "// Macro Functions")?;
         writeln!(self.writer, "// =============================================================================")?;
@@ -2835,10 +3031,21 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone());
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols);
                     let generated = codegen.generate_macro(info);
 
-                    if generated.is_complete() {
+                    if generated.has_unresolved_names() {
+                        // 未解決シンボルあり：コメントアウトして出力
+                        let name_str = self.interner.get(info.name);
+                        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+                        writeln!(self.writer, "// [UNRESOLVED_NAMES] {}{} - macro function", name_str, thx_info)?;
+                        writeln!(self.writer, "// Unresolved: {}", generated.unresolved_names.join(", "))?;
+                        for line in generated.code.lines() {
+                            writeln!(self.writer, "// {}", line)?;
+                        }
+                        writeln!(self.writer)?;
+                        self.stats.macros_unresolved_names += 1;
+                    } else if generated.is_complete() {
                         // 完全な生成：そのまま出力
                         write!(self.writer, "{}", generated.code)?;
                         self.stats.macros_success += 1;
