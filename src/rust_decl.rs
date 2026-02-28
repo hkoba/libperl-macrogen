@@ -62,6 +62,8 @@ pub struct RustDeclDict {
     pub structs: HashMap<String, RustStruct>,
     pub types: HashMap<String, RustTypeAlias>,
     pub enums: HashSet<String>,
+    /// 全 extern static 変数名の集合
+    pub statics: HashSet<String>,
     /// 配列型の extern static 変数名の集合
     pub static_arrays: HashSet<String>,
     /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
@@ -146,6 +148,7 @@ impl RustDeclDict {
                         syn::ForeignItem::Static(static_item) => {
                             let name = static_item.ident.to_string();
                             let ty_str = Self::type_to_string(&static_item.ty);
+                            self.statics.insert(name.clone());
                             if ty_str.starts_with("[") {
                                 self.static_arrays.insert(name);
                             }

@@ -1,160 +1,95 @@
-# Plan: C99 style variadic macro (`#define FOO(...)`) の __VA_ARGS__ 展開修正
+# Plan: extern static 変数を KnownSymbols に登録する
 
 ## Context
 
-`cargo run -- --auto -E samples/wrapper.h` で `perlvars.h` の
-`PERLVARI(G, csighandlerp, Sighandler_t, Perl_csighandler)` が
+`bindings.rs` に `pub static mut PL_sv_placeholder: SV;` 等の extern static 変数が
+39 個宣言されているが、`KnownSymbols` に登録されていないため、
+マクロ関数生成時に未定義シンボル扱い (`[UNRESOLVED_NAMES]`) となる。
 
-```c
-Sighandler_t PL_csighandlerp = __VA_ARGS__ ;
-```
-
-と展開される。正しくは `= Perl_csighandler` であるべき。
-
-原因: `INTERN.h` で `INIT` マクロが C99 style variadic として定義されている:
-
-```c
-#define INIT(...) = __VA_ARGS__
-```
-
-PERLVARI の展開結果 `INIT(Perl_csighandler)` のさらなる展開時に、
-`INIT` の body 内の `__VA_ARGS__` トークンが引数に置換されない。
+具体例: `SvIMMORTAL` が `PL_sv_placeholder` を参照するが、
+`// [UNRESOLVED_NAMES] // Unresolved: PL_sv_placeholder` でコメントアウトされる。
 
 ## 根本原因
 
-**ファイル**: `src/preprocessor.rs`
+**`src/rust_decl.rs` L146-152**: `ForeignItem::Static` のパース時、
+配列型 (`ty_str.starts_with("[")`) のみ `static_arrays` に登録し、
+非配列型の static 変数は完全に無視される。
 
-### `parse_macro_params()` (L1796-1806)
-
-C99 style `#define INIT(...)` のパース時:
-- `TokenKind::Ellipsis` で `is_variadic = true` を設定し break
-- `params` は空のまま返される → `params = [], is_variadic = true`
-
-### `try_expand_macro_internal()` (L2589)
-
-展開時の条件分岐:
-```rust
-if *is_variadic && !params.is_empty() {
-    // ← C99 style は params が空なのでここに入らない
-    ...
-} else {
-    // ← こちらに入る（非可変長と同じ処理）
-    // params は空なので何もマップされない
-    // __VA_ARGS__ トークンは未置換のまま残る
-}
-```
-
-### TinyCC の実装 (`tccpp.c` L1645-1646)
-
-```c
-if (varg == TOK_DOTS) {
-    varg = TOK___VA_ARGS__;  // ... を __VA_ARGS__ パラメータに置換
-    is_vaargs = 1;
-}
-```
-
-TinyCC は C99 `...` を `__VA_ARGS__` という名前のパラメータとして登録する。
-これにより、パラメータリストに必ずエントリが存在し、展開時に通常の
-パラメータ置換で `__VA_ARGS__` がマッチする。
+**`src/rust_codegen.rs` L75-77**: `KnownSymbols::new()` で
+`dict.static_arrays` のみ登録。非配列 static 変数のフィールドが存在しない。
 
 ## 修正方針
 
-TinyCC と同じアプローチ: `parse_macro_params()` で C99 style `...` を検出した際、
-`__VA_ARGS__` を interned した ID を params に追加する。
+`RustDeclDict` に `statics: HashSet<String>` フィールドを追加し、
+全ての `extern static` 変数名を登録する。`KnownSymbols` でもこれを参照する。
 
 ### 変更箇所
 
-**ファイル**: `src/preprocessor.rs`
-
-#### `parse_macro_params()` (L1796-1806)
+#### 1. `src/rust_decl.rs` — `RustDeclDict` 構造体 (L58-69)
 
 ```rust
-TokenKind::Ellipsis => {
-    // 標準 C99: ... のみ（__VA_ARGS__ として扱う）
-    is_variadic = true;
-    // __VA_ARGS__ をパラメータ名として登録（TinyCC と同じ方式）
-    let va_args_id = self.interner.intern("__VA_ARGS__");
-    params.push(va_args_id);
-    let next = self.next_raw_token()?;
-    if !matches!(next.kind, TokenKind::RParen) {
-        return Err(CompileError::Preprocess {
-            loc: token.loc,
-            kind: PPError::InvalidMacroArgs("expected ')' after '...'".to_string()),
-        });
-    }
-    break;
+pub struct RustDeclDict {
+    // ... 既存フィールド ...
+    /// 全 extern static 変数名の集合
+    pub statics: HashSet<String>,
+    /// 配列型の extern static 変数名の集合
+    pub static_arrays: HashSet<String>,
+    // ...
 }
 ```
 
-この変更により:
-- `#define INIT(...)` → `params = [__VA_ARGS__], is_variadic = true`
-- 展開時の `is_gnu_style` 判定: `last_param == va_args_id` → `is_gnu_style = false`
-- `normal_param_count = params.len()` (= 1)
-- `args[0]` が `__VA_ARGS__` にマップされる
-- body 内の `__VA_ARGS__` トークンが正しく置換される
+#### 2. `src/rust_decl.rs` — `ForeignItem::Static` パース (L146-152)
 
-#### `try_expand_macro_internal()` (L2589)
+```rust
+syn::ForeignItem::Static(static_item) => {
+    let name = static_item.ident.to_string();
+    let ty_str = Self::type_to_string(&static_item.ty);
+    self.statics.insert(name.clone());  // ← 追加: 全 static を登録
+    if ty_str.starts_with("[") {
+        self.static_arrays.insert(name);
+    }
+}
+```
 
-条件 `!params.is_empty()` が自然に true になるため、変更不要。
-既存の展開ロジックがそのまま動作する。
+#### 3. `src/rust_codegen.rs` — `KnownSymbols::new()` (L75-78)
 
-ただし一点確認が必要: `collect_macro_args()` (L2766) への `param_count` 引数。
-`params.len()` が 1 になるので、`INIT(a, b, c)` のような呼び出し時に
-`args.len() >= param_count` (= `args.len() >= 1`) で正しくコンマが
-可変長引数に含まれる。これは正しい動作。
+```rust
+for name in &dict.static_arrays {
+    names.insert(name.clone());
+}
+// ↓ 追加
+for name in &dict.statics {
+    names.insert(name.clone());
+}
+```
 
 ### 変更不要の箇所
 
-- `collect_macro_args()`: `param_count` が正しく渡されるため変更不要
-- `expand_tokens()`: `__VA_ARGS__` は通常の Ident 置換で処理されるため変更不要
-- `try_expand_macro_internal()`: 条件分岐が自然に正しいパスを通るため変更不要
-- `macro_def.rs`: `MacroKind::Function` の構造に変更不要
+- `static_arrays` の既存使用箇所: 配列検出用途で引き続き必要（変更不要）
+- `KnownSymbols::contains()`: 既存の `HashSet::contains` がそのまま機能
+- カスケード検出ロジック: 影響なし
 
 ## 検証
 
-### 1. 単体テスト用ケース
-
-```c
-/* C99 standard variadic: ... only */
-#define INIT(...) = __VA_ARGS__
-INIT(hello)                    /* → = hello */
-INIT(a, b, c)                  /* → = a, b, c */
-
-/* GNU extension: NAME... */
-#define INIT2(args...) = args
-INIT2(hello)                   /* → = hello */
-
-/* Mixed: normal + ... */
-#define FOO(a, ...) a(__VA_ARGS__)
-FOO(f, 1, 2)                  /* → f(1, 2) */
-
-/* Empty variadic */
-#define BAR(...) {__VA_ARGS__}
-BAR()                          /* → {} */
-
-/* ## __VA_ARGS__ (GCC comma elision) */
-#define LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
-LOG("hello")                   /* → printf("hello") */
-```
-
-### 2. 統合テスト
-
 ```bash
-# PERLVARI の正しい展開を確認
-cargo run -- --auto -E samples/wrapper.h 2>/dev/null | grep PL_csighandlerp
-# 期待: Sighandler_t PL_csighandlerp = Perl_csighandler ;
-```
-
-### 3. 既存テスト
-
-```bash
+# 1. 全テスト通過
 cargo test
-# 全テスト通過を確認
-```
 
-### 4. xs-wrapper.h との互換
+# 2. SvIMMORTAL が正常生成されること確認
+cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
+  | grep -A5 'fn SvIMMORTAL'
 
-```bash
-# gen-rust の stats が悪化しないこと
+# 3. PL_sv_placeholder が UNRESOLVED でないこと
+cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
+  | grep 'PL_sv_placeholder'
+
+# 4. stats の改善確認（unresolved names 減少を期待）
 cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>&1 | tail -3
+
+# 5. 統合ビルドテスト
+~/blob/libperl-rs/12-macrogen-2-build.zsh
+# → tmp/build-error.log を確認し、E0425 等のエラー数が悪化していないこと
+# → 生成された tmp/macro_bindings.rs に SvIMMORTAL が含まれていること
+grep -c 'error\[E0425\]' tmp/build-error.log   # 減少を期待
+grep 'fn SvIMMORTAL' tmp/macro_bindings.rs      # 正常生成を確認
 ```

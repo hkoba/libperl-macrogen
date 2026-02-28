@@ -72,6 +72,9 @@ impl KnownSymbols {
             for name in &dict.enums {
                 names.insert(name.clone());
             }
+            for name in &dict.statics {
+                names.insert(name.clone());
+            }
             for name in &dict.static_arrays {
                 names.insert(name.clone());
             }
