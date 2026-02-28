@@ -1758,7 +1758,7 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     }
                 };
                 // ) の後に式の開始トークンが続くならキャスト
-                let is_cast = matches!(&next2.kind,
+                let is_cast = match &next2.kind {
                     TokenKind::LParen       // (PARAM)(expr)
                     | TokenKind::Ident(_)   // (PARAM)ident
                     | TokenKind::IntLit(_) | TokenKind::UIntLit(_)
@@ -1766,11 +1766,34 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     | TokenKind::StringLit(_) | TokenKind::CharLit(_)
                     | TokenKind::Star       // (PARAM)*ptr (deref)
                     | TokenKind::Amp        // (PARAM)&x
-                    | TokenKind::Minus      // (PARAM)-x
                     | TokenKind::Bang       // (PARAM)!x
                     | TokenKind::Tilde      // (PARAM)~x
                     | TokenKind::KwSizeof   // (PARAM)sizeof(x)
-                );
+                    => true,
+
+                    // (PARAM)-x: 3トークン先読みで判定
+                    // `-` の次が数値リテラルなら cast (e.g. (T)-1)
+                    // それ以外なら二項減算 (e.g. (val) - func(...))
+                    TokenKind::Minus => {
+                        let next3 = match self.source.next_token() {
+                            Ok(t) => t,
+                            Err(_) => {
+                                self.source.unget_token(next2);
+                                self.source.unget_token(next1);
+                                return false;
+                            }
+                        };
+                        let is_numeric = matches!(&next3.kind,
+                            TokenKind::IntLit(_)
+                            | TokenKind::UIntLit(_)
+                            | TokenKind::FloatLit(_)
+                        );
+                        self.source.unget_token(next3);
+                        is_numeric
+                    }
+
+                    _ => false,
+                };
                 self.source.unget_token(next2);
                 is_cast
             }
