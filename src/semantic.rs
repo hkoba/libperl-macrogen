@@ -1723,6 +1723,27 @@ impl<'a> SemanticAnalyzer<'a> {
                 ));
             }
 
+            // ビルトイン呼び出し（offsetof 等）
+            ExprKind::BuiltinCall { name, args } => {
+                // 引数内の式の型制約を収集
+                for arg in args {
+                    if let crate::ast::BuiltinArg::Expr(e) = arg {
+                        self.collect_expr_constraints(e, type_env);
+                    }
+                }
+                // offsetof → size_t (same as sizeof)
+                let func_name = self.interner.get(*name);
+                if func_name == "offsetof" || func_name == "__builtin_offsetof"
+                    || func_name == "STRUCT_OFFSET"
+                {
+                    type_env.add_constraint(TypeEnvConstraint::new(
+                        expr.id,
+                        TypeRepr::Inferred(InferredType::Sizeof),
+                        "offsetof returns size_t",
+                    ));
+                }
+            }
+
             // マクロ呼び出し（展開結果の型を使用）
             ExprKind::MacroCall { name, args, expanded, .. } => {
                 // 引数の型制約を収集

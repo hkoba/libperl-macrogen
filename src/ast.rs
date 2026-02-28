@@ -505,6 +505,15 @@ pub enum BlockItem {
     Stmt(Stmt),
 }
 
+/// ビルトイン呼び出しの引数（型名 or 式）
+///
+/// `offsetof(type, member)` のように、引数に型名を取りうるビルトイン関数で使用。
+#[derive(Debug, Clone)]
+pub enum BuiltinArg {
+    Expr(Box<Expr>),
+    TypeName(Box<TypeName>),
+}
+
 /// 式の種類
 #[derive(Debug, Clone)]
 pub enum ExprKind {
@@ -607,6 +616,15 @@ pub enum ExprKind {
         expanded: Box<Expr>,
         /// マクロ呼び出し位置
         call_loc: SourceLocation,
+    },
+
+    /// ビルトイン関数呼び出し（引数に型名を含みうる）
+    ///
+    /// `offsetof(type, member)`, `__builtin_types_compatible_p(type1, type2)` 等、
+    /// 引数に型名を取りうるビルトイン関数をパースするための汎用ノード。
+    BuiltinCall {
+        name: InternedStr,
+        args: Vec<BuiltinArg>,
     },
 }
 

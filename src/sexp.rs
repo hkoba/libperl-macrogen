@@ -648,6 +648,17 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
                 self.write_close()?;
                 self.write_close()
             }
+            ExprKind::BuiltinCall { name, args } => {
+                self.write_open("builtin-call")?;
+                write!(self.writer, " {}", self.interner.get(*name))?;
+                for arg in args {
+                    match arg {
+                        BuiltinArg::Expr(e) => self.print_expr(e)?,
+                        BuiltinArg::TypeName(tn) => self.print_type_name(tn)?,
+                    }
+                }
+                self.write_close()
+            }
         }
     }
 
@@ -1525,6 +1536,25 @@ impl<'a, W: Write> TypedSexpPrinter<'a, W> {
                 write!(self.writer, ")")?;
                 // 展開結果の型を使用
                 write!(self.writer, " :type {}", self.get_type_str(expanded.id))?;
+            }
+            ExprKind::BuiltinCall { name, args } => {
+                write!(self.writer, "(builtin-call")?;
+                self.write_expr_id(expr.id)?;
+                write!(self.writer, " {}", self.interner.get(*name))?;
+                for arg in args {
+                    match arg {
+                        BuiltinArg::Expr(e) => {
+                            if !self.pretty { write!(self.writer, " ")?; }
+                            self.print_expr(e)?;
+                        }
+                        BuiltinArg::TypeName(tn) => {
+                            write!(self.writer, " ")?;
+                            self.print_type_name(tn)?;
+                        }
+                    }
+                }
+                write!(self.writer, ")")?;
+                write!(self.writer, " :type {}", self.get_type_str(expr.id))?;
             }
         }
         if self.pretty {

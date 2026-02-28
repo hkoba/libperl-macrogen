@@ -1959,6 +1959,22 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                     );
                 }
                 TokenKind::LParen => {
+                    // ビルトイン呼び出し判定
+                    if let ExprKind::Ident(name) = &expr.kind {
+                        if self.is_type_arg_builtin(*name) {
+                            let builtin_name = *name;
+                            self.advance()?; // (
+                            let args = self.parse_builtin_args()?;
+                            self.expect(&TokenKind::RParen)?;
+                            self.function_call_count += 1;
+                            expr = Expr::new(
+                                ExprKind::BuiltinCall { name: builtin_name, args },
+                                loc,
+                            );
+                            continue;
+                        }
+                    }
+                    // 通常の関数呼び出し
                     self.advance()?;
                     let mut args = Vec::new();
                     if !self.check(&TokenKind::RParen) {
@@ -2475,6 +2491,36 @@ impl<'a, S: TokenSource> Parser<'a, S> {
         } else {
             None
         }
+    }
+
+    /// 引数に型名を取りうるビルトイン関数名かどうか
+    fn is_type_arg_builtin(&self, name: InternedStr) -> bool {
+        let s = self.source.interner().get(name);
+        matches!(s, "offsetof" | "__builtin_offsetof"
+                  | "__builtin_types_compatible_p"
+                  | "__builtin_va_arg"
+                  | "STRUCT_OFFSET")
+    }
+
+    /// ビルトイン関数の引数をパース（型名と式を自動判定）
+    fn parse_builtin_args(&mut self) -> Result<Vec<BuiltinArg>> {
+        let mut args = Vec::new();
+        if !self.check(&TokenKind::RParen) {
+            loop {
+                if self.is_type_start() {
+                    let type_name = self.parse_type_name()?;
+                    args.push(BuiltinArg::TypeName(Box::new(type_name)));
+                } else {
+                    let expr = self.parse_assignment_expr()?;
+                    args.push(BuiltinArg::Expr(Box::new(expr)));
+                }
+                if !self.check(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance()?;
+            }
+        }
+        Ok(args)
     }
 
     fn is_type_start(&self) -> bool {

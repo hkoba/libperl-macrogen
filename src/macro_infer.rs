@@ -1463,6 +1463,13 @@ impl MacroInferContext {
                 Self::collect_uses_from_expr(lhs, uses);
                 Self::collect_uses_from_expr(rhs, uses);
             }
+            ExprKind::BuiltinCall { args, .. } => {
+                for arg in args {
+                    if let crate::ast::BuiltinArg::Expr(e) = arg {
+                        Self::collect_uses_from_expr(e, uses);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1523,6 +1530,13 @@ impl MacroInferContext {
             }
             ExprKind::StmtExpr(compound) => {
                 Self::collect_function_calls_from_block_items(&compound.items, calls);
+            }
+            ExprKind::BuiltinCall { args, .. } => {
+                for arg in args {
+                    if let crate::ast::BuiltinArg::Expr(e) = arg {
+                        Self::collect_function_calls_from_expr(e, calls);
+                    }
+                }
             }
             _ => {}
         }
@@ -1781,6 +1795,13 @@ pub fn convert_assert_calls(expr: &mut Expr, interner: &StringInterner) {
                 convert_assert_calls(arg, interner);
             }
             convert_assert_calls(expanded, interner);
+        }
+        ExprKind::BuiltinCall { args, .. } => {
+            for arg in args.iter_mut() {
+                if let crate::ast::BuiltinArg::Expr(e) = arg {
+                    convert_assert_calls(e, interner);
+                }
+            }
         }
         // リテラルや識別子など、再帰不要
         ExprKind::Ident(_)

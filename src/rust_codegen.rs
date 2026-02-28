@@ -729,6 +729,7 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::LogNot(_) => TypeHint::Bool,
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => TypeHint::Integer,
+            ExprKind::BuiltinCall { .. } => TypeHint::Integer,
             _ => TypeHint::Unknown,
         }
     }
@@ -1691,6 +1692,32 @@ impl<'a> RustCodegen<'a> {
                     // 展開形式で出力
                     self.expr_to_rust(expanded, info)
                 }
+            }
+            ExprKind::BuiltinCall { name, args } => {
+                let func_name = self.interner.get(*name);
+                // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
+                if (func_name == "offsetof" || func_name == "__builtin_offsetof"
+                        || func_name == "STRUCT_OFFSET")
+                    && args.len() == 2
+                {
+                    let type_str = match &args[0] {
+                        crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                        crate::ast::BuiltinArg::Expr(e) => self.expr_to_rust(e, info),
+                    };
+                    let field_expr = match &args[1] {
+                        crate::ast::BuiltinArg::Expr(e) => self.expr_to_field_path(e),
+                        _ => None,
+                    };
+                    if let Some(fp) = field_expr {
+                        return format!("std::mem::offset_of!({}, {})", type_str, fp);
+                    }
+                }
+                // フォールバック: 通常の関数呼び出しとして出力
+                let a: Vec<String> = args.iter().map(|arg| match arg {
+                    crate::ast::BuiltinArg::Expr(e) => self.expr_to_rust(e, info),
+                    crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                }).collect();
+                format!("{}({})", func_name, a.join(", "))
             }
             _ => {
                 self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
@@ -2855,6 +2882,32 @@ impl<'a> RustCodegen<'a> {
                     let stmts = parts.join("; ");
                     format!("{{ {}; {} }}", stmts, last)
                 }
+            }
+            ExprKind::BuiltinCall { name, args } => {
+                let func_name = self.interner.get(*name);
+                // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
+                if (func_name == "offsetof" || func_name == "__builtin_offsetof"
+                        || func_name == "STRUCT_OFFSET")
+                    && args.len() == 2
+                {
+                    let type_str = match &args[0] {
+                        crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                        crate::ast::BuiltinArg::Expr(e) => self.expr_to_rust_inline(e),
+                    };
+                    let field_expr = match &args[1] {
+                        crate::ast::BuiltinArg::Expr(e) => self.expr_to_field_path(e),
+                        _ => None,
+                    };
+                    if let Some(fp) = field_expr {
+                        return format!("std::mem::offset_of!({}, {})", type_str, fp);
+                    }
+                }
+                // フォールバック: 通常の関数呼び出しとして出力
+                let a: Vec<String> = args.iter().map(|arg| match arg {
+                    crate::ast::BuiltinArg::Expr(e) => self.expr_to_rust_inline(e),
+                    crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                }).collect();
+                format!("{}({})", func_name, a.join(", "))
             }
             _ => self.todo_marker(&format!("{:?}", std::mem::discriminant(&expr.kind)))
         }
