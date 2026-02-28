@@ -481,6 +481,10 @@ pub struct CodegenStats {
     pub inline_fns_type_incomplete: usize,
     /// 未解決シンボルを含む inline 関数数
     pub inline_fns_unresolved_names: usize,
+    /// カスケード依存でコメントアウトされた inline 関数数
+    pub inline_fns_cascade_unavailable: usize,
+    /// goto を含む inline 関数数
+    pub inline_fns_contains_goto: usize,
 }
 
 /// 一つの関数の生成結果
@@ -574,6 +578,8 @@ pub struct CodegenDriver<'a, W: Write> {
     stats: CodegenStats,
     /// 生成されたコード全体で使用された libc 関数名
     used_libc_fns: HashSet<String>,
+    /// 正常生成された inline 関数名（クロスドメインカスケード検出用）
+    successfully_generated_inlines: HashSet<InternedStr>,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -2893,6 +2899,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             config,
             stats: CodegenStats::default(),
             used_libc_fns: HashSet::new(),
+            successfully_generated_inlines: HashSet::new(),
         }
     }
 
@@ -2988,6 +2995,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     }
 
     /// inline 関数セクションを生成
+    ///
+    /// 2パス方式:
+    /// - Pass 1: 各 inline 関数を生成し、結果を蓄積
+    /// - Pass 2: カスケード検査 — 生成成功した関数が失敗した inline 関数を
+    ///   呼び出している場合、CASCADE_UNAVAILABLE に降格
     pub fn generate_inline_fns(&mut self, result: &InferResult, known_symbols: &KnownSymbols) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
         writeln!(self.writer, "// Inline Functions")?;
@@ -3000,43 +3012,137 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             .collect();
         fns.sort_by_key(|(name, _)| self.interner.get(**name));
 
-        for (name, func_def) in fns {
-            // goto を含む inline 関数は除外
+        // 対象 inline 関数名の集合
+        let inline_set: HashSet<InternedStr> = fns.iter().map(|(n, _)| **n).collect();
+
+        // 各 inline 関数の呼び出し先を事前収集
+        let mut inline_calls: HashMap<InternedStr, HashSet<InternedStr>> = HashMap::new();
+        for (name, func_def) in &fns {
+            let mut calls = HashSet::new();
+            MacroInferContext::collect_function_calls_from_block_items(
+                &func_def.body.items,
+                &mut calls,
+            );
+            inline_calls.insert(**name, calls);
+        }
+
+        // Pass 1: 各 inline 関数を生成
+        enum InlineGenResult {
+            ContainsGoto,
+            UnresolvedNames { code: String, unresolved: Vec<String> },
+            Incomplete { code: String },
+            Success { code: String, used_libc: HashSet<String> },
+        }
+
+        let mut gen_results: Vec<(InternedStr, InlineGenResult)> = Vec::new();
+
+        for (name, func_def) in &fns {
             if block_items_contain_goto(&func_def.body.items) {
-                let name_str = self.interner.get(*name);
-                writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
-                writeln!(self.writer)?;
+                gen_results.push((**name, InlineGenResult::ContainsGoto));
                 continue;
             }
 
-            // 新しい RustCodegen を使って inline 関数を生成
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols);
-            let generated = codegen.generate_inline_fn(*name, func_def);
+            let generated = codegen.generate_inline_fn(**name, func_def);
 
             if generated.has_unresolved_names() {
-                // 未解決シンボルあり：コメントアウトして出力
-                let name_str = self.interner.get(*name);
-                writeln!(self.writer, "// [UNRESOLVED_NAMES] {} - inline function", name_str)?;
-                writeln!(self.writer, "// Unresolved: {}", generated.unresolved_names.join(", "))?;
-                for line in generated.code.lines() {
-                    writeln!(self.writer, "// {}", line)?;
-                }
-                writeln!(self.writer)?;
-                self.stats.inline_fns_unresolved_names += 1;
+                gen_results.push((**name, InlineGenResult::UnresolvedNames {
+                    code: generated.code,
+                    unresolved: generated.unresolved_names,
+                }));
             } else if generated.is_complete() {
-                // 完全な生成：そのまま出力
-                write!(self.writer, "{}", generated.code)?;
-                self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
-                self.stats.inline_fns_success += 1;
+                gen_results.push((**name, InlineGenResult::Success {
+                    code: generated.code,
+                    used_libc: generated.used_libc_fns,
+                }));
             } else {
-                // 不完全な生成：コメントアウトして出力
-                let name_str = self.interner.get(*name);
-                writeln!(self.writer, "// [CODEGEN_INCOMPLETE] {} - inline function", name_str)?;
-                for line in generated.code.lines() {
-                    writeln!(self.writer, "// {}", line)?;
+                gen_results.push((**name, InlineGenResult::Incomplete {
+                    code: generated.code,
+                }));
+            }
+        }
+
+        // Pass 1.5: successfully_generated_inlines を構築（Success のみ）
+        for (name, gen_result) in &gen_results {
+            if matches!(gen_result, InlineGenResult::Success { .. }) {
+                self.successfully_generated_inlines.insert(*name);
+            }
+        }
+
+        // Pass 2: カスケード検査 — Success だが失敗 inline 関数を呼び出す場合は降格
+        // 繰り返し伝播（fixpoint）
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let current_success = self.successfully_generated_inlines.clone();
+            for (name, _) in &gen_results {
+                if !current_success.contains(name) {
+                    continue;
                 }
-                writeln!(self.writer)?;
-                self.stats.inline_fns_type_incomplete += 1;
+                if let Some(calls) = inline_calls.get(name) {
+                    let has_unavailable = calls.iter().any(|called| {
+                        inline_set.contains(called) && !current_success.contains(called)
+                    });
+                    if has_unavailable {
+                        self.successfully_generated_inlines.remove(name);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Pass 3: 出力
+        for (name, gen_result) in gen_results {
+            match gen_result {
+                InlineGenResult::ContainsGoto => {
+                    let name_str = self.interner.get(name);
+                    writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
+                    writeln!(self.writer)?;
+                    self.stats.inline_fns_contains_goto += 1;
+                }
+                InlineGenResult::UnresolvedNames { code, unresolved } => {
+                    let name_str = self.interner.get(name);
+                    writeln!(self.writer, "// [UNRESOLVED_NAMES] {} - inline function", name_str)?;
+                    writeln!(self.writer, "// Unresolved: {}", unresolved.join(", "))?;
+                    for line in code.lines() {
+                        writeln!(self.writer, "// {}", line)?;
+                    }
+                    writeln!(self.writer)?;
+                    self.stats.inline_fns_unresolved_names += 1;
+                }
+                InlineGenResult::Incomplete { code } => {
+                    let name_str = self.interner.get(name);
+                    writeln!(self.writer, "// [CODEGEN_INCOMPLETE] {} - inline function", name_str)?;
+                    for line in code.lines() {
+                        writeln!(self.writer, "// {}", line)?;
+                    }
+                    writeln!(self.writer)?;
+                    self.stats.inline_fns_type_incomplete += 1;
+                }
+                InlineGenResult::Success { code, used_libc } => {
+                    if self.successfully_generated_inlines.contains(&name) {
+                        // 正常出力
+                        write!(self.writer, "{}", code)?;
+                        self.used_libc_fns.extend(used_libc.iter().cloned());
+                        self.stats.inline_fns_success += 1;
+                    } else {
+                        // カスケード降格: 呼び出し先の inline 関数が失敗
+                        let name_str = self.interner.get(name);
+                        let unavailable: Vec<String> = inline_calls.get(&name)
+                            .map(|calls| calls.iter()
+                                .filter(|c| inline_set.contains(c) && !self.successfully_generated_inlines.contains(c))
+                                .map(|c| self.interner.get(*c).to_string())
+                                .collect())
+                            .unwrap_or_default();
+                        writeln!(self.writer, "// [CASCADE_UNAVAILABLE] {} - dependency not generated: {}",
+                            name_str, unavailable.join(", "))?;
+                        for line in code.lines() {
+                            writeln!(self.writer, "// {}", line)?;
+                        }
+                        writeln!(self.writer)?;
+                        self.stats.inline_fns_cascade_unavailable += 1;
+                    }
+                }
             }
         }
 
@@ -3067,17 +3173,27 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             let info = result.infer_ctx.macros.get(&name).unwrap();
 
             // ── カスケード検査 ──
-            // called_functions のうち関数呼び出しとして保持されるマクロが
-            // successfully_generated に含まれていなければカスケード失敗
+            // called_functions のうち、生成対象だが生成に失敗した関数があれば
+            // カスケード失敗。マクロ→マクロ依存と マクロ→inline 関数依存の両方を検査。
             // （uses ではなく called_functions を使う：uses はインライン展開された
             //   マクロも含むが、called_functions は AST 上の Call 式のみ）
             let unavailable_deps: Vec<String> = info.called_functions.iter()
                 .filter(|called| {
-                    included_set.contains(called)
-                        && result.infer_ctx.macros.get(called)
+                    // Case 1: マクロ→マクロ依存
+                    if included_set.contains(called) {
+                        return result.infer_ctx.macros.get(called)
                             .map(|u| u.is_parseable() && !u.calls_unavailable)
                             .unwrap_or(false)
-                        && !successfully_generated.contains(called)
+                            && !successfully_generated.contains(called);
+                    }
+                    // Case 2: マクロ→inline 関数依存
+                    if result.inline_fn_dict.get(**called)
+                        .map(|f| f.is_target)
+                        .unwrap_or(false)
+                    {
+                        return !self.successfully_generated_inlines.contains(called);
+                    }
+                    false
                 })
                 .map(|called| self.interner.get(*called).to_string())
                 .collect();

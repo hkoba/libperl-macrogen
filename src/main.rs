@@ -629,9 +629,10 @@ fn run_gen_rust_pipeline(
     eprintln!("Macros: {} success, {} parse failed, {} type incomplete, {} cascade unavailable, {} unresolved names",
         stats.macros_success, stats.macros_parse_failed, stats.macros_type_incomplete,
         stats.macros_cascade_unavailable, stats.macros_unresolved_names);
-    eprintln!("Inline functions: {} success, {} type incomplete, {} unresolved names",
+    eprintln!("Inline functions: {} success, {} type incomplete, {} cascade unavailable, {} unresolved names, {} contains goto",
         stats.inline_fns_success, stats.inline_fns_type_incomplete,
-        stats.inline_fns_unresolved_names);
+        stats.inline_fns_cascade_unavailable, stats.inline_fns_unresolved_names,
+        stats.inline_fns_contains_goto);
 
     Ok(())
 }

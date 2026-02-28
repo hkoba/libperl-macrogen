@@ -1529,7 +1529,7 @@ impl MacroInferContext {
     }
 
     /// ブロックアイテムから関数呼び出しを収集
-    fn collect_function_calls_from_block_items(
+    pub fn collect_function_calls_from_block_items(
         items: &[BlockItem],
         calls: &mut HashSet<InternedStr>,
     ) {
