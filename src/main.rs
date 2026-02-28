@@ -626,9 +626,9 @@ fn run_gen_rust_pipeline(
 
     // 統計情報を出力
     eprintln!("=== Rust Code Generation Stats ===");
-    eprintln!("Macros: {} success, {} parse failed, {} type incomplete, {} unresolved names",
+    eprintln!("Macros: {} success, {} parse failed, {} type incomplete, {} cascade unavailable, {} unresolved names",
         stats.macros_success, stats.macros_parse_failed, stats.macros_type_incomplete,
-        stats.macros_unresolved_names);
+        stats.macros_cascade_unavailable, stats.macros_unresolved_names);
     eprintln!("Inline functions: {} success, {} type incomplete, {} unresolved names",
         stats.inline_fns_success, stats.inline_fns_type_incomplete,
         stats.inline_fns_unresolved_names);

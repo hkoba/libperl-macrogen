@@ -471,6 +471,8 @@ pub struct CodegenStats {
     pub macros_type_incomplete: usize,
     /// 利用不可関数呼び出しマクロ数
     pub macros_calls_unavailable: usize,
+    /// カスケード依存でコメントアウトされたマクロ数
+    pub macros_cascade_unavailable: usize,
     /// 未解決シンボルを含むマクロ数
     pub macros_unresolved_names: usize,
     /// 正常生成された inline 関数数
@@ -3049,13 +3051,44 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         writeln!(self.writer, "// =============================================================================")?;
         writeln!(self.writer)?;
 
-        // 対象マクロを収集して名前順にソート
-        let mut macros: Vec<_> = result.infer_ctx.macros.iter()
+        // 対象マクロを収集
+        let macros: Vec<_> = result.infer_ctx.macros.iter()
             .filter(|(_, info)| self.should_include_macro(info))
             .collect();
-        macros.sort_by_key(|(name, _)| self.interner.get(**name));
+        let included_set: HashSet<InternedStr> = macros.iter().map(|(n, _)| **n).collect();
 
-        for (name, info) in macros {
+        // 依存順にソート（葉マクロ先頭）
+        let sorted_names = self.topological_sort_macros(&macros);
+
+        // 正常生成されたマクロを追跡
+        let mut successfully_generated: HashSet<InternedStr> = HashSet::new();
+
+        for name in sorted_names {
+            let info = result.infer_ctx.macros.get(&name).unwrap();
+
+            // ── カスケード検査 ──
+            // called_functions のうち関数呼び出しとして保持されるマクロが
+            // successfully_generated に含まれていなければカスケード失敗
+            // （uses ではなく called_functions を使う：uses はインライン展開された
+            //   マクロも含むが、called_functions は AST 上の Call 式のみ）
+            let unavailable_deps: Vec<String> = info.called_functions.iter()
+                .filter(|called| {
+                    included_set.contains(called)
+                        && result.infer_ctx.macros.get(called)
+                            .map(|u| u.is_parseable() && !u.calls_unavailable)
+                            .unwrap_or(false)
+                        && !successfully_generated.contains(called)
+                })
+                .map(|called| self.interner.get(*called).to_string())
+                .collect();
+
+            if !unavailable_deps.is_empty() {
+                self.generate_macro_cascade_unavailable(info, &unavailable_deps)?;
+                self.stats.macros_cascade_unavailable += 1;
+                continue;
+            }
+
+            // ── 既存のステータス判定と生成 ──
             let status = self.get_macro_status(info);
             match status {
                 GenerateStatus::Success => {
@@ -3079,6 +3112,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         write!(self.writer, "{}", generated.code)?;
                         self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
                         self.stats.macros_success += 1;
+                        successfully_generated.insert(name);
                     } else {
                         // 不完全な生成：コメントアウトして出力
                         let name_str = self.interner.get(info.name);
@@ -3110,11 +3144,102 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 }
                 GenerateStatus::Skip => {
                     // 何もしない
-                    let _ = name;
                 }
             }
         }
 
+        Ok(())
+    }
+
+    /// マクロを依存順にソート（葉マクロ先頭、循環はアルファベット順で末尾）
+    ///
+    /// Kahn's algorithm を使用。`info.uses` の関係から DAG を構築し、
+    /// 入次数 0 のノードから順に処理する。
+    fn topological_sort_macros(
+        &self,
+        macros: &[(&InternedStr, &MacroInferInfo)],
+    ) -> Vec<InternedStr> {
+        use std::collections::VecDeque;
+
+        let macro_set: HashSet<InternedStr> = macros.iter().map(|(n, _)| **n).collect();
+
+        // 入次数マップと逆隣接リスト（dependency → dependents）を構築
+        let mut in_degree: HashMap<InternedStr, usize> = HashMap::new();
+        let mut dependents: HashMap<InternedStr, Vec<InternedStr>> = HashMap::new();
+
+        for (name, _) in macros {
+            in_degree.insert(**name, 0);
+        }
+
+        for (name, info) in macros {
+            for used in &info.uses {
+                if macro_set.contains(used) {
+                    // name が used に依存 → used から name への辺
+                    *in_degree.entry(**name).or_insert(0) += 1;
+                    dependents.entry(*used).or_default().push(**name);
+                }
+            }
+        }
+
+        // 入次数 0 のマクロをキューに投入（アルファベット順で安定化）
+        let mut queue: VecDeque<InternedStr> = {
+            let mut zeros: Vec<_> = in_degree.iter()
+                .filter(|(_, deg)| **deg == 0)
+                .map(|(name, _)| *name)
+                .collect();
+            zeros.sort_by_key(|n| self.interner.get(*n));
+            zeros.into_iter().collect()
+        };
+
+        let mut result = Vec::with_capacity(macros.len());
+
+        while let Some(name) = queue.pop_front() {
+            result.push(name);
+            if let Some(deps) = dependents.get(&name) {
+                // 依存先の入次数を減算
+                let mut newly_ready: Vec<InternedStr> = Vec::new();
+                for dep in deps {
+                    if let Some(deg) = in_degree.get_mut(dep) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            newly_ready.push(*dep);
+                        }
+                    }
+                }
+                // アルファベット順で安定化
+                newly_ready.sort_by_key(|n| self.interner.get(*n));
+                for n in newly_ready {
+                    queue.push_back(n);
+                }
+            }
+        }
+
+        // 残り（循環メンバー）をアルファベット順で末尾に追加
+        if result.len() < macros.len() {
+            let result_set: HashSet<_> = result.iter().copied().collect();
+            let mut remaining: Vec<_> = macro_set.iter()
+                .filter(|n| !result_set.contains(n))
+                .copied()
+                .collect();
+            remaining.sort_by_key(|n| self.interner.get(*n));
+            result.extend(remaining);
+        }
+
+        result
+    }
+
+    /// カスケード依存によるコメントアウト出力
+    fn generate_macro_cascade_unavailable(
+        &mut self,
+        info: &MacroInferInfo,
+        unavailable_deps: &[String],
+    ) -> io::Result<()> {
+        let name_str = self.interner.get(info.name);
+        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+        writeln!(self.writer,
+            "// [CASCADE_UNAVAILABLE] {}{} - dependency not generated: {}",
+            name_str, thx_info, unavailable_deps.join(", "))?;
+        writeln!(self.writer)?;
         Ok(())
     }
 
