@@ -33,6 +33,14 @@ impl BindingsInfo {
     }
 }
 
+/// libc crate から提供される関数名のリスト
+/// codegen がそのまま関数呼び出しとして出力する関数のみ
+/// （`__builtin_expect` 等の codegen 変換済み関数は含めない）
+const LIBC_FUNCTIONS: &[&str] = &[
+    "strcmp", "strlen", "strncmp", "strcpy", "strncpy",
+    "memset", "memchr", "memcpy", "memmove",
+];
+
 /// コード生成時に解決可能なシンボルの集合
 ///
 /// bindings.rs、マクロ辞書、inline 関数辞書、ビルトイン関数等から
@@ -85,7 +93,7 @@ impl KnownSymbols {
             names.insert(name_str.to_string());
         }
 
-        // ビルトイン関数（is_function_available と同じリスト）
+        // ビルトイン関数（codegen が変換・除去するもの）
         let builtins = [
             "__builtin_expect",
             "__builtin_offsetof",
@@ -111,21 +119,17 @@ impl KnownSymbols {
             "pthread_getspecific",
             "pthread_cond_wait",
             "pthread_cond_signal",
-            "memchr",
-            "memcpy",
-            "memmove",
-            "memset",
-            "strlen",
-            "strcmp",
-            "strncmp",
-            "strcpy",
-            "strncpy",
             "getenv",
             "ASSERT_IS_LITERAL",
             "ASSERT_IS_PTR",
             "ASSERT_NOT_PTR",
         ];
         for name in builtins {
+            names.insert(name.to_string());
+        }
+
+        // libc 関数（use libc::{...} で利用可能になる）
+        for name in LIBC_FUNCTIONS {
             names.insert(name.to_string());
         }
 
@@ -486,6 +490,8 @@ pub struct GeneratedCode {
     pub incomplete_count: usize,
     /// 検出された未解決シンボル名（重複なし、出現順）
     pub unresolved_names: Vec<String>,
+    /// 使用された libc 関数名
+    pub used_libc_fns: HashSet<String>,
 }
 
 impl GeneratedCode {
@@ -545,6 +551,8 @@ pub struct RustCodegen<'a> {
     current_local_names: HashSet<InternedStr>,
     /// 検出された未解決シンボル名（重複なし、出現順）
     unresolved_names: Vec<String>,
+    /// 使用された libc 関数名
+    used_libc_fns: HashSet<String>,
 }
 
 /// コード生成全体を管理する構造体
@@ -562,6 +570,8 @@ pub struct CodegenDriver<'a, W: Write> {
     bindings_info: BindingsInfo,
     config: CodegenConfig,
     stats: CodegenStats,
+    /// 生成されたコード全体で使用された libc 関数名
+    used_libc_fns: HashSet<String>,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -588,6 +598,7 @@ impl<'a> RustCodegen<'a> {
             known_symbols,
             current_local_names: HashSet::new(),
             unresolved_names: Vec::new(),
+            used_libc_fns: HashSet::new(),
         }
     }
 
@@ -952,6 +963,7 @@ impl<'a> RustCodegen<'a> {
             code: self.buffer,
             incomplete_count: self.incomplete_count,
             unresolved_names: self.unresolved_names,
+            used_libc_fns: self.used_libc_fns,
         }
     }
 
@@ -1231,6 +1243,10 @@ impl<'a> RustCodegen<'a> {
                     return subst.clone();
                 }
                 let name_str = self.interner.get(*name);
+                // libc 関数の使用を記録
+                if LIBC_FUNCTIONS.contains(&name_str) {
+                    self.used_libc_fns.insert(name_str.to_string());
+                }
                 // 未解決シンボルチェック
                 if !self.current_local_names.contains(name)
                     && !self.current_type_param_map.contains_key(name)
@@ -2494,6 +2510,10 @@ impl<'a> RustCodegen<'a> {
                     return subst.clone();
                 }
                 let name_str = self.interner.get(*name);
+                // libc 関数の使用を記録
+                if LIBC_FUNCTIONS.contains(&name_str) {
+                    self.used_libc_fns.insert(name_str.to_string());
+                }
                 // 未解決シンボルチェック
                 if !self.current_local_names.contains(name)
                     && !self.current_type_param_map.contains_key(name)
@@ -2870,6 +2890,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             bindings_info,
             config,
             stats: CodegenStats::default(),
+            used_libc_fns: HashSet::new(),
         }
     }
 
@@ -2907,6 +2928,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // マクロセクション
         if self.config.emit_macros {
             self.generate_macros(result, &known_symbols)?;
+        }
+
+        // 使用された libc 関数の use 文を出力（rustfmt が先頭に移動する）
+        if !self.used_libc_fns.is_empty() {
+            let mut fns: Vec<_> = self.used_libc_fns.iter().cloned().collect();
+            fns.sort();
+            writeln!(self.writer, "use libc::{{{}}};", fns.join(", "))?;
         }
 
         Ok(())
@@ -2996,6 +3024,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             } else if generated.is_complete() {
                 // 完全な生成：そのまま出力
                 write!(self.writer, "{}", generated.code)?;
+                self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
                 self.stats.inline_fns_success += 1;
             } else {
                 // 不完全な生成：コメントアウトして出力
@@ -3048,6 +3077,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     } else if generated.is_complete() {
                         // 完全な生成：そのまま出力
                         write!(self.writer, "{}", generated.code)?;
+                        self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
                         self.stats.macros_success += 1;
                     } else {
                         // 不完全な生成：コメントアウトして出力

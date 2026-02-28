@@ -1,221 +1,117 @@
-# Plan: E0425 未解決シンボル検出 — コード生成時マーキング
+# Plan: libc use 文の動的生成
 
 ## Context
 
-Phase 4+5 完了後（commit `0a6ed42`）の統合ビルドエラー: 1,647。
-うち E0425（未解決シンボル）は **211 件**。
+`macro_bindings.rs` で `strcmp`, `strlen` 等の libc 関数を使う関数が生成される。
+libperl-sys 側に `libc` crate を追加済みだが、use 文が `macro_bindings.rs` に
+含まれていないため E0425 になる。
 
-### 現状の問題
+use 文はハードコードではなく、**実際に生成されたコードで使われている libc 関数のみ**を
+含むように動的に決定したい。
 
-`GenerateStatus::Success` と判定されたマクロ関数でも、コード生成後の Rust コードに
-未解決の識別子が含まれるケースがある。既存の `calls_unavailable` チェックは
-`MacroInferInfo.called_functions`（マクロ本体の直接呼び出し関数名）のみを対象としているが、
-以下が漏れる:
+## 課題
 
-1. **インライン展開されたサブマクロ内の未知関数** — `should_emit_as_macro_call()` が
-   false の場合、展開されたマクロ本体の中の関数呼び出しがチェックされない
-2. **`__VA_ARGS__`** (18件) — 可変長マクロの未展開パラメータ
-3. **コンテキスト変数** `ax`, `sp`, `stash` 等 (21件) — XSUB ランタイムの変数で
-   マクロのパラメータにもない
-4. **C標準ライブラリ関数** `strlen`, `memset` 等 — 展開後に現れる呼び出し
+`CodegenDriver::generate()` は use 文をファイル先頭に出力した後に
+関数を生成するため、生成時点ではどの libc 関数が使われるか不明。
 
-### 目的
+## 設計: 末尾出力 + rustfmt 依存
 
-コード生成時に未解決シンボルを検出し、その関数をコメントとして出力する。
-既存の `[CALLS_UNAVAILABLE]` / `[CODEGEN_INCOMPLETE]` と同様のパターン。
+生成済みコードは rustfmt を通過する（`main.rs` L602）。
+Rust の `use` 文はモジュール内のどこに書いても有効で、
+rustfmt が自動的に先頭に移動する。
+
+→ **全関数の生成後に use 文を末尾に出力** し、rustfmt に整列を任せる。
 
 ---
 
-## 設計方針: コード生成時の識別子チェック
+## 実装
 
-`expr_to_rust` / `expr_to_rust_inline` の `ExprKind::Ident` ハンドラで、
-各識別子を「既知シンボル集合」と照合して未解決を検出する。
-
-**利点**: AST のコンテキスト（構造体メンバーアクセスかフリーな識別子か）を正確に区別可能。
-出力文字列の正規表現解析よりも偽陽性が少ない。
-
----
-
-## Step 1: `KnownSymbols` 構築
-
-**ファイル**: `src/rust_codegen.rs`
-
-`CodegenDriver::generate()` で1回構築し、各 `RustCodegen` インスタンスに参照を渡す。
-
-```rust
-/// コード生成時に解決可能なシンボルの集合
-struct KnownSymbols {
-    names: HashSet<String>,
-}
-
-impl KnownSymbols {
-    fn new(result: &InferResult, interner: &StringInterner) -> Self { ... }
-    fn contains(&self, name: &str) -> bool { self.names.contains(name) }
-}
-```
-
-### ソース一覧
-
-| ソース | 内容 |
-|--------|------|
-| `RustDeclDict.fns` | bindings.rs の関数名 |
-| `RustDeclDict.consts` | bindings.rs の定数名 |
-| `RustDeclDict.types` | bindings.rs の型別名 |
-| `RustDeclDict.structs` | bindings.rs の構造体名 |
-| `RustDeclDict.enums` | bindings.rs の enum 名 |
-| `EnumDict.variant_to_enum` | enum バリアント名 |
-| `MacroInferContext.macros` (parseable かつ !calls_unavailable) | 関数呼び出しとして保持されるマクロ名 |
-| `InlineFnDict` | inline 関数名 |
-| `is_function_available` のビルトインリスト | `__builtin_*`, `strlen`, `memcpy` 等 |
-| Rust プリミティブ | `true`, `false`, `std`, `crate`, `self`, `super` 等 |
-
----
-
-## Step 2: `RustCodegen` に検出フィールド追加
+### Step 1: libc 関数テーブルの定義
 
 **ファイル**: `src/rust_codegen.rs`
 
 ```rust
-pub struct RustCodegen<'a> {
-    // ... 既存フィールド ...
-
-    /// 既知シンボル集合への参照
-    known_symbols: &'a KnownSymbols,
-    /// 現在の関数のローカルスコープ（パラメータ名 + ローカル変数名）
-    current_local_names: HashSet<InternedStr>,
-    /// 検出された未解決シンボル名（重複なし、出現順）
-    unresolved_names: Vec<String>,
-}
+/// libc crate から提供される関数名のリスト
+/// codegen がそのまま関数呼び出しとして出力する関数のみ
+const LIBC_FUNCTIONS: &[&str] = &[
+    "strcmp", "strlen", "strncmp", "strcpy", "strncpy",
+    "memset", "memchr", "memcpy", "memmove",
+];
 ```
 
-### `current_local_names` の投入タイミング
+注: `__builtin_expect` 等の codegen 変換済み関数は含めない。
+`pthread_*` や `getenv` は現状 UNRESOLVED_NAMES で検出されるため不要
+（UNRESOLVED_NAMES 側で既に抑制済み）。
 
-- `generate_macro()`: `info.params` の各 `.name` を追加。
-  THX 依存なら `"my_perl"` の InternedStr も追加。
-- `generate_inline_fn()`: 関数パラメータ名 + 本体の `BlockItem::Decl` で宣言された変数名。
-
----
-
-## Step 3: `ExprKind::Ident` でのチェック挿入
+### Step 2: RustCodegen に使用済み libc 関数の追跡を追加
 
 **ファイル**: `src/rust_codegen.rs`
 
-### `expr_to_rust` (L1077) の変更
+`RustCodegen` に `used_libc_fns: HashSet<String>` フィールドを追加。
+
+`ExprKind::Ident` ハンドラ（`expr_to_rust`, `expr_to_rust_inline` の両方）で、
+識別子が `LIBC_FUNCTIONS` に含まれる場合に記録:
 
 ```rust
 ExprKind::Ident(name) => {
-    // lvalue 展開時のパラメータ置換
-    if let Some(subst) = self.param_substitutions.get(name) {
-        return subst.clone();
-    }
+    // ... 既存のパラメータ置換・未解決チェック ...
     let name_str = self.interner.get(*name);
-    // 未解決シンボルチェック
-    if !self.current_local_names.contains(name)
-        && !self.current_type_param_map.contains_key(name)
-        && !self.known_symbols.contains(name_str)
-    {
-        if !self.unresolved_names.contains(&name_str.to_string()) {
-            self.unresolved_names.push(name_str.to_string());
-        }
+    // libc 関数の使用を記録
+    if LIBC_FUNCTIONS.contains(&name_str) {
+        self.used_libc_fns.insert(name_str.to_string());
     }
     escape_rust_keyword(name_str)
 }
 ```
 
-### `expr_to_rust_inline` (L2320) の変更
-
-同様のロジック。`current_type_param_map` は inline 関数では空なので無視される。
-
-### チェック不要な箇所（偽陽性の回避）
-
-- `ExprKind::Member` / `ExprKind::PtrMember` の `.member` — 構造体メンバー名
-  → `ExprKind::Ident` を経由しないので問題なし（確認済み）
-- `ExprKind::Cast` の型名 — `type_name_to_rust()` 経由で別パス
-- `enum_dict` のバリアント — `KnownSymbols` に含めるので解決される
-
----
-
-## Step 4: `GeneratedCode` 拡張と出力制御
+### Step 3: GeneratedCode 経由で CodegenDriver に伝播
 
 **ファイル**: `src/rust_codegen.rs`
 
-### `GeneratedCode` の拡張
+`GeneratedCode` に `used_libc_fns: HashSet<String>` を追加。
+`into_generated_code()` で含める。
+
+`CodegenDriver` に `used_libc_fns: HashSet<String>` フィールドを追加。
+
+`generate_macros()` / `generate_inline_fns()` で、
+**正常に出力された関数のみ**（コメントアウトされなかった関数）の
+`used_libc_fns` を `CodegenDriver` 側にマージ:
 
 ```rust
-pub struct GeneratedCode {
-    pub code: String,
-    pub incomplete_count: usize,
-    /// 検出された未解決シンボル名
-    pub unresolved_names: Vec<String>,
-}
-
-impl GeneratedCode {
-    pub fn has_unresolved_names(&self) -> bool {
-        !self.unresolved_names.is_empty()
-    }
-}
-```
-
-`into_generated_code()` で `self.unresolved_names` を含める。
-
-### `CodegenStats` の拡張
-
-```rust
-pub struct CodegenStats {
-    // ... 既存フィールド ...
-    pub macros_unresolved_names: usize,
-    pub inline_fns_unresolved_names: usize,
-}
-```
-
-### 出力制御 (`CodegenDriver`)
-
-`generate_macros()` と `generate_inline_fns()` で、
-`generated.has_unresolved_names()` をチェック。
-
-```rust
-// generate_macros(), GenerateStatus::Success のブロック内:
-let generated = codegen.generate_macro(info);
-if generated.has_unresolved_names() {
-    let name_str = self.interner.get(info.name);
-    let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
-    writeln!(self.writer, "// [UNRESOLVED_NAMES] {}{} - macro function",
-             name_str, thx_info)?;
-    writeln!(self.writer, "// Unresolved: {}",
-             generated.unresolved_names.join(", "))?;
-    for line in generated.code.lines() {
-        writeln!(self.writer, "// {}", line)?;
-    }
-    writeln!(self.writer)?;
-    self.stats.macros_unresolved_names += 1;
-} else if generated.is_complete() {
+if !generated.has_unresolved_names() && generated.is_complete() {
     write!(self.writer, "{}", generated.code)?;
+    self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
     self.stats.macros_success += 1;
-} else {
-    // 既存の CODEGEN_INCOMPLETE パス
 }
 ```
 
-`generate_inline_fns()` も同様のパターン。
+### Step 4: generate() 末尾で use libc 文を出力
 
----
+**ファイル**: `src/rust_codegen.rs`
 
-## Step 5: `RustCodegen::new` のシグネチャ変更
+`CodegenDriver::generate()` の末尾で、使用済み libc 関数があれば出力:
 
 ```rust
-pub fn new(
-    interner: &'a StringInterner,
-    enum_dict: &'a EnumDict,
-    macro_ctx: &'a MacroInferContext,
-    bindings_info: BindingsInfo,
-    known_symbols: &'a KnownSymbols,
-) -> Self
+pub fn generate(&mut self, result: &InferResult) -> io::Result<()> {
+    // ... 既存のヘッダー、use 文、enum import、関数生成 ...
+
+    // 使用された libc 関数の use 文を出力（rustfmt が先頭に移動）
+    if !self.used_libc_fns.is_empty() {
+        let mut fns: Vec<_> = self.used_libc_fns.iter().cloned().collect();
+        fns.sort();
+        writeln!(self.writer, "use libc::{{{}}};", fns.join(", "))?;
+    }
+
+    Ok(())
+}
 ```
 
-`CodegenDriver` 側の全呼び出し箇所（`generate_macros` 内 L2838, `generate_inline_fns` 内 L2797）を更新。
+### Step 5: KnownSymbols のビルトインリスト整合
 
-`CodegenDriver` に `known_symbols: KnownSymbols` フィールドを追加し、
-`generate()` の先頭で構築するか、`new()` で受け取る。
+**ファイル**: `src/rust_codegen.rs`
+
+`KnownSymbols::new()` のビルトインリストに libc 関数が含まれていることを確認。
+現状既に含まれているので変更不要だが、`LIBC_FUNCTIONS` 定数を参照する形に統一する。
 
 ---
 
@@ -223,23 +119,16 @@ pub fn new(
 
 | ファイル | 変更内容 |
 |----------|----------|
-| `src/rust_codegen.rs` | `KnownSymbols` 構造体追加、`RustCodegen` フィールド追加、`ExprKind::Ident` チェック、`GeneratedCode` 拡張、`CodegenStats` 拡張、`CodegenDriver` 出力制御 |
+| `src/rust_codegen.rs` | `LIBC_FUNCTIONS` 定数、`RustCodegen` フィールド追加、`ExprKind::Ident` で記録、`GeneratedCode` 拡張、`CodegenDriver` 蓄積・出力 |
 
-**注**: `src/macro_infer.rs` や `src/semantic.rs` は変更不要。
-全ての変更は `src/rust_codegen.rs` のみ。
+`src/main.rs` は変更不要（既存の rustfmt パスがそのまま使える）。
 
 ---
 
 ## 検証
 
 1. `cargo build && cargo test` — 全テスト通過
-2. 統合ビルド: `~/blob/libperl-rs/12-macrogen-2-build.zsh`
-3. `tmp/build-error.log` で E0425 エラー数を確認
-4. `tmp/macro_bindings.rs` で `[UNRESOLVED_NAMES]` コメントの内容を目視確認
-5. `grep -c UNRESOLVED_NAMES tmp/macro_bindings.rs` で検出関数数を確認
-
-### 期待する結果
-
-- E0425 エラーが大幅に減少（211 → 目標 50 以下）
-- `[UNRESOLVED_NAMES]` でマーキングされた関数に未解決シンボル名が表示される
-- 既存の正常に生成できていた関数が誤ってコメントアウトされない
+2. `cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs > /dev/null`
+   → stderr の stats 確認
+3. 出力の先頭付近に `use libc::{...}` が含まれることを確認
+4. 統合ビルドで `strcmp` 等の E0425 が消えることを確認
