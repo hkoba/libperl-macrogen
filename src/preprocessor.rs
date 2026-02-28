@@ -1795,7 +1795,10 @@ impl Preprocessor {
                 }
                 TokenKind::Ellipsis => {
                     // 標準 C99: ... のみ（__VA_ARGS__ として扱う）
+                    // TinyCC と同様に __VA_ARGS__ をパラメータ名として登録
                     is_variadic = true;
+                    let va_args_id = self.interner.intern("__VA_ARGS__");
+                    params.push(va_args_id);
                     let next = self.next_raw_token()?;
                     if !matches!(next.kind, TokenKind::RParen) {
                         return Err(CompileError::Preprocess {
@@ -2587,14 +2590,15 @@ impl Preprocessor {
                 let mut arg_map = HashMap::new();
 
                 if *is_variadic && !params.is_empty() {
-                    // GNU拡張: NAME... 形式の場合、最後のパラメータが可変長引数を受け取る
-                    // 標準形式: ... のみの場合、params に可変長用パラメータは含まれない
+                    // GNU拡張: NAME... → 最後のパラメータが可変長引数名
+                    // C99標準: ...    → __VA_ARGS__ がパラメータとして登録済み
+                    // どちらの場合も最後のパラメータが可変長引数を受け取る
                     let va_args_id = self.interner.intern("__VA_ARGS__");
                     let last_param = *params.last().unwrap();
                     let is_gnu_style = last_param != va_args_id;
 
-                    // 通常のパラメータをマップ（最後のパラメータを除く場合がある）
-                    let normal_param_count = if is_gnu_style { params.len() - 1 } else { params.len() };
+                    // 通常のパラメータをマップ（最後のパラメータは可変長なので除外）
+                    let normal_param_count = params.len() - 1;
                     for (i, param) in params.iter().take(normal_param_count).enumerate() {
                         if i < args.len() {
                             arg_map.insert(*param, args[i].clone());
