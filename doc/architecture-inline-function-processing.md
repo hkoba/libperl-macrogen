@@ -364,8 +364,10 @@ static inline I32* Perl_CvDEPTH(const CV* sv) { ... }
 |--------|------|------|
 | **G: is_inline チェック** | `inline_fn.rs:52` | inline 関数のみ収集 |
 | **H: assert 変換** | `inline_fn.rs:66` | 収集時に assert 呼び出しを変換 |
-| **I: expr_to_rust_inline()** | `rust_codegen.rs:1453` | 型推論なしの式変換 |
-| **J: generate_inline_fn()** | `rust_codegen.rs:997` | Rust 関数生成 |
+| **I: expr_to_rust_inline()** | `rust_codegen.rs` | 型推論なしの式変換 |
+| **J: generate_inline_fn()** | `rust_codegen.rs` | Rust 関数生成 |
+| **K: カスケード依存検出** | `rust_codegen.rs` | 依存先 inline 関数の可用性チェック |
+| **L: 未解決シンボル検出** | `rust_codegen.rs` | KnownSymbols との照合 |
 
 ### マクロ展開制御との関連
 
@@ -461,6 +463,43 @@ Pipeline::builder("wrapper.h")
 
 ---
 
+## 依存順コード生成とカスケード検出
+
+### 概要
+
+Inline 関数のコード生成は依存順で行われる。
+ある inline 関数が別の inline 関数を呼び出す場合、呼び出し先が
+コード生成に失敗すると、呼び出し元もカスケード的に利用不可となる。
+
+### 処理フロー
+
+```
+Pass 1: 全 inline 関数を個別に生成
+    └─ 成功/失敗を記録
+
+Pass 1.5: successfully_generated_inlines 集合を構築
+
+Pass 2: 不動点ループによるカスケード検出
+    └─ loop:
+        ├─ 成功 inline が利用不可 inline を呼ぶ場合 → 降格
+        └─ 変更がなくなるまで繰り返し
+
+Pass 3: 最終出力
+    ├─ 成功 → そのまま出力
+    ├─ TYPE_INCOMPLETE → コメントアウト
+    ├─ CASCADE_UNAVAILABLE → 依存先を明示してコメントアウト
+    └─ UNRESOLVED_NAMES → 未解決シンボルを明示してコメントアウト
+```
+
+### クロスドメインカスケード
+
+マクロが inline 関数を呼び出す場合（Macro→Inline）のカスケード検出は
+`generate_macros()` 内で行われる。マクロの `called_functions` に含まれる
+関数名が `successfully_generated_inlines` に含まれない場合、
+そのマクロも CASCADE_UNAVAILABLE として出力される。
+
+---
+
 ## ユースケース別ガイド
 
 ### ユースケース 1: Inline 関数内の assert を抑制したい
@@ -551,6 +590,8 @@ pub fn generate_inline_fn(...) -> GeneratedCode {
 | **可用性判定** | bindings.rs, builtins 確認 | InlineFnDict に存在すれば可用 |
 | **展開制御** | explicit_expand_macros, skip_expand | なし（パース時に展開済み） |
 | **マクロ呼び出し保存** | MacroCall AST ノード | なし |
+| **カスケード依存** | Macro→Inline クロスドメイン検出 | Inline→Inline 不動点ループ検出 |
+| **未解決シンボル** | KnownSymbols で検出 | 同左 |
 
 ---
 

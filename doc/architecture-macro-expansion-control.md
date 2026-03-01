@@ -178,8 +178,20 @@ Preprocessor の `expand_tokens_for_inference()` はデフォルトで
 **現在登録されているシンボル**:
 ```rust
 pub struct ExplicitExpandSymbols {
-    pub sv_any: InternedStr,      // SvANY マクロ (sv->sv_any に展開)
-    pub sv_flags: InternedStr,    // SvFLAGS マクロ (sv->sv_flags に展開)
+    pub sv_any: InternedStr,         // SvANY（sv->sv_any に展開）
+    pub sv_flags: InternedStr,       // SvFLAGS（sv->sv_flags に展開）
+    pub cv_flags: InternedStr,       // CvFLAGS（CV 用）
+    pub hek_flags: InternedStr,      // HEK_FLAGS
+    pub expect: InternedStr,         // EXPECT（__builtin_expect ラッパー）
+    pub likely: InternedStr,         // LIKELY
+    pub unlikely: InternedStr,       // UNLIKELY
+    pub cbool: InternedStr,          // cBOOL（条件を bool に変換）
+    pub assert_underscore_: InternedStr, // __ASSERT_
+    pub str_with_len: InternedStr,   // STR_WITH_LEN
+    pub int2ptr: InternedStr,        // INT2PTR（整数→ポインタキャスト）
+    pub assert_not_rok: InternedStr, // assert_not_ROK
+    pub assert_not_glob: InternedStr,// assert_not_glob
+    pub mutable_ptr: InternedStr,    // MUTABLE_PTR（identity キャスト）
 }
 ```
 
@@ -190,25 +202,8 @@ pub struct ExplicitExpandSymbols {
 
 **拡張方法**:
 ```rust
-// ExplicitExpandSymbols に新しいフィールドを追加
-pub struct ExplicitExpandSymbols {
-    pub sv_any: InternedStr,
-    pub sv_flags: InternedStr,
-    pub new_macro: InternedStr,  // 新規追加
-}
-
-impl ExplicitExpandSymbols {
-    pub fn new(interner: &mut StringInterner) -> Self {
-        Self {
-            // ...
-            new_macro: interner.intern("NEW_MACRO"),
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
-        [self.sv_any, self.sv_flags, self.new_macro].into_iter()
-    }
-}
+// ExplicitExpandSymbols に新しいフィールドを追加し、
+// new() で intern、iter() に追加する
 ```
 
 **効果**:
@@ -371,6 +366,22 @@ fn is_function_available(&self, fn_id: InternedStr, fn_name: &str, result: &Infe
 - 不可用な関数を呼び出すマクロは `CallsUnavailable` ステータス
 - コメントアウトされた形で出力
 
+**カスケード依存検出**:
+
+コード生成時、成功したマクロ/inline 関数であっても、依存先が利用不可な場合は
+`CASCADE_UNAVAILABLE` としてコメントアウトする。
+
+| ドメイン間 | チェック内容 |
+|-----------|-------------|
+| Inline→Inline | 成功 inline が利用不可 inline を呼ぶ場合（不動点ループで検出） |
+| Macro→Inline | マクロの `called_functions` が `successfully_generated_inlines` に含まれない inline を参照 |
+| Macro→Macro | マクロの `uses` が `calls_unavailable` なマクロを参照 |
+
+**未解決シンボル検出**:
+
+コード生成時、`KnownSymbols` と照合して、生成コード内の識別子が
+既知シンボルに含まれない場合は `UNRESOLVED_NAMES` としてコメントアウトする。
+
 ---
 
 ### 制御点 E: MacroCall の出力判定
@@ -464,6 +475,77 @@ assert(cond)
 
 **重要**: `with_codegen_defaults()` を呼ばないと、inline 関数内の `assert` が
 `{ 0; };` のような空文に変換されてしまう。
+
+---
+
+### 制御点 F': BuiltinCall AST ノード
+
+**場所**: `src/ast.rs`, `src/parser.rs`
+
+**役割**: 型名を引数に取るビルトイン関数を専用 AST ノードで表現する
+
+**AST 定義**:
+```rust
+/// ビルトイン引数（型名または式）
+pub enum BuiltinArg {
+    Expr(Box<Expr>),
+    TypeName(Box<TypeName>),
+}
+
+/// ビルトイン関数呼び出し
+ExprKind::BuiltinCall {
+    name: InternedStr,
+    args: Vec<BuiltinArg>,
+}
+```
+
+**検出されるビルトイン**:
+- `offsetof` / `__builtin_offsetof` / `STRUCT_OFFSET`
+- `__builtin_types_compatible_p`
+- `__builtin_va_arg`
+
+**検出ロジック** (`is_type_arg_builtin()`):
+```rust
+fn is_type_arg_builtin(name: &str) -> bool {
+    matches!(name, "offsetof" | "__builtin_offsetof" | "STRUCT_OFFSET"
+        | "__builtin_types_compatible_p" | "__builtin_va_arg")
+}
+```
+
+**引数の自動検出**: `parse_builtin_args()` は `is_type_start()` で各引数が
+型名か式かを自動判定する。
+
+**コード生成での変換**:
+- `offsetof(struct T, field)` → `std::mem::offset_of!(T, field)`
+
+---
+
+### 制御点 G: ジェネリック型パラメータの自動検出
+
+**場所**: `src/parser.rs`
+
+**役割**: マクロ引数が型名として使用されるパターンを自動検出し、
+ジェネリック型パラメータとして登録する
+
+**パーサーフィールド**:
+```rust
+/// マクロパラメータ名 → インデックス（型パラメータ候補）
+generic_params: HashMap<InternedStr, usize>,
+/// 実際に型パラメータとして検出されたパラメータ名
+detected_type_params: HashSet<InternedStr>,
+```
+
+**検出メソッド**: `looks_like_generic_cast()`
+
+先読みヒューリスティクスで `(PARAM)expr` パターンを検出:
+- `(PARAM *)` → ポインタキャスト → ジェネリック
+- `(PARAM)(expr)` → 値キャスト → ジェネリック
+- `(PARAM)-1` → 単項マイナス付きキャスト → ジェネリック
+- `(PARAM) - func(...)` → 二項減算 → **ジェネリックではない**
+
+Minus の場合は3トークン先読みで判定:
+- `-` の次が数値リテラル → キャスト（`(T)-1` パターン）
+- `-` の次がそれ以外 → 二項減算（`(val) - func(...)` パターン）
 
 ---
 
@@ -622,11 +704,11 @@ pp.add_skip_expand_macro(my_const);
 | `preprocessor.rs` | マクロ定義の管理、トークン展開、skip_expand_macros、wrapped_macros、**expand_tokens_for_inference()**、**explicit_expand_macros** |
 | `macro_infer.rs` | マクロ型推論、NoExpandSymbols、ExplicitExpandSymbols、def-use グラフ |
 | `infer_api.rs` | パイプライン統合、bindings.rs 読み込み、制御点の設定 |
-| `rust_codegen.rs` | Rust コード生成、関数可用性チェック、識別子変換、**MacroCall 処理** |
-| `rust_decl.rs` | bindings.rs のパース、RustDeclDict 構築 |
+| `rust_codegen.rs` | Rust コード生成、関数可用性チェック、識別子変換、**MacroCall 処理**、カスケード検出、未解決シンボル検出 |
+| `rust_decl.rs` | bindings.rs のパース、RustDeclDict 構築、KnownSymbols ソース |
 | `pipeline.rs` | 高レベル API、設定の受け渡し、with_codegen_defaults |
-| `parser.rs` | **MacroCall AST ノード作成**、MacroBegin/MacroEnd 処理 |
-| `ast.rs` | **ExprKind::MacroCall 定義** |
+| `parser.rs` | **MacroCall AST ノード作成**、**BuiltinCall AST ノード作成**、MacroBegin/MacroEnd 処理、ジェネリック型パラメータ自動検出 |
+| `ast.rs` | **ExprKind::MacroCall 定義**、**ExprKind::BuiltinCall 定義**、**BuiltinArg 定義** |
 
 ---
 
