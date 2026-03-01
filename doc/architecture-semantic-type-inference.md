@@ -395,10 +395,22 @@ pub enum UnifiedType {
 ### Phase 4: 関数可用性チェック (check_function_availability)
 
 ```
-1. 各マクロの called_functions を確認
-2. bindings.rs、inline 関数辞書、ビルトイン関数リストと照合
-3. 利用不可関数がある場合 calls_unavailable = true
-4. カスケード依存：calls_unavailable なマクロを呼ぶマクロも推移的に不可
+Step 4.5: マクロの利用不可関数チェック
+  1. 各マクロの called_functions を確認
+  2. bindings.rs、inline 関数辞書、ビルトイン関数リストと照合
+  3. 利用不可関数がある場合 calls_unavailable = true
+
+Step 4.6: inline 関数の利用不可関数チェック (check_inline_fn_availability)
+  1. 各 inline 関数の called_functions を確認
+  2. bindings.rs、マクロ辞書、他の inline 関数、ビルトイン関数と照合
+  3. 利用不可関数がある場合 InlineFnDict.set_calls_unavailable()
+
+Step 4.7: クロスドメイン推移閉包 (propagate_unavailable_cross_domain)
+  fixpoint ループで 4 方向の利用不可伝播:
+  (a) macro → macro:  uses が calls_unavailable なマクロを含む場合
+  (b) inline → inline: called_functions が calls_unavailable な inline を含む場合
+  (c) macro → inline:  called_functions が calls_unavailable な inline を含む場合
+  (d) inline → macro:  called_functions が calls_unavailable なマクロを含む場合
 ```
 
 ## semantic.rs と macro_infer.rs の役割分担

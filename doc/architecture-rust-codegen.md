@@ -104,6 +104,7 @@ pub struct CodegenDriver<'a, W: Write> {
     stats: CodegenStats,                    // 統計情報
     used_libc_fns: HashSet<String>,         // 使用された libc 関数名
     successfully_generated_inlines: HashSet<InternedStr>, // 正常生成 inline 関数
+    generatable_macros: HashSet<InternedStr>, // 生成可能マクロ（inline→macro カスケード検出用）
 }
 ```
 
@@ -114,6 +115,7 @@ pub struct CodegenDriver<'a, W: Write> {
 | `generate()` | 全体の生成エントリポイント |
 | `generate_use_statements()` | 動的 use libc 生成 |
 | `generate_enum_imports()` | enum インポートを出力 |
+| `precompute_macro_generability()` | マクロの生成可能性を trial codegen で事前計算 |
 | `generate_inline_fns()` | inline 関数セクション（依存順、カスケード検出） |
 | `generate_macros()` | マクロセクション（クロスドメインカスケード検出） |
 | `get_macro_status()` | マクロの生成ステータスを判定 |
@@ -123,20 +125,32 @@ pub struct CodegenDriver<'a, W: Write> {
 ```
 generate()
     │
-    ├─ Pass 1: inline 関数の生成（仮）
-    │   └─ for each inline_fn:
-    │       ├─ RustCodegen::generate_inline_fn()
-    │       └─ 完全なら成功バッファに、不完全なら理由を記録
+    ├─ precompute_macro_generability()  // マクロの生成可能性を trial codegen で事前計算
+    │   └─ for each macro:
+    │       ├─ cascade check + get_macro_status()
+    │       ├─ trial codegen (RustCodegen::generate_macro)
+    │       └─ is_complete() && !has_unresolved_names() → generatable_macros に追加
     │
-    ├─ Pass 1.5: successfully_generated_inlines 集合を構築
-    │
-    ├─ Pass 2: カスケード依存の不動点ループ
-    │   └─ loop:
-    │       ├─ 成功 inline が利用不可 inline を呼ぶ場合 → 降格
-    │       └─ 変更がなくなるまで繰り返し
-    │
-    ├─ Pass 3: inline 関数の出力（最終結果）
-    │   └─ 成功/TYPE_INCOMPLETE/CASCADE_UNAVAILABLE/UNRESOLVED_NAMES を出力
+    ├─ generate_inline_fns()
+    │   │
+    │   ├─ Pass 0: 事前スキップ
+    │   │   └─ InlineFnDict.is_calls_unavailable() → CallsUnavailable
+    │   │
+    │   ├─ Pass 1: 残りの inline 関数を個別に生成
+    │   │   └─ for each inline_fn:
+    │   │       ├─ RustCodegen::generate_inline_fn()
+    │   │       └─ 完全なら成功バッファに、不完全なら理由を記録
+    │   │
+    │   ├─ Pass 1.5: successfully_generated_inlines 集合を構築
+    │   │
+    │   ├─ Pass 2: カスケード依存の不動点ループ
+    │   │   └─ loop:
+    │   │       ├─ 成功 inline が利用不可 inline を呼ぶ場合 → 降格
+    │   │       ├─ 成功 inline が generatable_macros にないマクロを呼ぶ場合 → 降格
+    │   │       └─ 変更がなくなるまで繰り返し
+    │   │
+    │   └─ Pass 3: inline 関数の出力（最終結果）
+    │       └─ 成功/TYPE_INCOMPLETE/CASCADE_UNAVAILABLE/CALLS_UNAVAILABLE/UNRESOLVED_NAMES を出力
     │
     ├─ generate_macros() — クロスドメインカスケード検出
     │   └─ for each macro:
@@ -159,14 +173,49 @@ generate()
 
 #### カスケード依存検出
 
+カスケード検出は 2 段階で行われる:
+
+**1. 推論段階（`analyze_all_macros` Step 4.6〜4.7）**:
+- `check_inline_fn_availability()` で inline 関数の呼び出し先を事前チェック
+- `propagate_unavailable_cross_domain()` で macro↔inline の 4 方向推移閉包を計算
+- 結果は `InlineFnDict.calls_unavailable` と `MacroInferInfo.calls_unavailable` に記録
+
+**2. codegen 段階**:
+
 **Inline→Inline カスケード**: Pass 2 の不動点ループで検出。
 inline 関数 A が inline 関数 B を呼び出し、B がコード生成失敗した場合、
 A も CASCADE_UNAVAILABLE として出力する。
+
+**Inline→Macro カスケード**: Pass 2 の不動点ループで検出。
+inline 関数が呼び出すマクロが `generatable_macros` に含まれない場合、
+その inline 関数も CASCADE_UNAVAILABLE として出力する。
+`generatable_macros` は `precompute_macro_generability()` で trial codegen
+により事前計算される。
 
 **Macro→Inline クロスドメインカスケード**: `generate_macros()` 内で検出。
 マクロが `called_functions` で inline 関数を参照している場合、
 その inline 関数が `successfully_generated_inlines` に含まれなければ、
 マクロも CASCADE_UNAVAILABLE として出力する。
+
+#### precompute_macro_generability()
+
+inline 関数はマクロより**先**に生成されるため、マクロの codegen 結果を
+直接参照できない。この問題を解決するため、inline 関数生成**前**に
+マクロの codegen を trial 実行する:
+
+```rust
+fn precompute_macro_generability(&mut self, result: &InferResult, known_symbols: &KnownSymbols) {
+    // generate_macros() と同じロジック:
+    // 1. 対象マクロを収集・依存順ソート
+    // 2. カスケードチェック（依存先がgeneratable かどうか）
+    // 3. get_macro_status() でステータス判定
+    // 4. Success → trial codegen → is_complete() && !has_unresolved_names()
+    //    → generatable_macros に追加
+}
+```
+
+これにより `SvIMMORTAL_INTERP`（codegen incomplete）→ `SvIMMORTAL`（cascade failure）
+→ inline 関数（cascade）のような連鎖が inline 生成前に検出可能になる。
 
 ### 4. RustCodegen - 単一関数生成
 
@@ -375,6 +424,12 @@ Rust の `let` バインディングに変換する:
 // CodegenDriver から RustCodegen を呼び出す
 fn generate_inline_fns(&mut self, result: &InferResult) -> io::Result<()> {
     for (name, func_def) in fns {
+        // Pass 0: 事前に利用不可と判定された関数はスキップ
+        if result.inline_fn_dict.is_calls_unavailable(*name) {
+            gen_results.push((*name, InlineGenResult::CallsUnavailable));
+            continue;
+        }
+
         // 使い捨てインスタンスを作成
         let codegen = RustCodegen::new(
             self.interner, self.enum_dict, self.macro_ctx,
@@ -384,7 +439,6 @@ fn generate_inline_fns(&mut self, result: &InferResult) -> io::Result<()> {
 
         if generated.is_complete() && generated.unresolved_names.is_empty() {
             // 完全な生成：そのまま出力
-            write!(self.writer, "{}", generated.code)?;
             self.stats.inline_fns_success += 1;
             self.successfully_generated_inlines.insert(*name);
             self.used_libc_fns.extend(generated.used_libc_fns);

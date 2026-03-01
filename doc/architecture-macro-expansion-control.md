@@ -77,8 +77,14 @@
 │  │                                                                   │   │
 │  │ 3. propagate_flag_via_used_by() - THX/pasting フラグ伝播          │   │
 │  │                                                                   │   │
-│  │ 4. check_function_availability() - 関数可用性チェック             │   │
+│  │ 4.5. check_function_availability() - マクロの関数可用性チェック    │   │
 │  │    └── bindings.rs, inline_fn_dict, builtins を確認              │   │
+│  │                                                                   │   │
+│  │ 4.6. check_inline_fn_availability() - inline 関数の可用性チェック │   │
+│  │    └── inline 関数の called_functions を同様にチェック            │   │
+│  │                                                                   │   │
+│  │ 4.7. propagate_unavailable_cross_domain()                        │   │
+│  │    └── macro↔inline の 4 方向推移閉包を fixpoint ループで計算     │   │
 │  │                                                                   │   │
 │  │ 5. infer_types_in_dependency_order() - 依存順で型推論            │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
@@ -371,11 +377,16 @@ fn is_function_available(&self, fn_id: InternedStr, fn_name: &str, result: &Infe
 コード生成時、成功したマクロ/inline 関数であっても、依存先が利用不可な場合は
 `CASCADE_UNAVAILABLE` としてコメントアウトする。
 
-| ドメイン間 | チェック内容 |
-|-----------|-------------|
-| Inline→Inline | 成功 inline が利用不可 inline を呼ぶ場合（不動点ループで検出） |
-| Macro→Inline | マクロの `called_functions` が `successfully_generated_inlines` に含まれない inline を参照 |
-| Macro→Macro | マクロの `uses` が `calls_unavailable` なマクロを参照 |
+| ドメイン間 | チェック場所 | チェック内容 |
+|-----------|-------------|-------------|
+| Inline→Inline | codegen 不動点ループ | 成功 inline が利用不可 inline を呼ぶ場合 |
+| Inline→Macro | codegen 不動点ループ | 成功 inline が `generatable_macros` にないマクロを呼ぶ場合 |
+| Macro→Inline | `generate_macros()` | マクロの `called_functions` が `successfully_generated_inlines` に含まれない inline を参照 |
+| Macro→Macro | `generate_macros()` | マクロの `uses` が `calls_unavailable` なマクロを参照 |
+
+**推論段階のクロスドメイン検出**（Step 4.6〜4.7）も併用。
+`propagate_unavailable_cross_domain()` で 4 方向の推移閉包を事前計算し、
+codegen 段階のカスケード初期集合を正確にする。
 
 **未解決シンボル検出**:
 

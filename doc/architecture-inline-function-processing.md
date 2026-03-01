@@ -97,7 +97,7 @@ parser.parse_each_with_pp(|decl, _loc, _path, pp| {
 
 ### Stage 2: InlineFnDict への収集
 
-**場所**: `src/inline_fn.rs:51-69`
+**場所**: `src/inline_fn.rs:80-103`
 
 ```rust
 pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &StringInterner) {
@@ -114,6 +114,14 @@ pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &S
     // ★ 重要: クローンして assert 呼び出しを変換
     let mut func_def = func_def.clone();
     convert_assert_calls_in_compound_stmt(&mut func_def.body, interner);
+
+    // ★ 関数呼び出し先を収集（依存性追跡用）
+    let mut calls = HashSet::new();
+    MacroInferContext::collect_function_calls_from_block_items(
+        &func_def.body.items,
+        &mut calls,
+    );
+    self.called_functions.insert(name, calls);
 
     self.insert(name, func_def);
 }
@@ -362,11 +370,14 @@ static inline I32* Perl_CvDEPTH(const CV* sv) { ... }
 
 | 制御点 | 場所 | 役割 |
 |--------|------|------|
-| **G: is_inline チェック** | `inline_fn.rs:52` | inline 関数のみ収集 |
-| **H: assert 変換** | `inline_fn.rs:66` | 収集時に assert 呼び出しを変換 |
+| **G: is_inline チェック** | `inline_fn.rs:81` | inline 関数のみ収集 |
+| **H: assert 変換** | `inline_fn.rs:92` | 収集時に assert 呼び出しを変換 |
+| **H': called_functions 収集** | `inline_fn.rs:95-100` | 関数呼び出し先を収集 |
 | **I: expr_to_rust_inline()** | `rust_codegen.rs` | 型推論なしの式変換 |
 | **J: generate_inline_fn()** | `rust_codegen.rs` | Rust 関数生成 |
-| **K: カスケード依存検出** | `rust_codegen.rs` | 依存先 inline 関数の可用性チェック |
+| **K: 利用可能性チェック** | `macro_infer.rs` | `check_inline_fn_availability()` で事前チェック |
+| **K': クロスドメイン伝播** | `macro_infer.rs` | `propagate_unavailable_cross_domain()` で 4 方向伝播 |
+| **K'': カスケード依存検出** | `rust_codegen.rs` | codegen 後の不動点ループ（inline→inline, inline→macro） |
 | **L: 未解決シンボル検出** | `rust_codegen.rs` | KnownSymbols との照合 |
 
 ### マクロ展開制御との関連
@@ -463,17 +474,85 @@ Pipeline::builder("wrapper.h")
 
 ---
 
-## 依存順コード生成とカスケード検出
+## 依存性追跡
 
-### 概要
+### InlineFnDict の依存性フィールド
 
-Inline 関数のコード生成は依存順で行われる。
-ある inline 関数が別の inline 関数を呼び出す場合、呼び出し先が
-コード生成に失敗すると、呼び出し元もカスケード的に利用不可となる。
+`InlineFnDict` は各 inline 関数の呼び出し先と利用可能性を追跡する:
 
-### 処理フロー
+```rust
+pub struct InlineFnDict {
+    fns: HashMap<InternedStr, FunctionDef>,
+    /// 各 inline 関数の呼び出し先（パース時に収集）
+    called_functions: HashMap<InternedStr, HashSet<InternedStr>>,
+    /// 利用不可関数の呼び出しを含む inline 関数の集合
+    calls_unavailable: HashSet<InternedStr>,
+}
+```
+
+**API**:
+
+| メソッド | 役割 |
+|----------|------|
+| `get_called_functions(name)` | 呼び出し先の集合を取得 |
+| `is_calls_unavailable(name)` | 利用不可フラグの確認 |
+| `set_calls_unavailable(name)` | 利用不可フラグの設定 |
+| `called_functions_iter()` | 全エントリの走査 |
+
+**収集タイミング**: `collect_from_function_def()` 内で、assert 変換後に
+`MacroInferContext::collect_function_calls_from_block_items()` を呼び出して収集。
+宣言の初期化子（`SV *sv = Perl_newSV_type(...)` 等）からの呼び出しも収集される。
+
+### 推論段階での利用可能性チェック
+
+`analyze_all_macros()` の Step 4.6〜4.7 で、inline 関数の利用可能性を
+マクロと統合的にチェックする:
 
 ```
+Step 4.5: マクロの利用不可関数チェック（既存）
+Step 4.6: check_inline_fn_availability()  ← inline 関数単体のチェック
+Step 4.7: propagate_unavailable_cross_domain()  ← 4方向の推移閉包
+```
+
+**Step 4.6** (`check_inline_fn_availability`):
+inline 関数の `called_functions` を、bindings.rs、マクロ辞書、他の inline 関数、
+ビルトイン関数と照合し、利用不可関数を呼び出している場合に
+`InlineFnDict::set_calls_unavailable()` を設定。
+
+**Step 4.7** (`propagate_unavailable_cross_domain`):
+fixpoint ループで以下の 4 方向の利用不可伝播を実行:
+
+```
+(a) macro → macro:  マクロの uses が calls_unavailable なマクロを含む場合
+(b) inline → inline: inline の called_functions が calls_unavailable な inline を含む場合
+(c) macro → inline:  マクロの called_functions が calls_unavailable な inline を含む場合
+(d) inline → macro:  inline の called_functions が calls_unavailable なマクロを含む場合
+```
+
+### codegen 段階でのカスケード検出
+
+推論段階の事前チェックに加え、codegen 段階でも追加のカスケード検出が必要。
+codegen 時にのみ判明する失敗（型不完全、未解決名）があるため。
+
+#### マクロの生成可能性事前計算
+
+`precompute_macro_generability()` で、inline 関数生成**前**にマクロの
+codegen 結果を trial 実行で予測し、`generatable_macros` 集合を構築する:
+
+```
+precompute_macro_generability()
+    └─ for each macro:
+        ├─ cascade check + get_macro_status
+        ├─ trial codegen (RustCodegen::generate_macro)
+        └─ is_complete() && !has_unresolved_names() → generatable_macros に追加
+```
+
+#### Inline 関数の生成フロー
+
+```
+Pass 0: 事前スキップ
+    └─ InlineFnDict.is_calls_unavailable() → CallsUnavailable
+
 Pass 1: 全 inline 関数を個別に生成
     └─ 成功/失敗を記録
 
@@ -482,21 +561,25 @@ Pass 1.5: successfully_generated_inlines 集合を構築
 Pass 2: 不動点ループによるカスケード検出
     └─ loop:
         ├─ 成功 inline が利用不可 inline を呼ぶ場合 → 降格
+        ├─ 成功 inline が生成不可マクロを呼ぶ場合 → 降格（inline→macro）
         └─ 変更がなくなるまで繰り返し
 
 Pass 3: 最終出力
     ├─ 成功 → そのまま出力
     ├─ TYPE_INCOMPLETE → コメントアウト
     ├─ CASCADE_UNAVAILABLE → 依存先を明示してコメントアウト
+    ├─ CALLS_UNAVAILABLE → 利用不可関数を明示してコメントアウト
     └─ UNRESOLVED_NAMES → 未解決シンボルを明示してコメントアウト
 ```
 
 ### クロスドメインカスケード
 
-マクロが inline 関数を呼び出す場合（Macro→Inline）のカスケード検出は
-`generate_macros()` 内で行われる。マクロの `called_functions` に含まれる
-関数名が `successfully_generated_inlines` に含まれない場合、
-そのマクロも CASCADE_UNAVAILABLE として出力される。
+| 方向 | チェック場所 | 内容 |
+|------|-------------|------|
+| Inline→Inline | Pass 2 不動点ループ | 成功 inline が利用不可 inline を呼ぶ場合 |
+| Inline→Macro | Pass 2 不動点ループ | 成功 inline が `generatable_macros` に含まれないマクロを呼ぶ場合 |
+| Macro→Inline | `generate_macros()` | マクロの `called_functions` が `successfully_generated_inlines` に含まれない inline を参照 |
+| Macro→Macro | `generate_macros()` | マクロの `uses` が `calls_unavailable` なマクロを参照 |
 
 ---
 
@@ -587,10 +670,12 @@ pub fn generate_inline_fn(...) -> GeneratedCode {
 | **assert 引数保存** | wrapped_macros で MacroBegin/End マーカー | 同左（`with_codegen_defaults()` 必須） |
 | **型推論** | TypeEnv による制約ベース | なし（AST 直接参照） |
 | **Rust 変換メソッド** | `expr_to_rust()` | `expr_to_rust_inline()` |
-| **可用性判定** | bindings.rs, builtins 確認 | InlineFnDict に存在すれば可用 |
+| **依存性収集** | `called_functions`（パース時） | `called_functions`（収集時、共通ロジック） |
+| **可用性判定** | bindings.rs, builtins 確認 | bindings.rs, macros, inlines, builtins 確認 |
+| **可用性フラグ** | `MacroInferInfo.calls_unavailable` | `InlineFnDict.calls_unavailable` |
 | **展開制御** | explicit_expand_macros, skip_expand | なし（パース時に展開済み） |
 | **マクロ呼び出し保存** | MacroCall AST ノード | なし |
-| **カスケード依存** | Macro→Inline クロスドメイン検出 | Inline→Inline 不動点ループ検出 |
+| **カスケード依存** | Macro→Inline, Macro→Macro | Inline→Inline, Inline→Macro（4方向統合） |
 | **未解決シンボル** | KnownSymbols で検出 | 同左 |
 
 ---
@@ -599,10 +684,10 @@ pub fn generate_inline_fn(...) -> GeneratedCode {
 
 | ファイル | Inline 関数関連の責務 |
 |----------|----------------------|
-| `inline_fn.rs` | InlineFnDict 定義、収集、assert 変換呼び出し |
-| `macro_infer.rs` | `convert_assert_calls*` 関数群 |
+| `inline_fn.rs` | InlineFnDict 定義、収集、assert 変換呼び出し、`called_functions` 収集 |
+| `macro_infer.rs` | `convert_assert_calls*` 関数群、`check_inline_fn_availability()`、`propagate_unavailable_cross_domain()` |
 | `semantic.rs` | inline 関数シグネチャの型参照 |
-| `rust_codegen.rs` | `generate_inline_fn()`, `expr_to_rust_inline()` |
+| `rust_codegen.rs` | `generate_inline_fn()`, `expr_to_rust_inline()`, `precompute_macro_generability()` |
 | `infer_api.rs` | パイプラインでの収集統合 |
 
 ---
