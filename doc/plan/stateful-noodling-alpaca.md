@@ -1,188 +1,235 @@
-# Plan: `BuiltinCall` AST ノード追加による `offsetof(type, member)` パースの汎用化
+# Plan: マクロ/inline関数の統合依存性追跡
 
 ## Context
 
-マクロ `RCPVx` 等 6 件が PARSE_FAILED となる。原因は展開後の式に含まれる
-`offsetof(struct rcpv, pv)` をパーサが解析できないため。
+### 問題
 
-```c
-// cop.h:585
-#define RCPVx(pv_arg)  ((RCPV *)((pv_arg) - STRUCT_OFFSET(struct rcpv, pv)))
-// STRUCT_OFFSET(s,m) → offsetof(s,m)     (perl.h:1694)
-// offsetof(s,m) → __builtin_offsetof(s,m) (stddef.h)
-```
+`doc/plan/e0425-improvement-analysis.md` で取り組んだカスケード検出の改善後も、
+以下のケースが未解決として残っている:
 
-パーサは `offsetof` を通常の関数呼び出しとして処理し、第1引数を
-`parse_assignment_expr()` で解析。`struct` キーワードは primary expression の
-開始にならないため失敗する（6 マクロが影響）。
+| シンボル | 現状の出力 | 原因 |
+|----------|-----------|------|
+| `Perl_newSV_type` | `[UNRESOLVED_NAMES]` (inline) | codegen レベルの失敗 |
+| `Perl_newSV_type_mortal` | 正常生成 (inline) | `Perl_newSV_type` を呼ぶがカスケード検出されない |
+| `SvIMMORTAL` | `[CASCADE_UNAVAILABLE]` (macro) | `SvIMMORTAL_INTERP` が `[CODEGEN_INCOMPLETE]` |
 
-### 同じパターンの C ビルトイン
+`Perl_newSV_type_mortal` が正常生成されてしまう問題は、inline→inline カスケード検出
+のバグ、またはクロスドメイン（inline↔macro）カスケード検出の欠落に起因する。
 
-型名を引数に取る関数呼び出し風構文は `offsetof` だけではない:
+### 根本原因: 依存性追跡の断片化
 
-| ビルトイン | 引数パターン | 現状 |
-|-----------|------------|------|
-| `offsetof(type, member)` | 型名, 式 | **PARSE_FAILED** (6件) |
-| `__builtin_offsetof(type, member)` | 型名, 式 | 同上 |
-| `__builtin_types_compatible_p(type1, type2)` | 型名, 型名 | KnownSymbols 登録済みだが未パース |
-| `__builtin_va_arg(ap, type)` | 式, 型名 | 同上 |
+現在、def-use 管理がマクロと inline 関数で統合されていない:
 
-これらに if 文を個別に追加するのではなく、AST に汎用的な
-`BuiltinCall` ノードを導入し、引数に型名と式を混在できるようにする。
+| 処理段階 | マクロ | inline 関数 |
+|----------|--------|-------------|
+| パース時 | `uses`, `called_functions` を収集 | **何も収集しない** |
+| 推論時 | `check_function_availability()` で利用可能性チェック | **対象外** |
+| 推論時 | `propagate_unavailable_via_used_by()` で推移閉包 | **対象外** |
+| codegen時 | クロスドメインカスケード検査あり | ad-hoc で `inline_calls` を構築、fixpoint ループ |
 
-## 設計
+**inline 関数の依存情報は codegen 段階まで遅延されている。**
+これにより、マクロ側の推論段階（`analyze_all_macros`）では inline 関数の
+利用可能性を正確に判定できない。
 
-### 1. AST の拡張 (`src/ast.rs`)
+### ユーザー提案との関係
+
+ユーザーの提案:
+- `enum DependencyType { Macro, Inline }` を導入
+- `uses: HashSet<InternedStr>` を `uses: HashMap<InternedStr, DependencyType>` に変更
+- inline 関数もパース時に uses を収集
+- codegen での生成順序制御を統合
+
+考察の結果、**`called_functions` を統合の軸とする**のが適切と判断:
+
+| 概念 | 用途 | マクロ | inline 関数 |
+|------|------|--------|-------------|
+| `uses` | マクロ→マクロのトークン展開関係。型推論の順序制御用 | ✓ | 該当なし |
+| `called_functions` | AST 上の関数呼び出し先。利用可能性チェック用 | ✓ | **✓ 追加** |
+
+`uses` はマクロ固有の概念（トークン展開）であり、inline 関数には当てはまらない。
+一方 `called_functions` は AST 上の Call 式から収集するもので、
+マクロ・inline 関数の両方に自然に適用できる。
+
+## 変更方針
+
+### Phase 1: `InlineFnDict` に依存性追跡を追加
+
+`InlineFnDict` に `called_functions` と `calls_unavailable` を追加し、
+パース時に収集する。
+
+**`src/inline_fn.rs`**:
 
 ```rust
-/// ビルトイン呼び出しの引数（型名 or 式）
-#[derive(Debug, Clone)]
-pub enum BuiltinArg {
-    Expr(Box<Expr>),
-    TypeName(Box<TypeName>),
+pub struct InlineFnDict {
+    fns: HashMap<InternedStr, FunctionDef>,
+    // 追加: 各 inline 関数の呼び出し先
+    called_functions: HashMap<InternedStr, HashSet<InternedStr>>,
+    // 追加: 利用不可関数の呼び出しを含む
+    calls_unavailable: HashSet<InternedStr>,
 }
 ```
 
-```rust
-pub enum ExprKind {
-    // ... 既存 ...
+`collect_from_function_def()` で、`MacroInferContext::collect_function_calls_from_block_items()`
+を再利用して `called_functions` を収集する:
 
-    /// ビルトイン関数呼び出し（引数に型名を含みうる）
-    /// offsetof(type, member), __builtin_types_compatible_p(type1, type2) 等
-    BuiltinCall {
-        name: InternedStr,
-        args: Vec<BuiltinArg>,
-    },
+```rust
+pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &StringInterner) {
+    // ... 既存の処理 ...
+
+    // 追加: 関数呼び出し先を収集
+    let mut calls = HashSet::new();
+    MacroInferContext::collect_function_calls_from_block_items(
+        &func_def.body.items,
+        &mut calls,
+    );
+    self.called_functions.insert(name, calls);
+
+    self.insert(name, func_def);
 }
 ```
 
-### 2. パーサの拡張 (`src/parser.rs`)
-
-#### 2a. ビルトイン登録テーブル
-
-パーサに known builtins のセットを持たせる:
-
+新しい public API:
 ```rust
-/// 引数に型名を取りうるビルトイン関数名の集合
-fn is_type_arg_builtin(&self, name: InternedStr) -> bool {
-    let s = self.source.interner().get(name);
-    matches!(s, "offsetof" | "__builtin_offsetof"
-              | "__builtin_types_compatible_p"
-              | "__builtin_va_arg")
+impl InlineFnDict {
+    pub fn get_called_functions(&self, name: InternedStr) -> Option<&HashSet<InternedStr>>;
+    pub fn is_calls_unavailable(&self, name: InternedStr) -> bool;
+    pub fn set_calls_unavailable(&mut self, name: InternedStr);
+    pub fn called_functions_iter(&self) -> impl Iterator<Item = (&InternedStr, &HashSet<InternedStr>)>;
 }
 ```
 
-#### 2b. `parse_postfix_expr()` の関数呼び出し分岐を拡張
+### Phase 2: `analyze_all_macros` で inline 関数の利用可能性チェックを統合
 
-`LParen` 分岐 (L1961) で、`expr` が `Ident(name)` かつ
-`is_type_arg_builtin(name)` の場合に `BuiltinCall` パースに分岐:
+`analyze_all_macros` の引数を `&InlineFnDict` → `&mut InlineFnDict` に変更し、
+Step 4.5 の後に inline 関数の利用可能性チェックを追加する。
+
+**`src/macro_infer.rs` — `analyze_all_macros()`**:
+
+```
+Step 4.5: マクロの利用不可関数チェック（既存）
+Step 4.6: inline 関数の利用不可関数チェック（新規） ← 追加
+Step 4.7: クロスドメイン推移閉包の計算（新規）    ← 追加
+```
+
+**Step 4.6: `check_inline_fn_availability()`** (新規メソッド):
+
+inline 関数の `called_functions` を `check_function_availability()` と同じロジックで
+チェックし、`InlineFnDict::set_calls_unavailable()` で結果を記録する。
 
 ```rust
-TokenKind::LParen => {
-    // ビルトイン呼び出し判定
-    if let ExprKind::Ident(name) = &expr.kind {
-        if self.is_type_arg_builtin(*name) {
-            self.advance()?; // (
-            let builtin_name = *name;
-            let args = self.parse_builtin_args()?;
-            self.expect(&TokenKind::RParen)?;
-            self.function_call_count += 1;
-            expr = Expr::new(
-                ExprKind::BuiltinCall { name: builtin_name, args },
-                loc,
-            );
-            continue;  // postfix ループ継続
-        }
+fn check_inline_fn_availability(
+    &self,
+    inline_fn_dict: &mut InlineFnDict,
+    rust_decl_dict: Option<&RustDeclDict>,
+    interner: &StringInterner,
+) {
+    // check_function_availability() と同じロジック:
+    // called_functions の各呼び出し先が bindings, macros, inlines, builtins の
+    // いずれかに存在するかチェック
+}
+```
+
+**Step 4.7: `propagate_unavailable_cross_domain()`** (新規メソッド):
+
+マクロ↔inline 関数のクロスドメイン伝播を fixpoint ループで実行:
+
+```rust
+fn propagate_unavailable_cross_domain(
+    &mut self,
+    inline_fn_dict: &mut InlineFnDict,
+) {
+    loop {
+        let mut changed = false;
+
+        // (a) macro → macro（既存の propagate_unavailable_via_used_by 相当）
+        // (b) inline → inline: inline_fn の called_functions が
+        //     calls_unavailable な inline を含む場合、自身も unavailable
+        // (c) macro → inline: マクロの called_functions が
+        //     calls_unavailable な inline を含む場合、マクロも unavailable
+        // (d) inline → macro: inline の called_functions が
+        //     calls_unavailable なマクロを含む場合、inline も unavailable
+
+        if !changed { break; }
     }
-    // 通常の関数呼び出し（既存コード）
-    self.advance()?;
-    // ...
 }
 ```
 
-#### 2c. `parse_builtin_args()` — 引数ごとに型/式を自動判定
+### Phase 3: codegen のカスケード検出を簡素化
+
+`calls_unavailable` が事前計算されているため、codegen でのカスケード検出を簡素化。
+
+**`src/rust_codegen.rs` — `generate_inline_fns()`**:
+
+- L3074-3083 の ad-hoc `inline_calls` 構築を削除（`InlineFnDict` から取得）
+- L3128-3148 の fixpoint ループを簡素化（pre-codegen で検出済みのものを反映）
+- ただし codegen レベルの失敗（`UNRESOLVED_NAMES`, `CODEGEN_INCOMPLETE`）による
+  カスケードは引き続き codegen 時に検出する必要がある
+
+**重要**: codegen 後にのみ判明する失敗（型不完全、未解決名）があるため、
+codegen 時のカスケード検出を完全に除去することはできない。
+しかし、`calls_unavailable` が事前に設定されていれば:
+1. 明らかに失敗する関数の codegen をスキップできる
+2. カスケード伝播の初期集合が正確になる
+3. fixpoint ループの収束が早くなる
+
+具体的な変更:
 
 ```rust
-fn parse_builtin_args(&mut self) -> Result<Vec<BuiltinArg>> {
-    let mut args = Vec::new();
-    if !self.check(&TokenKind::RParen) {
-        loop {
-            if self.is_type_start() {
-                // 型名として解析
-                let type_name = self.parse_type_name()?;
-                args.push(BuiltinArg::TypeName(Box::new(type_name)));
-            } else {
-                // 式として解析
-                let expr = self.parse_assignment_expr()?;
-                args.push(BuiltinArg::Expr(Box::new(expr)));
-            }
-            if !self.check(&TokenKind::Comma) {
-                break;
-            }
-            self.advance()?;
-        }
+// generate_inline_fns の冒頭で、事前に unavailable と判定された関数をスキップ
+for (name, func_def) in &fns {
+    if result.inline_fn_dict.is_calls_unavailable(*name) {
+        gen_results.push((*name, InlineGenResult::CallsUnavailable));
+        continue;
     }
-    Ok(args)
+    // ... 既存の codegen 処理 ...
 }
 ```
 
-`is_type_start()` は既存メソッド (L2509) で、`KwStruct`, `KwEnum`, `KwUnion`,
-型名キーワード、typedef 名等を判定する。これにより引数ごとに型名 or 式を
-自動判定でき、ビルトインごとの引数パターンをハードコードする必要がない。
+### Phase 4: `analyze_all_macros` シグネチャ変更の波及
 
-### 3. Codegen の更新 (`src/rust_codegen.rs`)
+`inline_fn_dict` を `&mut InlineFnDict` に変更するため、呼び出し元も修正。
 
-`expr_to_rust` / `expr_to_rust_inline` に `ExprKind::BuiltinCall` の
-ハンドラを追加。既存の `ExprKind::Call` 内にある `offsetof` 特別処理を移行:
+**`src/infer_api.rs` L396-406**:
 
 ```rust
-ExprKind::BuiltinCall { name, args } => {
-    let func_name = self.interner.get(*name);
-
-    // offsetof(type, field) → std::mem::offset_of!(Type, field_path)
-    if func_name == "offsetof" || func_name == "__builtin_offsetof" {
-        if args.len() == 2 {
-            let type_str = match &args[0] {
-                BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn, info),
-                BuiltinArg::Expr(e) => self.expr_to_rust(e, info),
-            };
-            let field_path = match &args[1] {
-                BuiltinArg::Expr(e) => self.expr_to_field_path(e),
-                _ => None,
-            };
-            if let Some(fp) = field_path {
-                return format!("std::mem::offset_of!({}, {})", type_str, fp);
-            }
-        }
-    }
-
-    // __builtin_types_compatible_p(type1, type2) → 0 or 1
-    if func_name == "__builtin_types_compatible_p" { ... }
-
-    // __builtin_va_arg(ap, type) → ...
-    // etc.
-
-    // フォールバック: 通常の関数呼び出しとして出力
+// 変更前:
+infer_ctx.analyze_all_macros(
+    &mut pp,
     ...
-}
+    Some(&inline_fn_dict),  // &InlineFnDict
+    ...
+);
+
+// 変更後:
+infer_ctx.analyze_all_macros(
+    &mut pp,
+    ...
+    Some(&mut inline_fn_dict),  // &mut InlineFnDict
+    ...
+);
 ```
 
-### 4. S式出力・型推論への影響
-
-- `src/sexp.rs`: `BuiltinCall` の S式出力を追加（`(builtin-call name arg...)`）
-- `src/macro_infer.rs`: `BuiltinCall` の `called_functions` 抽出に対応
-  （`BuiltinArg::Expr` 内の関数呼び出しを再帰的に走査）
-- `src/semantic.rs`: 必要に応じて `BuiltinCall` のトラバースを追加
-
-### 変更ファイル一覧
+## 変更ファイル一覧
 
 | ファイル | 変更内容 |
 |----------|----------|
-| `src/ast.rs` | `BuiltinArg` enum、`ExprKind::BuiltinCall` variant 追加 |
-| `src/parser.rs` | `is_type_arg_builtin()`、`parse_builtin_args()`、`parse_postfix_expr()` 分岐 |
-| `src/rust_codegen.rs` | `BuiltinCall` ハンドラ追加、既存の `Call` 内 offsetof 処理を移行 |
-| `src/sexp.rs` | `BuiltinCall` の S式出力 |
-| `src/macro_infer.rs` | `BuiltinCall` の関数呼び出し走査対応 |
+| `src/inline_fn.rs` | `called_functions`, `calls_unavailable` フィールド追加、API 追加 |
+| `src/macro_infer.rs` | `check_inline_fn_availability()`, `propagate_unavailable_cross_domain()` 追加、`analyze_all_macros` シグネチャ変更 |
+| `src/rust_codegen.rs` | `generate_inline_fns()` の ad-hoc 依存性構築を InlineFnDict ベースに変更、`CallsUnavailable` 結果の追加 |
+| `src/infer_api.rs` | `analyze_all_macros` 呼び出しの `&` → `&mut` 変更 |
+
+## 期待される効果
+
+| ケース | 変更前 | 変更後 |
+|--------|--------|--------|
+| `Perl_newSV_type` | `[UNRESOLVED_NAMES]` | `[UNRESOLVED_NAMES]` (変化なし) |
+| `Perl_newSV_type_mortal` | 正常生成（呼び出し先が失敗） | `[CASCADE_UNAVAILABLE]` |
+| `SvIMMORTAL` | `[CASCADE_UNAVAILABLE]` | `[CASCADE_UNAVAILABLE]` (変化なし) |
+
+主な改善点:
+- `Perl_newSV_type_mortal` のような「呼び出し先が失敗しているのに正常生成される」
+  ケースが検出されるようになる
+- E0425 エラーの削減（コンパイル不可能なコードが出力されなくなる）
 
 ## 検証
 
@@ -190,19 +237,16 @@ ExprKind::BuiltinCall { name, args } => {
 # 1. 全テスト通過
 cargo test
 
-# 2. KwStruct パースエラーが 0 件になること
+# 2. Perl_newSV_type_mortal がカスケード検出されること
 cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
-  | grep 'found KwStruct'
+  | grep -A2 'Perl_newSV_type'
+# 期待: Perl_newSV_type_mortal が [CASCADE_UNAVAILABLE] になる
 
-# 3. RCPVx が正常生成されること
-cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>/dev/null \
-  | grep -B1 -A5 'fn RCPVx'
+# 3. stats が悪化していないこと（inline_fns_cascade が 1 増える程度）
+cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>&1 | tail -5
 
-# 4. stats 確認 (parse failed 54→48 を期待)
-cargo run -- --auto --gen-rust samples/xs-wrapper.h --bindings samples/bindings.rs 2>&1 | tail -3
-
-# 5. 統合ビルドテスト
+# 4. 統合ビルドテスト
 ~/blob/libperl-rs/12-macrogen-2-build.zsh
 grep -c 'error\[E0425\]' tmp/build-error.log
-grep 'fn RCPVx' tmp/macro_bindings.rs
+# 期待: E0425 エラー数が減少
 ```

@@ -3071,19 +3071,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // 対象 inline 関数名の集合
         let inline_set: HashSet<InternedStr> = fns.iter().map(|(n, _)| **n).collect();
 
-        // 各 inline 関数の呼び出し先を事前収集
-        let mut inline_calls: HashMap<InternedStr, HashSet<InternedStr>> = HashMap::new();
-        for (name, func_def) in &fns {
-            let mut calls = HashSet::new();
-            MacroInferContext::collect_function_calls_from_block_items(
-                &func_def.body.items,
-                &mut calls,
-            );
-            inline_calls.insert(**name, calls);
-        }
-
         // Pass 1: 各 inline 関数を生成
         enum InlineGenResult {
+            CallsUnavailable,
             ContainsGoto,
             UnresolvedNames { code: String, unresolved: Vec<String> },
             Incomplete { code: String },
@@ -3093,6 +3083,12 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         let mut gen_results: Vec<(InternedStr, InlineGenResult)> = Vec::new();
 
         for (name, func_def) in &fns {
+            // 事前に unavailable と判定された関数はスキップ
+            if result.inline_fn_dict.is_calls_unavailable(**name) {
+                gen_results.push((**name, InlineGenResult::CallsUnavailable));
+                continue;
+            }
+
             if block_items_contain_goto(&func_def.body.items) {
                 gen_results.push((**name, InlineGenResult::ContainsGoto));
                 continue;
@@ -3126,6 +3122,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
 
         // Pass 2: カスケード検査 — Success だが失敗 inline 関数を呼び出す場合は降格
+        // InlineFnDict の called_functions を使用（ad-hoc 収集不要）
         // 繰り返し伝播（fixpoint）
         let mut changed = true;
         while changed {
@@ -3135,7 +3132,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 if !current_success.contains(name) {
                     continue;
                 }
-                if let Some(calls) = inline_calls.get(name) {
+                if let Some(calls) = result.inline_fn_dict.get_called_functions(*name) {
                     let has_unavailable = calls.iter().any(|called| {
                         inline_set.contains(called) && !current_success.contains(called)
                     });
@@ -3150,6 +3147,29 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // Pass 3: 出力
         for (name, gen_result) in gen_results {
             match gen_result {
+                InlineGenResult::CallsUnavailable => {
+                    let name_str = self.interner.get(name);
+                    let unavailable: Vec<String> = result.inline_fn_dict.get_called_functions(name)
+                        .map(|calls| calls.iter()
+                            .filter(|c| {
+                                // 呼び出し先が unavailable な inline 関数、
+                                // または unavailable なマクロ、
+                                // またはどこにも定義がない
+                                let is_unavailable_inline = result.inline_fn_dict.get(**c).is_some()
+                                    && result.inline_fn_dict.is_calls_unavailable(**c);
+                                let is_unavailable_macro = result.infer_ctx.macros.get(c)
+                                    .map(|info| info.calls_unavailable)
+                                    .unwrap_or(false);
+                                is_unavailable_inline || is_unavailable_macro
+                            })
+                            .map(|c| self.interner.get(*c).to_string())
+                            .collect())
+                        .unwrap_or_default();
+                    writeln!(self.writer, "// [CASCADE_UNAVAILABLE] {} - calls unavailable: {}",
+                        name_str, unavailable.join(", "))?;
+                    writeln!(self.writer)?;
+                    self.stats.inline_fns_cascade_unavailable += 1;
+                }
                 InlineGenResult::ContainsGoto => {
                     let name_str = self.interner.get(name);
                     writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
@@ -3182,9 +3202,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         self.used_libc_fns.extend(used_libc.iter().cloned());
                         self.stats.inline_fns_success += 1;
                     } else {
-                        // カスケード降格: 呼び出し先の inline 関数が失敗
+                        // カスケード降格: 呼び出し先の inline 関数が codegen 時に失敗
                         let name_str = self.interner.get(name);
-                        let unavailable: Vec<String> = inline_calls.get(&name)
+                        let unavailable: Vec<String> = result.inline_fn_dict.get_called_functions(name)
                             .map(|calls| calls.iter()
                                 .filter(|c| inline_set.contains(c) && !self.successfully_generated_inlines.contains(c))
                                 .map(|c| self.interner.get(*c).to_string())

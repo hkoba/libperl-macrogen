@@ -1066,7 +1066,7 @@ impl MacroInferContext {
         apidoc: Option<&'a ApidocDict>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
-        inline_fn_dict: Option<&'a InlineFnDict>,
+        mut inline_fn_dict: Option<&'a mut InlineFnDict>,
         c_fn_decl_dict: Option<&'a CFnDeclDict>,
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
@@ -1114,12 +1114,28 @@ impl MacroInferContext {
         // Step 4: ## の推移閉包を計算（used_by 経由）
         self.propagate_flag_via_used_by(&pasting_initial, false);
 
-        // Step 4.5: 利用不可関数呼び出しのチェックと伝播
+        // Step 4.5: マクロの利用不可関数呼び出しチェック
         {
             let interner = pp.interner();
-            self.check_function_availability(rust_decl_dict, inline_fn_dict, interner);
+            self.check_function_availability(
+                rust_decl_dict,
+                inline_fn_dict.as_deref(),
+                interner,
+            );
         }
-        self.propagate_unavailable_via_used_by();
+
+        // Step 4.6: inline 関数の利用不可関数呼び出しチェック
+        if let Some(ref mut ifd) = inline_fn_dict {
+            let interner = pp.interner();
+            self.check_inline_fn_availability(ifd, rust_decl_dict, interner);
+        }
+
+        // Step 4.7: クロスドメイン推移閉包の計算（macro↔inline）
+        if let Some(ref mut ifd) = inline_fn_dict {
+            self.propagate_unavailable_cross_domain(ifd);
+        } else {
+            self.propagate_unavailable_via_used_by();
+        }
 
         // Step 5: 全マクロを unconfirmed に
         for name in self.macros.keys().copied().collect::<Vec<_>>() {
@@ -1132,7 +1148,8 @@ impl MacroInferContext {
             let interner = pp.interner();
             let files = pp.files();
             self.infer_types_in_dependency_order(
-                macro_table, interner, files, apidoc, fields_dict, rust_decl_dict, inline_fn_dict, typedefs
+                macro_table, interner, files, apidoc, fields_dict, rust_decl_dict,
+                inline_fn_dict.as_deref(), typedefs
             );
         }
     }
@@ -1304,6 +1321,199 @@ impl MacroInferContext {
                         to_propagate.push(user);
                     }
                 }
+            }
+        }
+    }
+
+    /// inline 関数の利用可能性をチェック
+    ///
+    /// 各 inline 関数の `called_functions` を調べ、bindings.rs にもマクロにも
+    /// inline 関数にも存在しない関数を呼び出している場合、unavailable を設定
+    fn check_inline_fn_availability(
+        &self,
+        inline_fn_dict: &mut InlineFnDict,
+        rust_decl_dict: Option<&RustDeclDict>,
+        interner: &StringInterner,
+    ) {
+        // bindings.rs の関数名を収集
+        let bindings_fns: HashSet<&str> = rust_decl_dict
+            .map(|d| d.fns.keys().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+
+        // ビルトイン関数（check_function_availability と同じリスト）
+        let builtin_fns: HashSet<&str> = [
+            "__builtin_expect",
+            "__builtin_offsetof",
+            "offsetof",
+            "__builtin_types_compatible_p",
+            "__builtin_constant_p",
+            "__builtin_choose_expr",
+            "__builtin_unreachable",
+            "__builtin_trap",
+            "__builtin_assume",
+            "__builtin_bswap16",
+            "__builtin_bswap32",
+            "__builtin_bswap64",
+            "__builtin_popcount",
+            "__builtin_clz",
+            "__builtin_ctz",
+            "__errno_location",
+            "pthread_mutex_lock",
+            "pthread_mutex_unlock",
+            "pthread_rwlock_rdlock",
+            "pthread_rwlock_wrlock",
+            "pthread_rwlock_unlock",
+            "memchr",
+            "memcpy",
+            "memmove",
+            "memset",
+            "strlen",
+            "strcmp",
+            "strncmp",
+            "strcpy",
+            "strncpy",
+            "ASSERT_IS_LITERAL",
+            "ASSERT_IS_PTR",
+            "ASSERT_NOT_PTR",
+        ].into_iter().collect();
+
+        // マクロ名の集合
+        let macro_names: HashSet<InternedStr> = self.macros.keys().copied().collect();
+
+        // inline 関数の called_functions をチェック
+        let entries: Vec<(InternedStr, Vec<InternedStr>)> = inline_fn_dict
+            .called_functions_iter()
+            .map(|(name, calls)| (*name, calls.iter().copied().collect()))
+            .collect();
+
+        for (name, called_fns) in entries {
+            let mut has_unavailable = false;
+            for called_fn in called_fns {
+                let fn_name = interner.get(called_fn);
+
+                // マクロとして存在する場合はOK
+                if macro_names.contains(&called_fn) {
+                    continue;
+                }
+
+                // bindings.rs に存在する場合はOK
+                if bindings_fns.contains(fn_name) {
+                    continue;
+                }
+
+                // inline 関数として存在する場合はOK
+                if inline_fn_dict.get(called_fn).is_some() {
+                    continue;
+                }
+
+                // ビルトイン関数の場合はOK
+                if builtin_fns.contains(fn_name) {
+                    continue;
+                }
+
+                // それ以外は利用不可
+                has_unavailable = true;
+                break;
+            }
+
+            if has_unavailable {
+                inline_fn_dict.set_calls_unavailable(name);
+            }
+        }
+    }
+
+    /// マクロ↔inline 関数のクロスドメイン推移閉包を計算
+    ///
+    /// macro→macro, inline→inline, macro→inline, inline→macro の
+    /// 全方向の利用不可伝播を fixpoint ループで実行する。
+    fn propagate_unavailable_cross_domain(
+        &mut self,
+        inline_fn_dict: &mut InlineFnDict,
+    ) {
+        loop {
+            let mut changed = false;
+
+            // (a) macro → macro: used_by 経由の伝播
+            let macro_names: Vec<InternedStr> = self.macros.keys().copied().collect();
+            for name in &macro_names {
+                if !self.macros.get(name).map(|i| i.calls_unavailable).unwrap_or(false) {
+                    continue;
+                }
+                let used_by_list: Vec<InternedStr> = self.macros
+                    .get(name)
+                    .map(|info| info.used_by.iter().copied().collect())
+                    .unwrap_or_default();
+                for user in used_by_list {
+                    if let Some(user_info) = self.macros.get_mut(&user) {
+                        if !user_info.calls_unavailable {
+                            user_info.calls_unavailable = true;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            // (b) inline → inline: inline の called_functions が
+            //     calls_unavailable な inline を含む場合、自身も unavailable
+            let inline_entries: Vec<(InternedStr, Vec<InternedStr>)> = inline_fn_dict
+                .called_functions_iter()
+                .map(|(name, calls)| (*name, calls.iter().copied().collect()))
+                .collect();
+            for (name, calls) in &inline_entries {
+                if inline_fn_dict.is_calls_unavailable(*name) {
+                    continue;
+                }
+                let has_unavailable_inline = calls.iter().any(|called| {
+                    inline_fn_dict.get(*called).is_some()
+                        && inline_fn_dict.is_calls_unavailable(*called)
+                });
+                if has_unavailable_inline {
+                    inline_fn_dict.set_calls_unavailable(*name);
+                    changed = true;
+                }
+            }
+
+            // (c) macro → inline: マクロの called_functions が
+            //     calls_unavailable な inline を含む場合、マクロも unavailable
+            for name in &macro_names {
+                if self.macros.get(name).map(|i| i.calls_unavailable).unwrap_or(false) {
+                    continue;
+                }
+                let called_fns: Vec<InternedStr> = self.macros
+                    .get(name)
+                    .map(|info| info.called_functions.iter().copied().collect())
+                    .unwrap_or_default();
+                let has_unavailable_inline = called_fns.iter().any(|called| {
+                    inline_fn_dict.get(*called).is_some()
+                        && inline_fn_dict.is_calls_unavailable(*called)
+                });
+                if has_unavailable_inline {
+                    if let Some(info) = self.macros.get_mut(name) {
+                        info.calls_unavailable = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            // (d) inline → macro: inline の called_functions が
+            //     calls_unavailable なマクロを含む場合、inline も unavailable
+            for (name, calls) in &inline_entries {
+                if inline_fn_dict.is_calls_unavailable(*name) {
+                    continue;
+                }
+                let has_unavailable_macro = calls.iter().any(|called| {
+                    self.macros.get(called)
+                        .map(|info| info.calls_unavailable)
+                        .unwrap_or(false)
+                });
+                if has_unavailable_macro {
+                    inline_fn_dict.set_calls_unavailable(*name);
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
             }
         }
     }
@@ -1552,8 +1762,37 @@ impl MacroInferContext {
                 BlockItem::Stmt(stmt) => {
                     Self::collect_function_calls_from_stmt(stmt, calls);
                 }
-                BlockItem::Decl(_) => {
-                    // 宣言内の初期化子も処理する必要があるが、今回はスキップ
+                BlockItem::Decl(decl) => {
+                    Self::collect_function_calls_from_decl(decl, calls);
+                }
+            }
+        }
+    }
+
+    /// 宣言の初期化子から関数呼び出しを収集
+    fn collect_function_calls_from_decl(
+        decl: &crate::ast::Declaration,
+        calls: &mut HashSet<InternedStr>,
+    ) {
+        for init_decl in &decl.declarators {
+            if let Some(init) = &init_decl.init {
+                Self::collect_function_calls_from_initializer(init, calls);
+            }
+        }
+    }
+
+    /// 初期化子から関数呼び出しを収集
+    fn collect_function_calls_from_initializer(
+        init: &crate::ast::Initializer,
+        calls: &mut HashSet<InternedStr>,
+    ) {
+        match init {
+            crate::ast::Initializer::Expr(expr) => {
+                Self::collect_function_calls_from_expr(expr, calls);
+            }
+            crate::ast::Initializer::List(items) => {
+                for item in items {
+                    Self::collect_function_calls_from_initializer(&item.init, calls);
                 }
             }
         }

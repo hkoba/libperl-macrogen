@@ -398,7 +398,7 @@ pub fn run_inference_with_preprocessor(
         Some(&apidoc),
         Some(&fields_dict),
         rust_decl_dict.as_ref(),
-        Some(&inline_fn_dict),
+        Some(&mut inline_fn_dict),
         Some(&c_fn_decl_dict),
         &typedefs,
         thx_symbols,
