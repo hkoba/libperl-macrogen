@@ -583,6 +583,8 @@ pub struct CodegenDriver<'a, W: Write> {
     used_libc_fns: HashSet<String>,
     /// 正常生成された inline 関数名（クロスドメインカスケード検出用）
     successfully_generated_inlines: HashSet<InternedStr>,
+    /// 生成可能と予測されるマクロの集合（inline→macro カスケード検出用）
+    generatable_macros: HashSet<InternedStr>,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -2956,6 +2958,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             stats: CodegenStats::default(),
             used_libc_fns: HashSet::new(),
             successfully_generated_inlines: HashSet::new(),
+            generatable_macros: HashSet::new(),
         }
     }
 
@@ -2984,6 +2987,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         // target enum のバリアントを import
         self.generate_enum_imports(result)?;
+
+        // マクロの生成可能性を事前計算（inline→macro カスケード検出用）
+        self.precompute_macro_generability(result, &known_symbols);
 
         // inline 関数セクション
         if self.config.emit_inline_fns {
@@ -3050,12 +3056,60 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         Ok(())
     }
 
+    /// マクロの生成可能性を事前計算
+    ///
+    /// inline 関数生成前に呼び出し、マクロ→マクロのカスケード検査をシミュレートして
+    /// 正常に生成可能なマクロの集合を構築する。
+    /// inline→macro のカスケード検出に使用する。
+    fn precompute_macro_generability(&mut self, result: &InferResult, known_symbols: &KnownSymbols) {
+        // 対象マクロを収集
+        let macros: Vec<_> = result.infer_ctx.macros.iter()
+            .filter(|(_, info)| self.should_include_macro(info))
+            .collect();
+        let included_set: HashSet<InternedStr> = macros.iter().map(|(n, _)| **n).collect();
+
+        // 依存順にソート（葉マクロ先頭）
+        let sorted_names = self.topological_sort_macros(&macros);
+
+        for name in sorted_names {
+            let info = result.infer_ctx.macros.get(&name).unwrap();
+
+            // カスケード検査: called_functions が生成不可なマクロを含むか
+            let has_cascade_failure = info.called_functions.iter().any(|called| {
+                if included_set.contains(called) {
+                    return result.infer_ctx.macros.get(called)
+                        .map(|u| u.is_parseable() && !u.calls_unavailable)
+                        .unwrap_or(false)
+                        && !self.generatable_macros.contains(called);
+                }
+                false
+            });
+            if has_cascade_failure {
+                continue;
+            }
+
+            // get_macro_status + trial codegen による判定
+            let status = self.get_macro_status(info);
+            if status == GenerateStatus::Success {
+                // 実際に codegen を試行して完全性を確認
+                let codegen = RustCodegen::new(
+                    self.interner, self.enum_dict, self.macro_ctx,
+                    self.bindings_info.clone(), &known_symbols,
+                );
+                let generated = codegen.generate_macro(info);
+                if generated.is_complete() && !generated.has_unresolved_names() {
+                    self.generatable_macros.insert(name);
+                }
+            }
+        }
+    }
+
     /// inline 関数セクションを生成
     ///
     /// 2パス方式:
     /// - Pass 1: 各 inline 関数を生成し、結果を蓄積
-    /// - Pass 2: カスケード検査 — 生成成功した関数が失敗した inline 関数を
-    ///   呼び出している場合、CASCADE_UNAVAILABLE に降格
+    /// - Pass 2: カスケード検査 — 生成成功した関数が失敗した inline 関数や
+    ///   マクロを呼び出している場合、CASCADE_UNAVAILABLE に降格
     pub fn generate_inline_fns(&mut self, result: &InferResult, known_symbols: &KnownSymbols) -> io::Result<()> {
         writeln!(self.writer, "// =============================================================================")?;
         writeln!(self.writer, "// Inline Functions")?;
@@ -3121,8 +3175,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
         }
 
-        // Pass 2: カスケード検査 — Success だが失敗 inline 関数を呼び出す場合は降格
+        // Pass 2: カスケード検査 — Success だが失敗した依存先を呼び出す場合は降格
         // InlineFnDict の called_functions を使用（ad-hoc 収集不要）
+        // inline→inline と inline→macro の両方を検査
         // 繰り返し伝播（fixpoint）
         let mut changed = true;
         while changed {
@@ -3134,7 +3189,19 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 }
                 if let Some(calls) = result.inline_fn_dict.get_called_functions(*name) {
                     let has_unavailable = calls.iter().any(|called| {
-                        inline_set.contains(called) && !current_success.contains(called)
+                        // inline→inline: 対象 inline が生成失敗
+                        if inline_set.contains(called) && !current_success.contains(called) {
+                            return true;
+                        }
+                        // inline→macro: 対象マクロが生成不可
+                        if let Some(macro_info) = result.infer_ctx.macros.get(called) {
+                            if macro_info.is_target && self.should_include_macro(macro_info) {
+                                if !self.generatable_macros.contains(called) {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
                     });
                     if has_unavailable {
                         self.successfully_generated_inlines.remove(name);

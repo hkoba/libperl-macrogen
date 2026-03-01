@@ -1680,6 +1680,9 @@ impl MacroInferContext {
                     }
                 }
             }
+            ExprKind::Assert { condition, .. } => {
+                Self::collect_uses_from_expr(condition, uses);
+            }
             _ => {}
         }
     }
@@ -1747,6 +1750,9 @@ impl MacroInferContext {
                         Self::collect_function_calls_from_expr(e, calls);
                     }
                 }
+            }
+            ExprKind::Assert { condition, .. } => {
+                Self::collect_function_calls_from_expr(condition, calls);
             }
             _ => {}
         }
