@@ -353,9 +353,13 @@ fn is_const_pointer_type_str(ty: &str) -> bool {
     ty.starts_with("*const ")
 }
 
-/// 式が NULL リテラル（整数 0）かどうか判定
+/// 式が NULL リテラル（整数 0 または (void*)0 のような Cast）かどうか判定
 fn is_null_literal(expr: &Expr) -> bool {
-    matches!(expr.kind, ExprKind::IntLit(0))
+    match &expr.kind {
+        ExprKind::IntLit(0) => true,
+        ExprKind::Cast { expr: inner, .. } => is_null_literal(inner),
+        _ => false,
+    }
 }
 
 /// ポインタ型に対応する null ポインタ式を生成
@@ -741,6 +745,14 @@ impl<'a> RustCodegen<'a> {
         if is_boolean_expr(expr) {
             return expr_str.to_string();
         }
+        // __builtin_expect(cond, val) → cond の型をチェック
+        if let ExprKind::Call { func, args, .. } = &expr.kind {
+            if let ExprKind::Ident(name) = &func.kind {
+                if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
+                    return self.wrap_as_bool_condition_macro(&args[0], expr_str, info);
+                }
+            }
+        }
         if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
             return expr_str.to_string();
         }
@@ -754,6 +766,22 @@ impl<'a> RustCodegen<'a> {
     fn wrap_as_bool_condition_inline(&self, expr: &Expr, expr_str: &str) -> String {
         if is_boolean_expr(expr) {
             return expr_str.to_string();
+        }
+        // __builtin_expect(cond, val) → cond の型をチェック
+        if let ExprKind::Call { func, args, .. } = &expr.kind {
+            if let ExprKind::Ident(name) = &func.kind {
+                if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
+                    return self.wrap_as_bool_condition_inline(&args[0], expr_str);
+                }
+            }
+        }
+        // bool 型変数の検出
+        if let ExprKind::Ident(name) = &expr.kind {
+            if let Some(ty) = self.current_param_types.get(name) {
+                if ty == "bool" {
+                    return expr_str.to_string();
+                }
+            }
         }
         if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
             return expr_str.to_string();
