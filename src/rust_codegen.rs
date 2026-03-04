@@ -83,9 +83,10 @@ impl KnownSymbols {
         // マクロ名（関数呼び出しとして保持されるもの）
         for (name_id, info) in &result.infer_ctx.macros {
             let name_str = interner.get(*name_id);
-            // parseable なマクロはすべて既知とする
-            // (calls_unavailable でも名前自体は既知)
-            if info.has_body {
+            // 関数マクロのみ既知とする（オブジェクトマクロは除外）
+            // オブジェクトマクロ名（例: `n`, `s`, `c`）を登録すると、
+            // ジェネリック誤検出で残ったパラメータ参照が既知扱いになってしまう
+            if info.has_body && info.is_function {
                 names.insert(name_str.to_string());
             }
         }
@@ -113,7 +114,6 @@ impl KnownSymbols {
             "__builtin_popcount",
             "__builtin_clz",
             "__builtin_ctz",
-            "__errno_location",
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
             "pthread_rwlock_rdlock",
@@ -998,6 +998,12 @@ impl<'a> RustCodegen<'a> {
             })
             .collect();
 
+        // 型パラメータになったパラメータは通常パラメータとしては存在しないので
+        // current_local_names から除外する（ジェネリック誤検出時に unresolved 検出するため）
+        for (name, _) in &self.current_type_param_map {
+            self.current_local_names.remove(name);
+        }
+
         // リテラル文字列パラメータの名前集合を構築
         self.current_literal_string_params = info.literal_string_params.iter()
             .filter_map(|&idx| info.params.get(idx).map(|p| p.name))
@@ -1262,8 +1268,9 @@ impl<'a> RustCodegen<'a> {
                     self.used_libc_fns.insert(name_str.to_string());
                 }
                 // 未解決シンボルチェック
+                // Note: type_param_map の名前が値コンテキストで出現する場合も
+                // unresolved とする（ジェネリック誤検出の検出）
                 if !self.current_local_names.contains(name)
-                    && !self.current_type_param_map.contains_key(name)
                     && !self.enum_dict.is_enum_variant(*name)
                     && !self.known_symbols.contains(name_str)
                 {
@@ -2555,8 +2562,9 @@ impl<'a> RustCodegen<'a> {
                     self.used_libc_fns.insert(name_str.to_string());
                 }
                 // 未解決シンボルチェック
+                // Note: type_param_map の名前が値コンテキストで出現する場合も
+                // unresolved とする（ジェネリック誤検出の検出）
                 if !self.current_local_names.contains(name)
-                    && !self.current_type_param_map.contains_key(name)
                     && !self.enum_dict.is_enum_variant(*name)
                     && !self.known_symbols.contains(name_str)
                 {
@@ -3650,7 +3658,6 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             "__builtin_popcount",
             "__builtin_clz",
             "__builtin_ctz",
-            "__errno_location",
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
             "pthread_rwlock_rdlock",

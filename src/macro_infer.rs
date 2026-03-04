@@ -1226,7 +1226,6 @@ impl MacroInferContext {
             "__builtin_popcount",
             "__builtin_clz",
             "__builtin_ctz",
-            "__errno_location",  // glibc
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
             "pthread_rwlock_rdlock",
@@ -1357,7 +1356,6 @@ impl MacroInferContext {
             "__builtin_popcount",
             "__builtin_clz",
             "__builtin_ctz",
-            "__errno_location",
             "pthread_mutex_lock",
             "pthread_mutex_unlock",
             "pthread_rwlock_rdlock",
