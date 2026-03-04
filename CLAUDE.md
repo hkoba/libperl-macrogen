@@ -6,6 +6,10 @@ This file contains guidelines for Claude Code when working on this project.
 
 - **Rust Edition**: 2024 (do not change this)
 
+## Perl C Header Files
+
+The target Perl C header files (e.g., `sv.h`, `inline.h`, `perl.h`, `handy.h`) are located at `/usr/lib64/perl5/CORE/`. When investigating how Perl C macros or inline functions work, check these headers directly.
+
 ## TinyCC Reference Rule
 
 **IMPORTANT**: When encountering problems or implementing new features:

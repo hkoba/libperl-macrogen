@@ -1,160 +1,205 @@
-# Plan: E0308 Phase 2 — `__builtin_expect` bool 二重ラップ + `is_null_literal` Cast 対応
+# Plan: E0308 Phase 3 — bool 冗長比較の除去 + 関数引数の bool 変換
 
 ## Context
 
-Phase 1 (完了) で E0308 を 687→676 に削減した。
-残り 676 件の E0308 エラーのうち、最大カテゴリは **"expected bool, found integer" (91 件)** 。
+Phase 2 (完了) で E0308 を 676→652 に削減（total: 969→944）。
+残り 652 件のうち「expected bool, found integer」が依然 ~93 件で最大カテゴリ。
 
-生成コードを分析すると、二重ラップパターンが主原因:
+Phase 2 は `wrap_as_bool_condition_*()` の `__builtin_expect` 再帰と
+`is_null_literal()` の Cast 対応を修正したが、以下の 2 パターンが残存:
+
+### パターン A: AST 内の冗長 `!= 0` 比較 (~79 件)
+
+C では比較演算子は `int` を返すため `(rc > 1) != 0` は合法。
+しかし Rust では比較演算子は `bool` を返すため `bool != 0` は型エラー。
 
 ```rust
-// 例1: 比較結果に不要な != 0 が付く
-if (((rc > 1)) != 0) {          // ← rc > 1 は既に bool
+// 例1: 比較結果に != 0
+if (((rc > 1)) != 0) {          // ← (rc > 1) は Rust では bool
 
-// 例2: ポインタ比較が is_null() に変換されず、さらに != 0
-if (((sv != (0 as *mut c_void))) != 0) {  // ← 二重問題
+// 例2: is_null() 結果に != 0
+if ((!sv.is_null()) != 0) {     // ← !sv.is_null() は bool
 
-// 例3: bool 変数に != 0
-if ((sv_2bool_is_fallback) != 0) {        // ← bool なのに != 0
+// 例3: LogNot 結果に != 0
+if (!(((flags & mask)) != 0))   // ← 内側の != 0 は OK だが、全体で二重
 ```
 
-### 根本原因
+**根本原因**: `expr_to_rust()` / `expr_to_rust_inline()` の Binary Eq/Ne ハンドラは
+ポインタ null チェック（L1349-1366, L2627-2644）の後、一般的に
+`format!("({} {} {})", l, op, r)` を出力する。LHS が既に bool を返す式でも
+`!= 0` をそのまま出力してしまう。
 
-**原因 A: `__builtin_expect` の AST/文字列不一致**
+### パターン B: 関数引数の整数→bool 不一致 (~14 件)
 
-`expr_to_rust_inline()` の `__builtin_expect` ハンドラは
-`args[0]` の codegen 文字列を返す（`Call` を剥がす）。
-しかし `wrap_as_bool_condition_inline()` は **元の AST**（`Call { __builtin_expect, ... }`）
-を見るため、`is_boolean_expr(Call{...})` が `false` を返し、`!= 0` を追加してしまう。
+```rust
+// Perl_SvTRUE_common の第3引数は bool だが、整数リテラル 1 を渡す
+return Perl_SvTRUE_common(my_perl, sv, 1);  // ← expected bool, found integer
+```
 
-C コード: `if (PERL_LIKELY(rc > 1))`
-→ 展開: `if (__builtin_expect((rc > 1), 1))`
-→ AST: `Call { __builtin_expect, [Binary{Gt, rc, 1}, IntLit(1)] }`
-→ `expr_to_rust_inline()`: `(rc > 1)` (内部式を返す)
-→ `wrap_as_bool_condition_inline(Call{...}, "(rc > 1)")`:
-  - `is_boolean_expr(Call{...})` → **false** ← ここが問題
-  - → `(((rc > 1)) != 0)` ← 二重ラップ
-
-**原因 B: `is_null_literal()` が Cast を処理しない**
-
-`NULL` は `((void*)0)` に展開され、AST は `Cast { IntLit(0), *mut c_void }`。
-`is_null_literal()` は `IntLit(0)` のみチェックするため Cast を見逃す。
-→ `ptr != (0 as *mut c_void)` のまま出力（`!ptr.is_null()` に変換されない）
-
-**原因 C: bool 型変数が検出されない**
-
-`wrap_as_bool_condition_inline()` は `is_pointer_expr_inline()` でポインタを検出するが、
-bool 型変数を検出するロジックがない。
-Phase 1 で `current_param_types` にローカル変数の型を登録済みなので、
-`Ident(name)` の型が `"bool"` ならスキップできる。
+**根本原因**: `expr_to_rust_inline()` の Call ハンドラ (L2738) は引数を
+型情報なしで変換する。`rust_decl_dict` に関数シグネチャ（`RustFn.params`）が
+あるが、codegen から参照されていない。
 
 ## 変更内容
 
-### 変更 1: `is_null_literal()` に Cast 再帰を追加
+### 変更 1: `is_boolean_expr_recursive()` ヘルパー追加
 
-`src/rust_codegen.rs` L357-359
+`src/rust_codegen.rs` L314 の `is_boolean_expr()` の後に追加。
+`__builtin_expect(cond, val)` を透過して内部式の bool 判定を行う。
+
+```rust
+/// is_boolean_expr の再帰版: __builtin_expect(cond, val) を透過する
+fn is_boolean_expr_recursive(expr: &Expr, interner: &StringInterner) -> bool {
+    if is_boolean_expr(expr) {
+        return true;
+    }
+    if let ExprKind::Call { func, args } = &expr.kind {
+        if let ExprKind::Ident(name) = &func.kind {
+            if interner.get(*name) == "__builtin_expect" && !args.is_empty() {
+                return is_boolean_expr_recursive(&args[0], interner);
+            }
+        }
+    }
+    false
+}
+```
+
+### 変更 2: Binary Eq/Ne ハンドラに bool 冗長比較の除去を追加
+
+`expr_to_rust()` (L1366 の後) と `expr_to_rust_inline()` (L2644 の後) の
+両方で、ポインタ null チェックの**後**に以下を挿入:
+
+```rust
+// bool_expr != 0 → bool_expr, bool_expr == 0 → !bool_expr
+if is_boolean_expr_recursive(lhs, self.interner) {
+    match (&rhs.kind, op) {
+        (ExprKind::IntLit(0), BinOp::Ne) => {
+            return self.expr_to_rust(lhs, info); // そのまま
+        }
+        (ExprKind::IntLit(0), BinOp::Eq) => {
+            let l = self.expr_to_rust(lhs, info);
+            return format!("!{}", l); // 否定
+        }
+        (ExprKind::IntLit(1), BinOp::Eq) => {
+            return self.expr_to_rust(lhs, info);
+        }
+        (ExprKind::IntLit(1), BinOp::Ne) => {
+            let l = self.expr_to_rust(lhs, info);
+            return format!("!{}", l);
+        }
+        _ => {}
+    }
+}
+// 逆順 (0 != bool_expr) も同様
+if is_boolean_expr_recursive(rhs, self.interner) {
+    match (&lhs.kind, op) {
+        (ExprKind::IntLit(0), BinOp::Ne) => {
+            return self.expr_to_rust(rhs, info);
+        }
+        (ExprKind::IntLit(0), BinOp::Eq) => {
+            let r = self.expr_to_rust(rhs, info);
+            return format!("!{}", r);
+        }
+        (ExprKind::IntLit(1), BinOp::Eq) => {
+            return self.expr_to_rust(rhs, info);
+        }
+        (ExprKind::IntLit(1), BinOp::Ne) => {
+            let r = self.expr_to_rust(rhs, info);
+            return format!("!{}", r);
+        }
+        _ => {}
+    }
+}
+```
+
+inline 版は `self.expr_to_rust_inline(lhs)` を使う。
+
+**安全性**: ポインタ null チェックが先に来るため `ptr == 0` は `.is_null()` に
+変換され、ここには到達しない。`(x & mask) != 0` は BitAnd が
+`is_boolean_expr` に含まれないため、正しく `!= 0` のまま残る。
+
+### 変更 3: `RustCodegen` に `rust_decl_dict` 参照を追加
+
+`RustCodegen` 構造体 (L536-569) に新フィールド追加:
+
+```rust
+/// Rust 宣言辞書への参照（関数パラメータ型参照用）
+rust_decl_dict: Option<&'a RustDeclDict>,
+```
+
+`RustCodegen::new()` (L596) に引数追加。
+3 箇所の呼び出し元 (L3154, L3210, L3414) を更新:
+`result.rust_decl_dict.as_ref()` を渡す。
+
+### 変更 4: `get_callee_param_type()` メソッド + 引数 bool 変換
+
+```rust
+fn get_callee_param_type(&self, func_name: &str, arg_index: usize) -> Option<&str> {
+    self.rust_decl_dict?.fns.get(func_name).and_then(|f| {
+        f.params.get(arg_index).map(|p| p.ty.as_str())
+    })
+}
+```
+
+`expr_to_rust_arg()` (L940-952) に bool 変換を追加:
+
+```rust
+fn expr_to_rust_arg(&mut self, expr: &Expr, info: &MacroInferInfo,
+                     callee: Option<InternedStr>, arg_index: usize) -> String {
+    // 既存: literal_string チェック
+    if let Some(name) = self.find_literal_string_ident(expr) { ... }
+
+    // 追加: bool パラメータへの整数リテラル変換
+    if let Some(callee_name) = callee {
+        let func_name = self.interner.get(callee_name);
+        if let Some(param_ty) = self.get_callee_param_type(func_name, arg_index) {
+            if param_ty == "bool" {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return "false".to_string(),
+                    ExprKind::IntLit(1) => return "true".to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    self.expr_to_rust(expr, info)
+}
+```
+
+inline 版 (L2738) にも同様のロジックを追加:
 
 ```rust
 // 変更前
-fn is_null_literal(expr: &Expr) -> bool {
-    matches!(expr.kind, ExprKind::IntLit(0))
-}
+a.extend(args.iter().map(|arg| self.expr_to_rust_inline(arg)));
 
 // 変更後
-fn is_null_literal(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::IntLit(0) => true,
-        ExprKind::Cast { expr: inner, .. } => is_null_literal(inner),
-        _ => false,
-    }
-}
-```
-
-**効果**: `ptr != ((void*)0)` → `!ptr.is_null()` がマクロ・inline 両方で効く。
-Phase 1 で追加した Eq/Ne ハンドラ（inline L2600, macro L1318）が自動的に対応。
-
-### 変更 2: `wrap_as_bool_condition_inline()` に `__builtin_expect` 再帰を追加
-
-`src/rust_codegen.rs` L754-765
-
-```rust
-// 変更後
-fn wrap_as_bool_condition_inline(&self, expr: &Expr, expr_str: &str) -> String {
-    if is_boolean_expr(expr) {
-        return expr_str.to_string();
-    }
-    // __builtin_expect(cond, val) → cond の型をチェック
-    if let ExprKind::Call { func, args, .. } = &expr.kind {
-        if let ExprKind::Ident(name) = &func.kind {
-            if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
-                return self.wrap_as_bool_condition_inline(&args[0], expr_str);
+a.extend(args.iter().enumerate().map(|(i, arg)| {
+    let param_idx = i + arg_offset;
+    if let Some(param_ty) = self.get_callee_param_type(&f, param_idx) {
+        if param_ty == "bool" {
+            match &arg.kind {
+                ExprKind::IntLit(0) => return "false".to_string(),
+                ExprKind::IntLit(1) => return "true".to_string(),
+                _ => {}
             }
         }
     }
-    // bool 型変数の検出
-    if let ExprKind::Ident(name) = &expr.kind {
-        if let Some(ty) = self.current_param_types.get(name) {
-            if ty == "bool" {
-                return expr_str.to_string();
-            }
-        }
-    }
-    if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
-        return expr_str.to_string();
-    }
-    if self.is_pointer_expr_inline(expr) {
-        return format!("!{}.is_null()", expr_str);
-    }
-    format!("(({}) != 0)", expr_str)
-}
+    self.expr_to_rust_inline(arg)
+}));
 ```
-
-再帰により、`__builtin_expect` の内部式で `is_boolean_expr()` / `is_pointer_expr_inline()` が
-正しく評価される。
-
-### 変更 3: `wrap_as_bool_condition_macro()` にも同じ `__builtin_expect` 再帰を追加
-
-`src/rust_codegen.rs` L740-751
-
-```rust
-// 変更後
-fn wrap_as_bool_condition_macro(&self, expr: &Expr, expr_str: &str, info: &MacroInferInfo) -> String {
-    if is_boolean_expr(expr) {
-        return expr_str.to_string();
-    }
-    // __builtin_expect(cond, val) → cond の型をチェック
-    if let ExprKind::Call { func, args, .. } = &expr.kind {
-        if let ExprKind::Ident(name) = &func.kind {
-            if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
-                return self.wrap_as_bool_condition_macro(&args[0], expr_str, info);
-            }
-        }
-    }
-    if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
-        return expr_str.to_string();
-    }
-    if self.infer_type_hint(expr, info) == TypeHint::Pointer {
-        return format!("!{}.is_null()", expr_str);
-    }
-    format!("(({}) != 0)", expr_str)
-}
-```
-
-### 変更の相乗効果
-
-| 生成コード (変更前) | 変更 1 のみ | 変更 2+3 のみ | 全変更 |
-|---|---|---|---|
-| `if (((sv != (0 as *mut c_void))) != 0)` | `if (!sv.is_null()) != 0)` ※string check で回避 | `if (sv != (0 as *mut c_void))` | `if !sv.is_null()` |
-| `if (((rc > 1)) != 0)` | 変化なし | `if (rc > 1)` | `if (rc > 1)` |
-| `if ((sv_2bool_is_fallback) != 0)` | 変化なし | `if sv_2bool_is_fallback` | `if sv_2bool_is_fallback` |
 
 ## 変更ファイル
 
 | ファイル | 変更箇所 |
 |----------|----------|
-| `src/rust_codegen.rs` | `is_null_literal()` L357-359: Cast 再帰追加 |
-| `src/rust_codegen.rs` | `wrap_as_bool_condition_inline()` L754-765: `__builtin_expect` 再帰 + bool 変数検出 |
-| `src/rust_codegen.rs` | `wrap_as_bool_condition_macro()` L740-751: `__builtin_expect` 再帰 |
+| `src/rust_codegen.rs` | `is_boolean_expr_recursive()` 追加 (L314 後) |
+| `src/rust_codegen.rs` | `expr_to_rust()` Binary Eq/Ne (L1366 後): bool 冗長比較除去 |
+| `src/rust_codegen.rs` | `expr_to_rust_inline()` Binary Eq/Ne (L2644 後): 同上 |
+| `src/rust_codegen.rs` | `RustCodegen` 構造体 + `new()`: `rust_decl_dict` フィールド追加 |
+| `src/rust_codegen.rs` | `get_callee_param_type()` メソッド追加 |
+| `src/rust_codegen.rs` | `expr_to_rust_arg()`: bool 変換追加 |
+| `src/rust_codegen.rs` | `expr_to_rust_inline()` Call: bool 変換追加 |
 
 ## 検証
 
@@ -168,9 +213,9 @@ cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.
 # 3. 統合ビルドテスト
 ~/blob/libperl-rs/12-macrogen-2-build.zsh
 grep -c 'error\[E0308\]' tmp/build-error.log
-# 期待: 676 から減少（91件の "expected bool" が大幅に減少）
+# 期待: 652 → ~559 (約 93 件減少)
 
-# 4. 二重ラップパターンの確認
-grep -c '!= 0)' tmp/macro_bindings.rs
-# 期待: 261 から大幅に減少
+# 4. bool 冗長パターンの確認
+grep 'expected.*bool.*found.*integer' tmp/build-error.log | wc -l
+# 期待: 大幅減少
 ```
