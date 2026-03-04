@@ -957,10 +957,14 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// Declaration から変数名を収集して current_local_names に追加
+    /// ローカル変数の型も current_param_types に登録（ポインタ検出用）
     fn collect_decl_names(&mut self, decl: &Declaration) {
+        let base_type = self.decl_specs_to_rust(&decl.specs);
         for init_decl in &decl.declarators {
             if let Some(name) = init_decl.declarator.name {
                 self.current_local_names.insert(name);
+                let ty = self.apply_derived_to_type(&base_type, &init_decl.declarator.derived);
+                self.current_param_types.insert(name, ty);
             }
         }
     }
@@ -2591,6 +2595,25 @@ impl<'a> RustCodegen<'a> {
                 format!("c\"{}\"", escape_string(s))
             }
             ExprKind::Binary { op, lhs, rhs } => {
+                // ポインタ == 0 / != 0 → .is_null() (マクロ codegen と対称)
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    if self.is_pointer_expr_inline(lhs) && is_null_literal(rhs) {
+                        let l = self.expr_to_rust_inline(lhs);
+                        return if *op == BinOp::Eq {
+                            format!("{}.is_null()", l)
+                        } else {
+                            format!("!{}.is_null()", l)
+                        };
+                    }
+                    if self.is_pointer_expr_inline(rhs) && is_null_literal(lhs) {
+                        let r = self.expr_to_rust_inline(rhs);
+                        return if *op == BinOp::Eq {
+                            format!("{}.is_null()", r)
+                        } else {
+                            format!("!{}.is_null()", r)
+                        };
+                    }
+                }
                 let l = self.expr_to_rust_inline(lhs);
                 let r = self.expr_to_rust_inline(rhs);
                 // 論理演算子の場合、オペランドを bool に変換
