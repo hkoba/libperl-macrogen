@@ -387,6 +387,16 @@ fn is_null_literal(expr: &Expr) -> bool {
     }
 }
 
+/// 生成済み文字列が bool 式かどうかを判定
+fn is_string_bool_expr(s: &str) -> bool {
+    s.ends_with("!= 0)")
+        || s.ends_with("== 0)")
+        || s.ends_with(".is_null()")
+        || s.ends_with(" as bool)")
+        || s == "true"
+        || s == "false"
+}
+
 /// ポインタ型に対応する null ポインタ式を生成
 fn null_ptr_expr(return_type: &str) -> String {
     if is_const_pointer_type_str(return_type) {
@@ -593,6 +603,8 @@ pub struct RustCodegen<'a> {
     used_libc_fns: HashSet<String>,
     /// Rust 宣言辞書への参照（関数パラメータ型参照用）
     rust_decl_dict: Option<&'a RustDeclDict>,
+    /// inline 関数辞書への参照（戻り値型/引数型判定用）
+    inline_fn_dict: Option<&'a crate::inline_fn::InlineFnDict>,
 }
 
 /// コード生成全体を管理する構造体
@@ -627,6 +639,7 @@ impl<'a> RustCodegen<'a> {
         bindings_info: BindingsInfo,
         known_symbols: &'a KnownSymbols,
         rust_decl_dict: Option<&'a RustDeclDict>,
+        inline_fn_dict: Option<&'a crate::inline_fn::InlineFnDict>,
     ) -> Self {
         Self {
             interner,
@@ -645,6 +658,7 @@ impl<'a> RustCodegen<'a> {
             unresolved_names: Vec::new(),
             used_libc_fns: HashSet::new(),
             rust_decl_dict,
+            inline_fn_dict,
         }
     }
 
@@ -771,7 +785,7 @@ impl<'a> RustCodegen<'a> {
 
     /// ポインタ式をbool条件に変換するラッパー（マクロ用、infer_type_hint使用）
     fn wrap_as_bool_condition_macro(&self, expr: &Expr, expr_str: &str, info: &MacroInferInfo) -> String {
-        if is_boolean_expr(expr) {
+        if self.is_bool_expr_with_dict(expr) {
             return expr_str.to_string();
         }
         // __builtin_expect(cond, val) → cond の型をチェック
@@ -793,7 +807,7 @@ impl<'a> RustCodegen<'a> {
 
     /// ポインタ式をbool条件に変換するラッパー（inline関数用）
     fn wrap_as_bool_condition_inline(&self, expr: &Expr, expr_str: &str) -> String {
-        if is_boolean_expr(expr) {
+        if self.is_bool_expr_with_dict(expr) {
             return expr_str.to_string();
         }
         // __builtin_expect(cond, val) → cond の型をチェック
@@ -948,6 +962,54 @@ impl<'a> RustCodegen<'a> {
         })
     }
 
+    /// 呼び出し先関数の指定引数位置が bool 型かどうか判定（自家生成マクロも参照）
+    fn callee_param_is_bool(&self, func_name: &str, arg_index: usize) -> bool {
+        // 1. bindings.rs の関数
+        if let Some(param_ty) = self.get_callee_param_type(func_name, arg_index) {
+            return param_ty == "bool";
+        }
+        // 2. 自家生成マクロ関数のパラメータ型
+        if let Some(interned) = self.interner.lookup(func_name) {
+            if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
+                if let Some(param) = macro_info.params.get(arg_index) {
+                    // type_env からパラメータの型制約を取得
+                    if let Some(expr_ids) = macro_info.type_env.param_to_exprs.get(&param.name) {
+                        for expr_id in expr_ids {
+                            if let Some(constraints) = macro_info.type_env.expr_constraints.get(expr_id) {
+                                for c in constraints {
+                                    let rust_ty = c.ty.to_rust_string(self.interner);
+                                    if rust_ty == "bool" {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 3. 自家生成 inline 関数のパラメータ型
+            if let Some(dict) = self.inline_fn_dict {
+                if let Some(func_def) = dict.get(interned) {
+                    for d in &func_def.declarator.derived {
+                        if let DerivedDecl::Function(param_list) = d {
+                            if let Some(param) = param_list.params.get(arg_index) {
+                                let has_bool = param.specs.type_specs.iter().any(|ts| matches!(ts, TypeSpec::Bool));
+                                let has_pointer = param.declarator.as_ref().map_or(false, |decl| {
+                                    decl.derived.iter().any(|d| matches!(d, DerivedDecl::Pointer(_)))
+                                });
+                                if has_bool && !has_pointer {
+                                    return true;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// 呼び出し先関数の戻り値型を取得
     fn get_callee_return_type(&self, func_name: &str) -> Option<&str> {
         self.rust_decl_dict?.fns.get(func_name).and_then(|f| {
@@ -964,8 +1026,26 @@ impl<'a> RustCodegen<'a> {
         if let ExprKind::Call { func, .. } = &expr.kind {
             if let ExprKind::Ident(name) = &func.kind {
                 let func_name = self.interner.get(*name);
+                // 1. bindings.rs の関数
                 if let Some(ret_ty) = self.get_callee_return_type(func_name) {
                     return ret_ty == "bool";
+                }
+                // 2. 自家生成マクロ関数の戻り値型
+                if let Some(macro_info) = self.macro_ctx.macros.get(name) {
+                    if let Some(ty) = macro_info.get_return_type() {
+                        let rust_ty = ty.to_rust_string(self.interner);
+                        return rust_ty == "bool";
+                    }
+                }
+                // 3. 自家生成 inline 関数の戻り値型
+                if let Some(dict) = self.inline_fn_dict {
+                    if let Some(func_def) = dict.get(*name) {
+                        let has_bool_return = func_def.specs.type_specs.iter().any(|ts| matches!(ts, TypeSpec::Bool));
+                        let has_return_pointer = func_def.declarator.derived.iter().any(|d| matches!(d, DerivedDecl::Pointer(_)));
+                        if has_bool_return && !has_return_pointer {
+                            return true;
+                        }
+                    }
                 }
             }
         }
@@ -1011,13 +1091,11 @@ impl<'a> RustCodegen<'a> {
         // bool パラメータへの整数リテラル変換
         if let Some(callee_name) = callee {
             let func_name = self.interner.get(callee_name);
-            if let Some(param_ty) = self.get_callee_param_type(func_name, arg_index) {
-                if param_ty == "bool" {
-                    match &expr.kind {
-                        ExprKind::IntLit(0) => return "false".to_string(),
-                        ExprKind::IntLit(1) => return "true".to_string(),
-                        _ => {}
-                    }
+            if self.callee_param_is_bool(func_name, arg_index) {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return "false".to_string(),
+                    ExprKind::IntLit(1) => return "true".to_string(),
+                    _ => {}
                 }
             }
         }
@@ -1165,6 +1243,11 @@ impl<'a> RustCodegen<'a> {
                 if self.current_return_type.as_deref() == Some("()") {
                     // void 関数: 式の結果を捨てる
                     self.writeln(&format!("{}{};", body_indent, rust_expr));
+                } else if self.current_return_type.as_deref() == Some("bool")
+                    && !self.is_bool_expr_with_dict(expr)
+                    && !is_string_bool_expr(&rust_expr) {
+                    // bool 関数: 式が bool でなければ != 0 で変換
+                    self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
                 } else {
                     self.writeln(&format!("{}{}", body_indent, rust_expr));
                 }
@@ -1396,7 +1479,12 @@ impl<'a> RustCodegen<'a> {
                 format!("{}", f)
             }
             ExprKind::CharLit(c) => {
-                format!("'{}'", escape_char(*c))
+                // C の char は i8 なので b'x' as i8 として出力
+                if c.is_ascii() {
+                    format!("b'{}' as i8", escape_char(*c))
+                } else {
+                    format!("0x{:02x}u8 as i8", c)
+                }
             }
             ExprKind::StringLit(s) => {
                 format!("c\"{}\"", escape_string(s))
@@ -1936,7 +2024,13 @@ impl<'a> RustCodegen<'a> {
                         match &expr.kind {
                             ExprKind::IntLit(0) => return "return false;".to_string(),
                             ExprKind::IntLit(1) => return "return true;".to_string(),
-                            _ => {}
+                            _ => {
+                                let e = self.expr_to_rust(expr, info);
+                                if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
+                                    return format!("return (({}) != 0);", e);
+                                }
+                                return format!("return {};", e);
+                            }
                         }
                     }
                 }
@@ -2378,7 +2472,13 @@ impl<'a> RustCodegen<'a> {
                         match &expr.kind {
                             ExprKind::IntLit(0) => return format!("{}return false;", indent),
                             ExprKind::IntLit(1) => return format!("{}return true;", indent),
-                            _ => {}
+                            _ => {
+                                let e = self.expr_to_rust_inline(expr);
+                                if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
+                                    return format!("{}return (({}) != 0);", indent, e);
+                                }
+                                return format!("{}return {};", indent, e);
+                            }
                         }
                     }
                 }
@@ -2734,7 +2834,12 @@ impl<'a> RustCodegen<'a> {
                 format!("{}", f)
             }
             ExprKind::CharLit(c) => {
-                format!("'{}'", escape_char(*c))
+                // C の char は i8 なので b'x' as i8 として出力
+                if c.is_ascii() {
+                    format!("b'{}' as i8", escape_char(*c))
+                } else {
+                    format!("0x{:02x}u8 as i8", c)
+                }
             }
             ExprKind::StringLit(s) => {
                 format!("c\"{}\"", escape_string(s))
@@ -2894,13 +2999,11 @@ impl<'a> RustCodegen<'a> {
                 let arg_offset = if needs_my_perl { 1usize } else { 0 };
                 a.extend(args.iter().enumerate().map(|(i, arg)| {
                     let param_idx = i + arg_offset;
-                    if let Some(param_ty) = self.get_callee_param_type(&f, param_idx) {
-                        if param_ty == "bool" {
-                            match &arg.kind {
-                                ExprKind::IntLit(0) => return "false".to_string(),
-                                ExprKind::IntLit(1) => return "true".to_string(),
-                                _ => {}
-                            }
+                    if self.callee_param_is_bool(&f, param_idx) {
+                        match &arg.kind {
+                            ExprKind::IntLit(0) => return "false".to_string(),
+                            ExprKind::IntLit(1) => return "true".to_string(),
+                            _ => {}
                         }
                     }
                     self.expr_to_rust_inline(arg)
@@ -3328,7 +3431,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 let codegen = RustCodegen::new(
                     self.interner, self.enum_dict, self.macro_ctx,
                     self.bindings_info.clone(), &known_symbols,
-                    result.rust_decl_dict.as_ref(),
+                    result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict),
                 );
                 let generated = codegen.generate_macro(info);
                 if generated.is_complete() && !generated.has_unresolved_names() {
@@ -3382,7 +3485,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 continue;
             }
 
-            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref());
+            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict));
             let generated = codegen.generate_inline_fn(**name, func_def);
 
             if generated.has_unresolved_names() {
@@ -3586,7 +3689,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref());
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict));
                     let generated = codegen.generate_macro(info);
 
                     if generated.has_unresolved_names() {
