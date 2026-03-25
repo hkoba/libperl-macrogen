@@ -1,221 +1,212 @@
-# Plan: E0308 Phase 3 — bool 冗長比較の除去 + 関数引数の bool 変換
+# Plan: help: 付きエラーの段階的修正
 
 ## Context
 
-Phase 2 (完了) で E0308 を 676→652 に削減（total: 969→944）。
-残り 652 件のうち「expected bool, found integer」が依然 ~93 件で最大カテゴリ。
+E0277 ビット演算修正完了後、total errors: 735。
+`categorize-help-diags.tcl` で `tmp/build-error.log` を分析した結果、
+`help:` 付きエラーが 38 カテゴリに分類された。
 
-Phase 2 は `wrap_as_bool_condition_*()` の `__builtin_expect` 再帰と
-`is_null_literal()` の Cast 対応を修正したが、以下の 2 パターンが残存:
+根本原因別にグルーピングし、影響度順にコード生成器を修正する。
 
-### パターン A: AST 内の冗長 `!= 0` 比較 (~79 件)
+## エラー分類（根本原因別）
 
-C では比較演算子は `int` を返すため `(rc > 1) != 0` は合法。
-しかし Rust では比較演算子は `bool` を返すため `bool != 0` は型エラー。
+### グループ A: ポインタ型検出改善（前提作業）
+
+`infer_type_hint()` と `is_pointer_expr_inline()` が
+PtrMember/Member のポインタ型を検出できない。
+既存の `field_type_map` を活用して改善する。
+
+### グループ B: ポインタ二項演算 — 100 件 (Cat 10: 88, 11: 3, 8: 9)
+
+```
+(*my_perl).Istack_base + offset   → E0369 (ptr + int)
+cx - 1                            → E0369 (ptr - int)
+ptr1 - ptr2                       → E0369 (ptr - ptr)
+```
+- **macro パス**: `infer_type_hint()` 改善で既存の `.offset()` 変換が効くようになる
+- **inline パス**: ポインタ演算処理が完全に未実装 → 追加必要
+
+### グループ C: ポインタ複合代入 — 32 件 (Cat 6: 21, 3: 11)
+
+```
+(*my_perl).Imarkstack_ptr -= 1;   → E0368 (ptr -=)
+(*dest) += 1;                     → E0368 (ptr +=)
+```
+- macro/inline 両パスで未実装 → `wrapping_add`/`wrapping_sub` 変換を追加
+
+### グループ D: Null ポインタ比較 — 49 件 (Cat 9: 45, 21: 4)
+
+```
+if ((gv) != 0)                    → E0308 (ptr vs usize)
+```
+- 既存の `.is_null()` 変換は実装済みだが、ポインタ型検出が不十分
+- グループ A の改善で大半が解決する見込み
+
+### グループ E: 関数引数の整数型変換 — 90 件
+
+| Cat | 件数 | パターン |
+|-----|------|----------|
+| 4 | 38 | `u32` → `i32` (定数: SV_GMAGIC 等) |
+| 31 | 8 | `u64` → `u32` |
+| 13 | 9 | `usize` → `i32` (sizeof) |
+| 15 | 6 | `i8` → `i32` (char literal) |
+| 34 | 6 | `i32` → `u32` (packWARN) |
+| 他 | 23 | 各種幅変換 |
+
+関数呼び出し時に `rust_decl_dict.fns` のシグネチャと比較して `as` キャスト挿入。
+
+### グループ F: 小規模個別修正 — 20 件
+
+| Cat | 件数 | 概要 |
+|-----|------|------|
+| 14 | 4 | `svtype` 比較 → enum を整数にキャスト |
+| 39 | 3 | 引数に `mut` 不足 |
+| 32 | 1 | float literal `0` vs `0.0` |
+| 他 | 12 | ジェネリック型、CStr 比較等 |
+
+## 実装フェーズ
+
+### Phase 1: ポインタ型検出改善
+
+**ファイル**: `src/rust_codegen.rs`
+
+#### 1a. `infer_type_hint()` に Member/PtrMember 対応追加
+
+現在 `TypeHint::Unknown` を返す箇所を改善:
 
 ```rust
-// 例1: 比較結果に != 0
-if (((rc > 1)) != 0) {          // ← (rc > 1) は Rust では bool
-
-// 例2: is_null() 結果に != 0
-if ((!sv.is_null()) != 0) {     // ← !sv.is_null() は bool
-
-// 例3: LogNot 結果に != 0
-if (!(((flags & mask)) != 0))   // ← 内側の != 0 は OK だが、全体で二重
+ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
+    let member_str = self.interner.get(*member);
+    if let Some(ty) = self.field_type_map.get(member_str) {
+        if is_pointer_type_str(ty) { TypeHint::Pointer }
+        else if ty == "bool" { TypeHint::Bool }
+        else { TypeHint::Integer }
+    } else { TypeHint::Unknown }
+}
 ```
 
-**根本原因**: `expr_to_rust()` / `expr_to_rust_inline()` の Binary Eq/Ne ハンドラは
-ポインタ null チェック（L1349-1366, L2627-2644）の後、一般的に
-`format!("({} {} {})", l, op, r)` を出力する。LHS が既に bool を返す式でも
-`!= 0` をそのまま出力してしまう。
-
-### パターン B: 関数引数の整数→bool 不一致 (~14 件)
+#### 1b. `is_pointer_expr_inline()` に Member/PtrMember/Deref 追加
 
 ```rust
-// Perl_SvTRUE_common の第3引数は bool だが、整数リテラル 1 を渡す
-return Perl_SvTRUE_common(my_perl, sv, 1);  // ← expected bool, found integer
-```
-
-**根本原因**: `expr_to_rust_inline()` の Call ハンドラ (L2738) は引数を
-型情報なしで変換する。`rust_decl_dict` に関数シグネチャ（`RustFn.params`）が
-あるが、codegen から参照されていない。
-
-## 変更内容
-
-### 変更 1: `is_boolean_expr_recursive()` ヘルパー追加
-
-`src/rust_codegen.rs` L314 の `is_boolean_expr()` の後に追加。
-`__builtin_expect(cond, val)` を透過して内部式の bool 判定を行う。
-
-```rust
-/// is_boolean_expr の再帰版: __builtin_expect(cond, val) を透過する
-fn is_boolean_expr_recursive(expr: &Expr, interner: &StringInterner) -> bool {
-    if is_boolean_expr(expr) {
-        return true;
-    }
-    if let ExprKind::Call { func, args } = &expr.kind {
-        if let ExprKind::Ident(name) = &func.kind {
-            if interner.get(*name) == "__builtin_expect" && !args.is_empty() {
-                return is_boolean_expr_recursive(&args[0], interner);
-            }
+ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
+    let member_str = self.interner.get(*member);
+    self.field_type_map.get(member_str).is_some_and(|ty| is_pointer_type_str(ty))
+}
+ExprKind::Deref(inner) => {
+    // ポインタ to ポインタの deref
+    if let Some(ty) = self.infer_expr_type_str_inline(inner) {
+        if let Some(derefed) = deref_type(&ty) {
+            return is_pointer_type_str(derefed);
         }
     }
     false
 }
 ```
 
-### 変更 2: Binary Eq/Ne ハンドラに bool 冗長比較の除去を追加
+### Phase 2: inline パスにポインタ演算追加
 
-`expr_to_rust()` (L1366 の後) と `expr_to_rust_inline()` (L2644 の後) の
-両方で、ポインタ null チェックの**後**に以下を挿入:
+**ファイル**: `src/rust_codegen.rs` — `expr_to_rust_inline()` の Binary ハンドラ
+
+macro パス (L1875-1897) と対称的な処理を追加:
 
 ```rust
-// bool_expr != 0 → bool_expr, bool_expr == 0 → !bool_expr
-if is_boolean_expr_recursive(lhs, self.interner) {
-    match (&rhs.kind, op) {
-        (ExprKind::IntLit(0), BinOp::Ne) => {
-            return self.expr_to_rust(lhs, info); // そのまま
-        }
-        (ExprKind::IntLit(0), BinOp::Eq) => {
-            let l = self.expr_to_rust(lhs, info);
-            return format!("!{}", l); // 否定
-        }
-        (ExprKind::IntLit(1), BinOp::Eq) => {
-            return self.expr_to_rust(lhs, info);
-        }
-        (ExprKind::IntLit(1), BinOp::Ne) => {
-            let l = self.expr_to_rust(lhs, info);
-            return format!("!{}", l);
-        }
-        _ => {}
+if matches!(op, BinOp::Add | BinOp::Sub) {
+    if self.is_pointer_expr_inline(lhs) && !self.is_pointer_expr_inline(rhs) {
+        let l = self.expr_to_rust_inline(lhs);
+        let r = self.expr_to_rust_inline(rhs);
+        return if *op == BinOp::Add {
+            format!("{}.offset({} as isize)", l, r)
+        } else {
+            format!("{}.offset(-({} as isize))", l, r)
+        };
     }
-}
-// 逆順 (0 != bool_expr) も同様
-if is_boolean_expr_recursive(rhs, self.interner) {
-    match (&lhs.kind, op) {
-        (ExprKind::IntLit(0), BinOp::Ne) => {
-            return self.expr_to_rust(rhs, info);
-        }
-        (ExprKind::IntLit(0), BinOp::Eq) => {
-            let r = self.expr_to_rust(rhs, info);
-            return format!("!{}", r);
-        }
-        (ExprKind::IntLit(1), BinOp::Eq) => {
-            return self.expr_to_rust(rhs, info);
-        }
-        (ExprKind::IntLit(1), BinOp::Ne) => {
-            let r = self.expr_to_rust(rhs, info);
-            return format!("!{}", r);
-        }
-        _ => {}
+    // ptr - ptr → .offset_from()
+    if self.is_pointer_expr_inline(lhs) && self.is_pointer_expr_inline(rhs) && *op == BinOp::Sub {
+        let l = self.expr_to_rust_inline(lhs);
+        let r = self.expr_to_rust_inline(rhs);
+        return format!("{}.offset_from({})", l, r);
     }
 }
 ```
 
-inline 版は `self.expr_to_rust_inline(lhs)` を使う。
+### Phase 3: ポインタ複合代入
 
-**安全性**: ポインタ null チェックが先に来るため `ptr == 0` は `.is_null()` に
-変換され、ここには到達しない。`(x & mask) != 0` は BitAnd が
-`is_boolean_expr` に含まれないため、正しく `!= 0` のまま残る。
+**ファイル**: `src/rust_codegen.rs` — 3 箇所の Assign ハンドラ
 
-### 変更 3: `RustCodegen` に `rust_decl_dict` 参照を追加
+`ptr += n` → `ptr = ptr.wrapping_add(n as usize)` に変換。
 
-`RustCodegen` 構造体 (L536-569) に新フィールド追加:
-
+macro パス (`expr_to_rust`):
 ```rust
-/// Rust 宣言辞書への参照（関数パラメータ型参照用）
-rust_decl_dict: Option<&'a RustDeclDict>,
-```
-
-`RustCodegen::new()` (L596) に引数追加。
-3 箇所の呼び出し元 (L3154, L3210, L3414) を更新:
-`result.rust_decl_dict.as_ref()` を渡す。
-
-### 変更 4: `get_callee_param_type()` メソッド + 引数 bool 変換
-
-```rust
-fn get_callee_param_type(&self, func_name: &str, arg_index: usize) -> Option<&str> {
-    self.rust_decl_dict?.fns.get(func_name).and_then(|f| {
-        f.params.get(arg_index).map(|p| p.ty.as_str())
-    })
+AssignOp::AddAssign | AssignOp::SubAssign => {
+    let lh = self.infer_type_hint(lhs, info);
+    if lh == TypeHint::Pointer {
+        let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+        return format!("{{ {} = {}.{}({} as usize); {} }}", l, l, method, r, l);
+    }
+    // 既存の fallthrough
 }
 ```
 
-`expr_to_rust_arg()` (L940-952) に bool 変換を追加:
+inline パス (`stmt_to_rust_inline`, `expr_to_rust_inline`): 同パターン。
+
+### Phase 4: 関数引数の型キャスト挿入
+
+**ファイル**: `src/rust_codegen.rs` — Call ハンドラ
+
+関数呼び出し時に `rust_decl_dict.fns[name].params[i].ty` と
+`infer_expr_type_str*()` の結果を比較し、不一致なら `as` キャスト挿入。
 
 ```rust
-fn expr_to_rust_arg(&mut self, expr: &Expr, info: &MacroInferInfo,
-                     callee: Option<InternedStr>, arg_index: usize) -> String {
-    // 既存: literal_string チェック
-    if let Some(name) = self.find_literal_string_ident(expr) { ... }
-
-    // 追加: bool パラメータへの整数リテラル変換
-    if let Some(callee_name) = callee {
-        let func_name = self.interner.get(callee_name);
-        if let Some(param_ty) = self.get_callee_param_type(func_name, arg_index) {
-            if param_ty == "bool" {
-                match &expr.kind {
-                    ExprKind::IntLit(0) => return "false".to_string(),
-                    ExprKind::IntLit(1) => return "true".to_string(),
-                    _ => {}
-                }
-            }
+fn cast_arg_if_needed(&self, arg_str: &str, arg_expr: &Expr,
+                       expected_ty: &str, ...) -> String {
+    if let Some(actual) = self.infer_expr_type_str*(arg_expr, ...) {
+        let na = normalize_integer_type(&actual);
+        let ne = normalize_integer_type(expected_ty);
+        if na.is_some() && ne.is_some() && na != ne {
+            return format!("({} as {})", arg_str, ne.unwrap());
         }
     }
-
-    self.expr_to_rust(expr, info)
+    arg_str.to_string()
 }
 ```
 
-inline 版 (L2738) にも同様のロジックを追加:
+### Phase 5: 小規模個別修正
 
-```rust
-// 変更前
-a.extend(args.iter().map(|arg| self.expr_to_rust_inline(arg)));
-
-// 変更後
-a.extend(args.iter().enumerate().map(|(i, arg)| {
-    let param_idx = i + arg_offset;
-    if let Some(param_ty) = self.get_callee_param_type(&f, param_idx) {
-        if param_ty == "bool" {
-            match &arg.kind {
-                ExprKind::IntLit(0) => return "false".to_string(),
-                ExprKind::IntLit(1) => return "true".to_string(),
-                _ => {}
-            }
-        }
-    }
-    self.expr_to_rust_inline(arg)
-}));
-```
-
-## 変更ファイル
-
-| ファイル | 変更箇所 |
-|----------|----------|
-| `src/rust_codegen.rs` | `is_boolean_expr_recursive()` 追加 (L314 後) |
-| `src/rust_codegen.rs` | `expr_to_rust()` Binary Eq/Ne (L1366 後): bool 冗長比較除去 |
-| `src/rust_codegen.rs` | `expr_to_rust_inline()` Binary Eq/Ne (L2644 後): 同上 |
-| `src/rust_codegen.rs` | `RustCodegen` 構造体 + `new()`: `rust_decl_dict` フィールド追加 |
-| `src/rust_codegen.rs` | `get_callee_param_type()` メソッド追加 |
-| `src/rust_codegen.rs` | `expr_to_rust_arg()`: bool 変換追加 |
-| `src/rust_codegen.rs` | `expr_to_rust_inline()` Call: bool 変換追加 |
+- **Cat 39** (3件): `mut` パラメータ検出
+- **Cat 32** (1件): float vs int 0 → `0.0`
+- **Cat 14** (4件): svtype 比較 → `as u32` キャスト
 
 ## 検証
 
+各 Phase 後に:
 ```bash
-# 1. 全テスト通過
+# 1. テスト通過
 cargo test
 
-# 2. gen-rust stats が悪化しないこと
-cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.rs 2>&1 | tail -5
-
-# 3. 統合ビルドテスト
+# 2. 統合ビルド + 分類スクリプト実行
 ~/blob/libperl-rs/12-macrogen-2-build.zsh
-grep -c 'error\[E0308\]' tmp/build-error.log
-# 期待: 652 → ~559 (約 93 件減少)
+./categorize-help-diags.tcl tmp/build-error.log
 
-# 4. bool 冗長パターンの確認
-grep 'expected.*bool.*found.*integer' tmp/build-error.log | wc -l
-# 期待: 大幅減少
+# 3. 全体エラー数の確認
+grep -c '^error' tmp/build-error.log
+
+# 4. tmp/help/ の error カテゴリ件数一覧で、対象カテゴリの減少を確認
+for d in $(ls -v tmp/help/); do
+  help=$(cat tmp/help/$d/__help__.txt)
+  case "$help" in *"(error)"*)
+    count=$(ls tmp/help/$d/*.txt 2>/dev/null | grep -v __help__ | wc -l)
+    printf "%3d  %4d  %s\n" "$d" "$count" "$help"
+    ;; esac
+done
+# 期待: Phase で対象とした Cat の件数が 0 または大幅減少
 ```
+
+## 期待効果
+
+| Phase | 対象エラー | 期待削減 |
+|-------|-----------|---------|
+| 1+2 | ポインタ演算 (Cat 10,11,8) + Null比較 (Cat 9,21) | ~149 件 |
+| 3 | ポインタ複合代入 (Cat 3,6) | ~32 件 |
+| 4 | 関数引数型変換 (グループ E) | ~90 件 |
+| 5 | 小規模修正 (グループ F) | ~8 件 |
+| **合計** | | **~279 件** (735 → ~456) |
