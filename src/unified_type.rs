@@ -476,6 +476,27 @@ impl UnifiedType {
         matches!(self, Self::Pointer { .. })
     }
 
+    /// const ポインタ型かどうか
+    pub fn is_const_pointer(&self) -> bool {
+        matches!(self, Self::Pointer { is_const: true, .. })
+    }
+
+    /// 浮動小数点型かどうか
+    pub fn is_float(&self) -> bool {
+        matches!(self, Self::Float | Self::Double | Self::LongDouble)
+            || matches!(self, Self::Named(n) if n == "NV")
+    }
+
+    /// bool 型かどうか
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Self::Bool)
+    }
+
+    /// void 型かどうか
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Void)
+    }
+
     /// 名前付き型かどうか
     pub fn is_named(&self) -> bool {
         matches!(self, Self::Named(_))
@@ -788,5 +809,40 @@ mod tests {
             UnifiedType::from_c_str("struct SV"),
             UnifiedType::Named("SV".to_string())
         );
+    }
+
+    #[test]
+    fn test_is_const_pointer() {
+        let mut_ptr = UnifiedType::from_rust_str("*mut SV");
+        let const_ptr = UnifiedType::from_rust_str("*const c_char");
+        let non_ptr = UnifiedType::from_rust_str("c_int");
+
+        assert!(!mut_ptr.is_const_pointer());
+        assert!(const_ptr.is_const_pointer());
+        assert!(!non_ptr.is_const_pointer());
+    }
+
+    #[test]
+    fn test_is_float() {
+        assert!(UnifiedType::Float.is_float());
+        assert!(UnifiedType::Double.is_float());
+        assert!(UnifiedType::LongDouble.is_float());
+        assert!(UnifiedType::Named("NV".to_string()).is_float());
+        assert!(!UnifiedType::Int { signed: true, size: IntSize::Int }.is_float());
+        assert!(!UnifiedType::Named("SV".to_string()).is_float());
+    }
+
+    #[test]
+    fn test_is_bool() {
+        assert!(UnifiedType::Bool.is_bool());
+        assert!(!UnifiedType::Int { signed: true, size: IntSize::Int }.is_bool());
+        assert!(!UnifiedType::Void.is_bool());
+    }
+
+    #[test]
+    fn test_is_void() {
+        assert!(UnifiedType::Void.is_void());
+        assert!(!UnifiedType::Bool.is_void());
+        assert!(!UnifiedType::Int { signed: true, size: IntSize::Int }.is_void());
     }
 }

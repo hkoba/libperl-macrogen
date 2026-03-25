@@ -11,11 +11,14 @@ use std::path::Path;
 use syn::{Item, Type, FnArg, Pat, ReturnType, Fields, Visibility};
 use quote::ToTokens;
 
+use crate::unified_type::UnifiedType;
+
 /// Rust定数
 #[derive(Debug, Clone)]
 pub struct RustConst {
     pub name: String,
     pub ty: String,
+    pub uty: UnifiedType,
 }
 
 /// Rust関数パラメータ
@@ -23,6 +26,7 @@ pub struct RustConst {
 pub struct RustParam {
     pub name: String,
     pub ty: String,
+    pub uty: UnifiedType,
 }
 
 /// Rust関数
@@ -31,6 +35,7 @@ pub struct RustFn {
     pub name: String,
     pub params: Vec<RustParam>,
     pub ret_ty: Option<String>,
+    pub uret_ty: Option<UnifiedType>,
 }
 
 /// Rust構造体フィールド
@@ -38,6 +43,7 @@ pub struct RustFn {
 pub struct RustField {
     pub name: String,
     pub ty: String,
+    pub uty: UnifiedType,
 }
 
 /// Rust構造体
@@ -52,6 +58,7 @@ pub struct RustStruct {
 pub struct RustTypeAlias {
     pub name: String,
     pub ty: String,
+    pub uty: UnifiedType,
 }
 
 /// Rust宣言辞書
@@ -110,14 +117,16 @@ impl RustDeclDict {
                 if Self::is_pub(&item_const.vis) {
                     let name = item_const.ident.to_string();
                     let ty = Self::type_to_string(&item_const.ty);
-                    self.consts.insert(name.clone(), RustConst { name, ty });
+                    let uty = UnifiedType::from_rust_str(&ty);
+                    self.consts.insert(name.clone(), RustConst { name, ty, uty });
                 }
             }
             Item::Type(item_type) => {
                 if Self::is_pub(&item_type.vis) {
                     let name = item_type.ident.to_string();
                     let ty = Self::type_to_string(&item_type.ty);
-                    self.types.insert(name.clone(), RustTypeAlias { name, ty });
+                    let uty = UnifiedType::from_rust_str(&ty);
+                    self.types.insert(name.clone(), RustTypeAlias { name, ty, uty });
                 }
             }
             Item::Struct(item_struct) => {
@@ -209,9 +218,12 @@ impl RustDeclDict {
                 for field in &named.named {
                     if Self::is_pub(&field.vis) {
                         if let Some(ident) = &field.ident {
+                            let ty = Self::type_to_string(&field.ty);
+                            let uty = UnifiedType::from_rust_str(&ty);
                             result.push(RustField {
                                 name: ident.to_string(),
-                                ty: Self::type_to_string(&field.ty),
+                                ty,
+                                uty,
                             });
                         }
                     }
@@ -220,9 +232,12 @@ impl RustDeclDict {
             Fields::Unnamed(unnamed) => {
                 for (i, field) in unnamed.unnamed.iter().enumerate() {
                     if Self::is_pub(&field.vis) {
+                        let ty = Self::type_to_string(&field.ty);
+                        let uty = UnifiedType::from_rust_str(&ty);
                         result.push(RustField {
                             name: format!("{}", i),
-                            ty: Self::type_to_string(&field.ty),
+                            ty,
+                            uty,
                         });
                     }
                 }
@@ -249,9 +264,11 @@ impl RustDeclDict {
                         _ => "_".to_string(),
                     };
                     let param_ty = Self::type_to_string(&pat_type.ty);
+                    let uty = UnifiedType::from_rust_str(&param_ty);
                     params.push(RustParam {
                         name: param_name,
                         ty: param_ty,
+                        uty,
                     });
                 }
             }
@@ -261,11 +278,13 @@ impl RustDeclDict {
             ReturnType::Default => None,
             ReturnType::Type(_, ty) => Some(Self::type_to_string(ty)),
         };
+        let uret_ty = ret_ty.as_ref().map(|s| UnifiedType::from_rust_str(s));
 
         Some(RustFn {
             name,
             params,
             ret_ty,
+            uret_ty,
         })
     }
 
