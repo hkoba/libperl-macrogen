@@ -854,7 +854,7 @@ pub type off64_t = __off64_t;
 pub type pid_t = __pid_t;
 pub type time_t = __time_t;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __sigset_t {
     pub __val: [::std::os::raw::c_ulong; 16usize],
 }
@@ -867,7 +867,7 @@ const _: () = {
     ][::std::mem::offset_of!(__sigset_t, __val) - 0usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct timespec {
     pub tv_sec: __time_t,
     pub tv_nsec: __syscall_slong_t,
@@ -890,7 +890,7 @@ pub union __atomic_wide_counter {
     pub __value32: __atomic_wide_counter__bindgen_ty_1,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __atomic_wide_counter__bindgen_ty_1 {
     pub __low: ::std::os::raw::c_uint,
     pub __high: ::std::os::raw::c_uint,
@@ -931,7 +931,7 @@ impl ::std::fmt::Debug for __atomic_wide_counter {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __pthread_internal_list {
     pub __prev: *mut __pthread_internal_list,
     pub __next: *mut __pthread_internal_list,
@@ -953,7 +953,7 @@ const _: () = {
 };
 pub type __pthread_list_t = __pthread_internal_list;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __pthread_mutex_s {
     pub __lock: ::std::os::raw::c_int,
     pub __count: ::std::os::raw::c_uint,
@@ -1166,7 +1166,7 @@ impl ::std::fmt::Debug for __mbstate_t {
 }
 pub type mbstate_t = __mbstate_t;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __locale_struct {
     pub __locales: [*mut __locale_data; 13usize],
     pub __ctype_b: *const ::std::os::raw::c_ushort,
@@ -1202,7 +1202,7 @@ pub type intmax_t = __intmax_t;
 pub type uintmax_t = __uintmax_t;
 pub type nl_item = ::std::os::raw::c_int;
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum locale_category_index {
     LC_CTYPE_INDEX_ = 0,
     LC_NUMERIC_INDEX_ = 1,
@@ -1219,14 +1219,14 @@ pub enum locale_category_index {
     LC_ALL_INDEX_ = 12,
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum locale_utf8ness_t {
     LOCALE_NOT_UTF8 = 0,
     LOCALE_IS_UTF8 = 1,
     LOCALE_UTF8NESS_UNKNOWN = 2,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct lconv_offset_t {
     pub name: *const ::std::os::raw::c_char,
     pub offset: usize,
@@ -1243,28 +1243,28 @@ const _: () = {
     ][::std::mem::offset_of!(lconv_offset_t, offset) - 8usize];
 };
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum calc_LC_ALL_format {
     INTERNAL_FORMAT = 0,
     EXTERNAL_FORMAT_FOR_SET = 1,
     EXTERNAL_FORMAT_FOR_QUERY = 2,
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum calc_LC_ALL_return {
     WANT_VOID = 0,
     WANT_TEMP_PV = 1,
     WANT_PL_setlocale_buf = 2,
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum parse_LC_ALL_STRING_action {
     no_override = 0,
     override_if_ignored = 1,
     check_that_overridden = 2,
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum parse_LC_ALL_string_return {
     invalid = 0,
     no_array = 1,
@@ -1273,7 +1273,7 @@ pub enum parse_LC_ALL_string_return {
 }
 pub type __jmp_buf = [::std::os::raw::c_long; 8usize];
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __jmp_buf_tag {
     pub __jmpbuf: __jmp_buf,
     pub __mask_was_saved: ::std::os::raw::c_int,
@@ -1339,7 +1339,7 @@ pub union siginfo_t__bindgen_ty_1 {
     pub _sigsys: siginfo_t__bindgen_ty_1__bindgen_ty_7,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct siginfo_t__bindgen_ty_1__bindgen_ty_1 {
     pub si_pid: __pid_t,
     pub si_uid: __uid_t,
@@ -1433,7 +1433,7 @@ impl ::std::fmt::Debug for siginfo_t__bindgen_ty_1__bindgen_ty_3 {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct siginfo_t__bindgen_ty_1__bindgen_ty_4 {
     pub si_pid: __pid_t,
     pub si_uid: __uid_t,
@@ -1479,7 +1479,7 @@ pub union siginfo_t__bindgen_ty_1__bindgen_ty_5__bindgen_ty_1 {
     pub _pkey: __uint32_t,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct siginfo_t__bindgen_ty_1__bindgen_ty_5__bindgen_ty_1__bindgen_ty_1 {
     pub _lower: *mut ::std::os::raw::c_void,
     pub _upper: *mut ::std::os::raw::c_void,
@@ -1563,7 +1563,7 @@ impl ::std::fmt::Debug for siginfo_t__bindgen_ty_1__bindgen_ty_5 {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct siginfo_t__bindgen_ty_1__bindgen_ty_6 {
     pub si_band: ::std::os::raw::c_long,
     pub si_fd: ::std::os::raw::c_int,
@@ -1584,7 +1584,7 @@ const _: () = {
     ][::std::mem::offset_of!(siginfo_t__bindgen_ty_1__bindgen_ty_6, si_fd) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct siginfo_t__bindgen_ty_1__bindgen_ty_7 {
     pub _call_addr: *mut ::std::os::raw::c_void,
     pub _syscall: ::std::os::raw::c_int,
@@ -1755,7 +1755,7 @@ impl ::std::fmt::Debug for sigaction {
 pub type PERL_INTMAX_T = intmax_t;
 pub type PERL_UINTMAX_T = uintmax_t;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct stat {
     pub st_dev: __dev_t,
     pub st_ino: __ino_t,
@@ -1802,7 +1802,7 @@ const _: () = {
     ][::std::mem::offset_of!(stat, __glibc_reserved) - 120usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct tm {
     pub tm_sec: ::std::os::raw::c_int,
     pub tm_min: ::std::os::raw::c_int,
@@ -1833,7 +1833,7 @@ const _: () = {
     ["Offset of field: tm::tm_zone"][::std::mem::offset_of!(tm, tm_zone) - 48usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct netent {
     pub n_name: *mut ::std::os::raw::c_char,
     pub n_aliases: *mut *mut ::std::os::raw::c_char,
@@ -1854,7 +1854,7 @@ const _: () = {
     ["Offset of field: netent::n_net"][::std::mem::offset_of!(netent, n_net) - 20usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct hostent {
     pub h_name: *mut ::std::os::raw::c_char,
     pub h_aliases: *mut *mut ::std::os::raw::c_char,
@@ -1883,7 +1883,7 @@ const _: () = {
     ][::std::mem::offset_of!(hostent, h_addr_list) - 24usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct servent {
     pub s_name: *mut ::std::os::raw::c_char,
     pub s_aliases: *mut *mut ::std::os::raw::c_char,
@@ -1908,7 +1908,7 @@ const _: () = {
     ][::std::mem::offset_of!(servent, s_proto) - 24usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct protoent {
     pub p_name: *mut ::std::os::raw::c_char,
     pub p_aliases: *mut *mut ::std::os::raw::c_char,
@@ -2011,7 +2011,7 @@ unsafe extern "C" {
 }
 pub type line_t = U32;
 #[repr(i32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum SCX_enum {
     SCX_Unknown = 0,
     SCX_Adlam = 1,
@@ -2404,7 +2404,7 @@ impl ::std::fmt::Debug for YYSTYPE {
     }
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum svtype {
     SVt_NULL = 0,
     SVt_IV = 1,
@@ -4143,7 +4143,7 @@ impl ::std::fmt::Debug for xobject {
     }
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum PL_SvPVtype {
     SvPVutf8_type_ = 0,
     SvPVbyte_type_ = 1,
@@ -4153,7 +4153,7 @@ pub enum PL_SvPVtype {
     SvPVbyte_pure_type_ = 5,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct clone_params {
     pub stashes: *mut AV,
     pub flags: UV,
@@ -4182,7 +4182,7 @@ const _: () = {
     ][::std::mem::offset_of!(clone_params, unreferenced) - 32usize];
 };
 #[repr(i32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum utf8ness_t {
     UTF8NESS_NO = 0,
     UTF8NESS_IMMATERIAL = 1,
@@ -4299,7 +4299,7 @@ impl ::std::fmt::Debug for regnode {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct reg_substr_datum {
     pub min_offset: isize,
     pub max_offset: isize,
@@ -4330,7 +4330,7 @@ const _: () = {
     ][::std::mem::offset_of!(reg_substr_datum, end_shift) - 32usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct reg_substr_data {
     pub check_ix: U8,
     pub data: [reg_substr_datum; 3usize],
@@ -4347,7 +4347,7 @@ const _: () = {
     ][::std::mem::offset_of!(reg_substr_data, data) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regexp_paren_pair {
     pub start: isize,
     pub end: isize,
@@ -4653,7 +4653,7 @@ impl regexp {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct re_scream_pos_data_s {
     pub scream_olds: *mut *mut ::std::os::raw::c_char,
     pub scream_pos: *mut isize,
@@ -4675,7 +4675,7 @@ const _: () = {
 };
 pub type re_scream_pos_data = re_scream_pos_data_s;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regexp_engine {
     pub comp: ::std::option::Option<
         unsafe extern "C" fn(
@@ -4825,7 +4825,7 @@ const _: () = {
     ][::std::mem::offset_of!(regexp_engine, op_comp) - 96usize];
 };
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum regex_charset {
     REGEX_DEPENDS_CHARSET = 0,
     REGEX_LOCALE_CHARSET = 1,
@@ -4834,7 +4834,7 @@ pub enum regex_charset {
     REGEX_ASCII_MORE_RESTRICTED_CHARSET = 4,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_info_aux_eval {
     pub rex: *mut regexp,
     pub curpm: *mut PMOP,
@@ -4891,7 +4891,7 @@ const _: () = {
     ][::std::mem::offset_of!(regmatch_info_aux_eval, pos_flags) - 80usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_info_aux {
     pub info_aux_eval: *mut regmatch_info_aux_eval,
     pub old_regmatch_state: *mut regmatch_state,
@@ -4918,7 +4918,7 @@ const _: () = {
     ][::std::mem::offset_of!(regmatch_info_aux, poscache) - 24usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct next_matchable_info {
     pub first_byte_mask: U8,
     pub first_byte_anded: U8,
@@ -5004,7 +5004,7 @@ pub union regmatch_state__bindgen_ty_1 {
     pub backref: regmatch_state__bindgen_ty_1__bindgen_ty_13,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_1 {
     pub prev_yes_state: *mut regmatch_state,
 }
@@ -5022,7 +5022,7 @@ const _: () = {
         - 0usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_2 {
     pub prev_yes_state: *mut regmatch_state,
     pub lastparen: U32,
@@ -5069,7 +5069,7 @@ const _: () = {
         - 26usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_3 {
     pub prev_yes_state: *mut regmatch_state,
     pub lastparen: U32,
@@ -5121,7 +5121,7 @@ const _: () = {
         - 32usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_4 {
     pub prev_yes_state: *mut regmatch_state,
     pub lastparen: U32,
@@ -5217,7 +5217,7 @@ const _: () = {
         - 86usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_5 {
     pub prev_yes_state: *mut regmatch_state,
     pub prev_curlyx: *mut regmatch_state,
@@ -5274,7 +5274,7 @@ const _: () = {
     ) - 56usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_6 {
     pub prev_yes_state: *mut regmatch_state,
     pub wanted: I32,
@@ -5325,7 +5325,7 @@ const _: () = {
         - 48usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_7 {
     pub prev_yes_state: *mut regmatch_state,
     pub prev_mark: *mut regmatch_state,
@@ -5358,7 +5358,7 @@ const _: () = {
         - 24usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_8 {
     pub val: ::std::os::raw::c_int,
 }
@@ -5375,7 +5375,7 @@ const _: () = {
     ][::std::mem::offset_of!(regmatch_state__bindgen_ty_1__bindgen_ty_8, val) - 0usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_9 {
     pub prev_yes_state: *mut regmatch_state,
     pub prev_curlyx: *mut regmatch_state,
@@ -5435,7 +5435,7 @@ const _: () = {
         - 56usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_10 {
     pub prev_yes_state: *mut regmatch_state,
     pub save_curlyx: *mut regmatch_state,
@@ -5482,7 +5482,7 @@ const _: () = {
         - 36usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_11 {
     pub prev_yes_state: *mut regmatch_state,
     pub lastparen: U32,
@@ -5551,7 +5551,7 @@ const _: () = {
         - 64usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_12 {
     pub paren: U32,
     pub lastparen: U32,
@@ -5626,7 +5626,7 @@ const _: () = {
         - 72usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct regmatch_state__bindgen_ty_1__bindgen_ty_13 {
     pub cp: CHECKPOINT,
     pub lastcp: CHECKPOINT,
@@ -5773,7 +5773,7 @@ impl ::std::fmt::Debug for regmatch_slab {
 }
 pub type perl_drand48_t = ::std::os::raw::c_ulong;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct gp {
     pub gp_sv: *mut SV,
     pub gp_io: *mut io,
@@ -5921,7 +5921,7 @@ pub union padlist__bindgen_ty_1 {
     pub xpadlarr_dbg: *mut padlist__bindgen_ty_1__bindgen_ty_1,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct padlist__bindgen_ty_1__bindgen_ty_1 {
     pub padnl: *mut PADNAMELIST,
     pub pad_1: *mut PAD,
@@ -5994,7 +5994,7 @@ impl ::std::fmt::Debug for padlist {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct padnamelist {
     pub xpadnl_fill: isize,
     pub xpadnl_alloc: *mut *mut PADNAME,
@@ -6116,7 +6116,7 @@ impl ::std::fmt::Debug for padname {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct padname_fieldinfo {
     pub refcount: U32,
     pub fieldix: PADOFFSET,
@@ -6254,14 +6254,14 @@ impl padname_fieldinfo {
     }
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum padtidy_type {
     padtidy_SUB = 0,
     padtidy_SUBCLONE = 1,
     padtidy_FORMAT = 2,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct suspended_compcv {
     pub compcv: *mut CV,
     pub padix: STRLEN,
@@ -6528,7 +6528,7 @@ pub type Perl_call_checker = ::std::option::Option<
     ) -> *mut OP,
 >;
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum opcode {
     OP_NULL = 0,
     OP_STUB = 1,
@@ -6994,7 +6994,7 @@ impl ::std::fmt::Debug for UNOP_AUX_item {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct op {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -7399,7 +7399,7 @@ impl op {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct unop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -7812,7 +7812,7 @@ impl unop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct unop_aux {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -8233,7 +8233,7 @@ impl unop_aux {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct binop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -8652,7 +8652,7 @@ impl binop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct logop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -9071,7 +9071,7 @@ impl logop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct listop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -10473,7 +10473,7 @@ impl pmop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct svop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -10884,7 +10884,7 @@ impl svop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct padop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -11299,7 +11299,7 @@ impl padop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct pvop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -11710,7 +11710,7 @@ impl pvop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct loop_ {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -12141,7 +12141,7 @@ impl loop_ {
     }
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum OPclass {
     OPclass_NULL = 0,
     OPclass_BASEOP = 1,
@@ -12159,7 +12159,7 @@ pub enum OPclass {
     OPclass_UNOP_AUX = 13,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct OPtrans_map {
     pub size: usize,
     pub map: [::std::os::raw::c_short; 1usize],
@@ -12176,7 +12176,7 @@ const _: () = {
     ][::std::mem::offset_of!(OPtrans_map, map) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct passwd {
     pub pw_name: *mut ::std::os::raw::c_char,
     pub pw_passwd: *mut ::std::os::raw::c_char,
@@ -12213,7 +12213,7 @@ const _: () = {
     ][::std::mem::offset_of!(passwd, pw_shell) - 40usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct group {
     pub gr_name: *mut ::std::os::raw::c_char,
     pub gr_passwd: *mut ::std::os::raw::c_char,
@@ -12232,7 +12232,7 @@ const _: () = {
     ["Offset of field: group::gr_mem"][::std::mem::offset_of!(group, gr_mem) - 24usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct crypt_data {
     pub output: [::std::os::raw::c_char; 384usize],
     pub setting: [::std::os::raw::c_char; 384usize],
@@ -12265,7 +12265,7 @@ const _: () = {
     ][::std::mem::offset_of!(crypt_data, internal) - 2048usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct spwd {
     pub sp_namp: *mut ::std::os::raw::c_char,
     pub sp_pwdp: *mut ::std::os::raw::c_char,
@@ -12298,7 +12298,7 @@ const _: () = {
     ["Offset of field: spwd::sp_flag"][::std::mem::offset_of!(spwd, sp_flag) - 64usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct REENTR {
     pub _asctime_buffer: *mut ::std::os::raw::c_char,
     pub _asctime_size: usize,
@@ -12481,7 +12481,7 @@ const _: () = {
     ["Offset of field: REENTR::dummy"][::std::mem::offset_of!(REENTR, dummy) - 648usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct opslot {
     pub opslot_size: U16,
     pub opslot_offset: U16,
@@ -12502,7 +12502,7 @@ const _: () = {
     ][::std::mem::offset_of!(opslot, opslot_op) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct opslab {
     pub opslab_next: *mut OPSLAB,
     pub opslab_head: *mut OPSLAB,
@@ -12543,7 +12543,7 @@ const _: () = {
     ][::std::mem::offset_of!(opslab, opslab_slots) - 40usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_hooks {
     pub bhk_flags: U32,
     pub bhk_start: ::std::option::Option<
@@ -12580,7 +12580,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_hooks, bhk_eval) - 32usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct custom_op {
     pub xop_flags: U32,
     pub xop_name: *const ::std::os::raw::c_char,
@@ -12647,7 +12647,7 @@ impl ::std::fmt::Debug for XOPRETANY {
     }
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum xop_flags_enum {
     XOPe_xop_ptr = 0,
     XOPe_xop_name = 1,
@@ -12706,7 +12706,7 @@ impl ::std::fmt::Debug for he {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct hek {
     pub hek_hash: U32,
     pub hek_len: I32,
@@ -12721,7 +12721,7 @@ const _: () = {
     ["Offset of field: hek::hek_key"][::std::mem::offset_of!(hek, hek_key) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct mro_alg {
     pub resolve: ::std::option::Option<
         unsafe extern "C" fn(
@@ -12752,7 +12752,7 @@ const _: () = {
     ["Offset of field: mro_alg::hash"][::std::mem::offset_of!(mro_alg, hash) - 20usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct mro_meta {
     pub mro_linear_all: *mut HV,
     pub mro_linear_current: *mut SV,
@@ -13067,7 +13067,7 @@ impl ::std::fmt::Debug for refcounted_he {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct jmpenv {
     pub je_prev: *mut jmpenv,
     pub je_buf: sigjmp_buf,
@@ -13118,7 +13118,7 @@ unsafe extern "C" {
     pub static mut perl_loaded__file_semaphore: ::std::os::raw::c_ushort;
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct cop {
     pub op_next: *mut OP,
     pub op_sibparent: *mut OP,
@@ -13551,7 +13551,7 @@ impl cop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct rcpv {
     pub refcount: STRLEN,
     pub len: STRLEN,
@@ -13567,7 +13567,7 @@ const _: () = {
 };
 pub type RCPV = rcpv;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_sub {
     pub retop: *mut OP,
     pub old_cxsubix: I32,
@@ -13598,7 +13598,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_sub, savearray) - 40usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_format {
     pub retop: *mut OP,
     pub old_cxsubix: I32,
@@ -13631,7 +13631,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_format, dfoutgv) - 40usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_eval {
     pub retop: *mut OP,
     pub old_cxsubix: I32,
@@ -13711,7 +13711,7 @@ pub union block_loop__bindgen_ty_2 {
     pub lazysv: block_loop__bindgen_ty_2__bindgen_ty_4,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_loop__bindgen_ty_2__bindgen_ty_1 {
     pub ary: *mut AV,
     pub ix: IV,
@@ -13732,7 +13732,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_loop__bindgen_ty_2__bindgen_ty_1, ix) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_loop__bindgen_ty_2__bindgen_ty_2 {
     pub basesp: isize,
     pub ix: IV,
@@ -13753,7 +13753,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_loop__bindgen_ty_2__bindgen_ty_2, ix) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_loop__bindgen_ty_2__bindgen_ty_3 {
     pub cur: IV,
     pub end: IV,
@@ -13774,7 +13774,7 @@ const _: () = {
     ][::std::mem::offset_of!(block_loop__bindgen_ty_2__bindgen_ty_3, end) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_loop__bindgen_ty_2__bindgen_ty_4 {
     pub cur: *mut SV,
     pub end: *mut SV,
@@ -13854,7 +13854,7 @@ impl ::std::fmt::Debug for block_loop {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct block_givwhen {
     pub leave_op: *mut OP,
     pub defsv_save: *mut SV,
@@ -13977,7 +13977,7 @@ impl ::std::fmt::Debug for block {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct subst {
     pub sbu_type: U8,
     pub sbu_rflags: U8,
@@ -14078,7 +14078,7 @@ impl ::std::fmt::Debug for context {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct stackinfo {
     pub si_stack: *mut AV,
     pub si_cxstack: *mut PERL_CONTEXT,
@@ -14162,7 +14162,7 @@ impl ::std::fmt::Debug for xpvav {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct mgvtbl {
     pub svt_get: ::std::option::Option<
         unsafe extern "C" fn(
@@ -14254,7 +14254,7 @@ const _: () = {
     ][::std::mem::offset_of!(mgvtbl, svt_local) - 56usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct magic {
     pub mg_moremagic: *mut MAGIC,
     pub mg_virtual: *mut MGVTBL,
@@ -14326,7 +14326,7 @@ impl ::std::fmt::Debug for yy_stack_frame {
     }
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct yy_lexshared {
     pub ls_prev: *mut yy_lexshared,
     pub ls_linestr: *mut SV,
@@ -14913,7 +14913,7 @@ pub struct magic_state {
 }
 pub type MGS = magic_state;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ptr_tbl_ent {
     pub next: *mut ptr_tbl_ent,
     pub oldval: *const ::std::os::raw::c_void,
@@ -14934,7 +14934,7 @@ const _: () = {
     ][::std::mem::offset_of!(ptr_tbl_ent, newval) - 16usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ptr_tbl {
     pub tbl_ary: *mut *mut ptr_tbl_ent,
     pub tbl_max: UV,
@@ -14979,7 +14979,7 @@ unsafe extern "C" {
     pub fn getegid() -> __gid_t;
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ufuncs {
     pub uf_val: ::std::option::Option<
         unsafe extern "C" fn(
@@ -15012,7 +15012,7 @@ unsafe extern "C" {
     pub fn PerlIO_teardown();
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct perl_memory_debug_header {
     pub interpreter: *mut PerlInterpreter,
     pub prev: *mut perl_memory_debug_header,
@@ -15118,7 +15118,7 @@ unsafe extern "C" {
 }
 pub const PL_bincompat_options: &[u8; 226] = b" HAS_TIMES MULTIPLICITY PERLIO_LAYERS PERL_HASH_FUNC_SIPHASH13 PERL_HASH_USE_SBOX32 USE_64_BIT_ALL USE_64_BIT_INT USE_ITHREADS USE_LARGE_FILES USE_LOCALE_COLLATE USE_LOCALE_NUMERIC USE_LOCALE_TIME USE_PERLIO USE_REENTRANT_API\0";
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum perl_phase {
     PERL_PHASE_CONSTRUCT = 0,
     PERL_PHASE_START = 1,
@@ -15132,7 +15132,7 @@ unsafe extern "C" {
     pub static PL_phase_names: [*const ::std::os::raw::c_char; 7usize];
 }
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum expectation {
     XOPERATOR = 0,
     XTERM = 1,
@@ -15252,7 +15252,7 @@ pub type XSUBADDR_t = ::std::option::Option<
     unsafe extern "C" fn(my_perl: *mut PerlInterpreter, arg1: *mut CV),
 >;
 #[repr(u32)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum Perl_custom_infix_precedence {
     INFIX_PREC_LOW = 10,
     INFIX_PREC_LOGICAL_OR_LOW = 30,
@@ -15267,7 +15267,7 @@ pub enum Perl_custom_infix_precedence {
     INFIX_PREC_HIGH = 170,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct Perl_custom_infix {
     pub prec: Perl_custom_infix_precedence,
     pub parse: ::std::option::Option<
@@ -15335,7 +15335,7 @@ pub type globhook_t = ::std::option::Option<
     unsafe extern "C" fn(my_perl: *mut PerlInterpreter),
 >;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct exitlistentry {
     pub fn_: ::std::option::Option<
         unsafe extern "C" fn(
@@ -22801,7 +22801,7 @@ unsafe extern "C" {
     pub static PL_c9_utf8_dfa_tab: [U8; 352usize];
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct am_table {
     pub flags: U8,
     pub fallback: U8,
@@ -22830,7 +22830,7 @@ const _: () = {
     ][::std::mem::offset_of!(am_table, table) - 8usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct am_table_short {
     pub flags: U8,
     pub fallback: U8,
@@ -22865,7 +22865,7 @@ unsafe extern "C" {
     pub fn Perl_more_sv(my_perl: *mut PerlInterpreter) -> *mut SV;
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ipc_perm {
     pub __key: __key_t,
     pub uid: __uid_t,
@@ -22910,7 +22910,7 @@ const _: () = {
     ][::std::mem::offset_of!(ipc_perm, __glibc_reserved2) - 40usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct semid_ds {
     pub sem_perm: ipc_perm,
     pub sem_otime: __time_t,
@@ -23022,7 +23022,7 @@ unsafe extern "C" {
 }
 pub type __builtin_va_list = [__va_list_tag; 1usize];
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __va_list_tag {
     pub gp_offset: ::std::os::raw::c_uint,
     pub fp_offset: ::std::os::raw::c_uint,
@@ -23047,12 +23047,12 @@ const _: () = {
     ][::std::mem::offset_of!(__va_list_tag, reg_save_area) - 16usize];
 };
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct __locale_data {
     pub _address: u8,
 }
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct ptr_tbl_arena {
     pub _address: u8,
 }

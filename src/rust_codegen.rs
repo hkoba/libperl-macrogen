@@ -1127,25 +1127,6 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// 式が enum 型かどうかを推定（バリアント識別子または enum 型を返す関数呼び出し）
-    fn is_enum_expr(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Ident(name) => self.enum_dict.is_enum_variant(*name),
-            ExprKind::Call { func, .. } => {
-                if let ExprKind::Ident(name) = &func.kind {
-                    let func_name = self.interner.get(*name);
-                    if let Some(ret_ty) = self.get_callee_return_type(func_name) {
-                        if let Some(interned) = self.interner.lookup(ret_ty) {
-                            return self.enum_dict.is_target_enum(interned);
-                        }
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
-    }
-
     /// 式の型文字列を推定（inline 関数用）
     /// 型が判明しない場合は None を返す
     fn infer_expr_type_str_inline(&self, expr: &Expr) -> Option<String> {
@@ -2111,15 +2092,6 @@ impl<'a> RustCodegen<'a> {
                         let l = self.expr_to_rust(lhs, info);
                         let r = self.expr_to_rust(rhs, info);
                         return format!("{}.offset_from({})", l, r);
-                    }
-                }
-
-                // enum 型比較 → as u32 キャスト
-                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
-                    if self.is_enum_expr(lhs) || self.is_enum_expr(rhs) {
-                        let l = self.expr_to_rust(lhs, info);
-                        let r = self.expr_to_rust(rhs, info);
-                        return format!("(({} as u32) {} ({} as u32))", l, bin_op_to_rust(*op), r);
                     }
                 }
 
@@ -3539,14 +3511,6 @@ impl<'a> RustCodegen<'a> {
                         let l = self.expr_to_rust_inline(lhs);
                         let r = self.expr_to_rust_inline(rhs);
                         return format!("{}.offset_from({})", l, r);
-                    }
-                }
-                // enum 型比較 → as u32 キャスト
-                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
-                    if self.is_enum_expr(lhs) || self.is_enum_expr(rhs) {
-                        let l = self.expr_to_rust_inline(lhs);
-                        let r = self.expr_to_rust_inline(rhs);
-                        return format!("(({} as u32) {} ({} as u32))", l, bin_op_to_rust(*op), r);
                     }
                 }
                 // float vs int literal → int literal を float に変換
