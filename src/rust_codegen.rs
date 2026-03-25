@@ -609,12 +609,14 @@ fn build_field_type_map(dict: Option<&RustDeclDict>) -> HashMap<String, String> 
                 if conflicts.contains(&field.name) {
                     continue;
                 }
+                // syn の出力する型文字列を正規化（余分なスペースを除去）
+                let normalized_ty = normalize_type_str(&field.ty);
                 match map.entry(field.name.clone()) {
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(field.ty.clone());
+                        e.insert(normalized_ty);
                     }
                     std::collections::hash_map::Entry::Occupied(e) => {
-                        if e.get() != &field.ty {
+                        if e.get() != &normalized_ty {
                             conflicts.insert(field.name.clone());
                             e.remove();
                         }
@@ -624,6 +626,15 @@ fn build_field_type_map(dict: Option<&RustDeclDict>) -> HashMap<String, String> 
         }
     }
     map
+}
+
+/// syn の to_token_stream().to_string() が出力する型文字列を正規化
+/// "* mut T" → "*mut T", "* const T" → "*const T", ":: std :: os" → "::std::os"
+fn normalize_type_str(ty: &str) -> String {
+    ty.replace("* mut ", "*mut ")
+      .replace("* const ", "*const ")
+      .replace(":: ", "::")
+      .replace(" ::", "::")
 }
 
 /// コード生成の設定
@@ -1088,10 +1099,27 @@ impl<'a> RustCodegen<'a> {
                     TypeHint::Unknown
                 }
             }
-            ExprKind::Binary { op, .. } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 match op {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
                     BinOp::LogAnd | BinOp::LogOr => TypeHint::Bool,
+                    BinOp::Add => {
+                        // ポインタ + 整数 → ポインタ、整数 + ポインタ → ポインタ
+                        let lh = self.infer_type_hint(lhs, info);
+                        if lh == TypeHint::Pointer { return TypeHint::Pointer; }
+                        let rh = self.infer_type_hint(rhs, info);
+                        if rh == TypeHint::Pointer { TypeHint::Pointer } else { TypeHint::Unknown }
+                    }
+                    BinOp::Sub => {
+                        // ポインタ - 整数 → ポインタ（ポインタ - ポインタ → 整数）
+                        let lh = self.infer_type_hint(lhs, info);
+                        if lh == TypeHint::Pointer {
+                            let rh = self.infer_type_hint(rhs, info);
+                            if rh == TypeHint::Pointer { TypeHint::Integer } else { TypeHint::Pointer }
+                        } else {
+                            TypeHint::Unknown
+                        }
+                    }
                     _ => TypeHint::Unknown,
                 }
             }
@@ -1211,6 +1239,19 @@ impl<'a> RustCodegen<'a> {
                 }
                 // expanded にフォールバック
                 self.is_pointer_expr_inline(expanded)
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                match op {
+                    BinOp::Add => {
+                        // ポインタ + 整数 → ポインタ
+                        self.is_pointer_expr_inline(lhs) || self.is_pointer_expr_inline(rhs)
+                    }
+                    BinOp::Sub => {
+                        // ポインタ - 整数 → ポインタ（ポインタ - ポインタ → 整数）
+                        self.is_pointer_expr_inline(lhs) && !self.is_pointer_expr_inline(rhs)
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         }
