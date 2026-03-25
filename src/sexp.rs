@@ -69,7 +69,7 @@ impl<'a, W: Write> SexpPrinter<'a, W> {
     }
 
     /// 宣言を出力
-    fn print_declaration(&mut self, decl: &Declaration) -> Result<()> {
+    pub fn print_declaration(&mut self, decl: &Declaration) -> Result<()> {
         self.write_open("declaration")?;
         self.print_decl_specs(&decl.specs)?;
         for init_decl in &decl.declarators {

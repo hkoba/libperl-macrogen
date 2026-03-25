@@ -141,6 +141,10 @@ struct Cli {
     /// マクロ型推論のデバッグ出力（カンマ区切りでマクロ名を指定）
     #[arg(long = "debug-type-inference", value_name = "MACROS")]
     debug_type_inference: Option<String>,
+
+    /// 指定した関数のコード生成時に入力 AST をコメントとしてダンプ（デバッグ用）
+    #[arg(long = "dump-ast-for", value_name = "FUNC")]
+    dump_ast_for: Option<String>,
 }
 
 fn main() {
@@ -241,6 +245,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if cli.macro_comments {
         builder = builder.with_macro_comments();
+    }
+    if let Some(ref name) = cli.dump_ast_for {
+        builder = builder.with_dump_ast_for(name);
     }
 
     // Pipeline を構築してプリプロセスを実行

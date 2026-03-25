@@ -371,6 +371,7 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
 /// 型文字列がポインタ型かどうか判定
 fn is_pointer_type_str(ty: &str) -> bool {
     ty.starts_with("*mut ") || ty.starts_with("*const ")
+        || ty.starts_with("* mut ") || ty.starts_with("* const ")
 }
 
 fn is_float_type_str(ty: &str) -> bool {
@@ -379,7 +380,7 @@ fn is_float_type_str(ty: &str) -> bool {
 
 /// 型文字列が const ポインタ型かどうか判定
 fn is_const_pointer_type_str(ty: &str) -> bool {
-    ty.starts_with("*const ")
+    ty.starts_with("*const ") || ty.starts_with("* const ")
 }
 
 /// 式が NULL リテラル（整数 0 または (void*)0 のような Cast）かどうか判定
@@ -461,7 +462,10 @@ fn wider_integer_type(a: &str, b: &str) -> Option<&'static str> {
 
 /// ポインタ型文字列から参照先の型を取得
 fn deref_type(ty: &str) -> Option<&str> {
-    ty.strip_prefix("*mut ").or_else(|| ty.strip_prefix("*const "))
+    ty.strip_prefix("*mut ")
+        .or_else(|| ty.strip_prefix("*const "))
+        .or_else(|| ty.strip_prefix("* mut "))
+        .or_else(|| ty.strip_prefix("* const "))
 }
 
 /// マクロ本体を走査し、`&mut param` や代入先として使用されるパラメータを検出する
@@ -634,6 +638,8 @@ pub struct CodegenConfig {
     /// ヘッダーに出力する use 文
     /// 空の場合はデフォルトの use 文を出力
     pub use_statements: Vec<String>,
+    /// AST ダンプ対象関数名（デバッグ用）
+    pub dump_ast_for: Option<String>,
 }
 
 impl Default for CodegenConfig {
@@ -643,6 +649,7 @@ impl Default for CodegenConfig {
             emit_macros: true,
             include_source_location: true,
             use_statements: Vec::new(),
+            dump_ast_for: None,
         }
     }
 }
@@ -823,6 +830,8 @@ pub struct RustCodegen<'a> {
     inline_fn_dict: Option<&'a crate::inline_fn::InlineFnDict>,
     /// 構造体フィールド名 → 型文字列の逆引きマップ
     field_type_map: HashMap<String, String>,
+    /// AST ダンプ対象関数名（デバッグ用）
+    dump_ast_for: Option<String>,
 }
 
 /// コード生成全体を管理する構造体
@@ -878,6 +887,67 @@ impl<'a> RustCodegen<'a> {
             rust_decl_dict,
             inline_fn_dict,
             field_type_map: build_field_type_map(rust_decl_dict),
+            dump_ast_for: None,
+        }
+    }
+
+    /// AST ダンプ対象関数名を設定（デバッグ用）
+    pub fn with_dump_ast_for(mut self, name: Option<String>) -> Self {
+        self.dump_ast_for = name;
+        self
+    }
+
+    /// 指定された関数名が AST ダンプ対象かどうかを判定し、対象なら AST をコメントとして出力
+    fn dump_ast_comment_for_expr(&mut self, name_str: &str, parse_result: &ParseResult) {
+        if self.dump_ast_for.as_deref() != Some(name_str) {
+            return;
+        }
+        let sexp = match parse_result {
+            ParseResult::Expression(expr) => {
+                let mut buf = Vec::new();
+                let mut printer = SexpPrinter::new(&mut buf, self.interner);
+                let _ = printer.print_expr(expr);
+                String::from_utf8_lossy(&buf).into_owned()
+            }
+            ParseResult::Statement(block_items) => {
+                let mut buf = Vec::new();
+                let mut printer = SexpPrinter::new(&mut buf, self.interner);
+                for item in block_items {
+                    if let BlockItem::Stmt(stmt) = item {
+                        let _ = printer.print_stmt(stmt);
+                    } else if let BlockItem::Decl(decl) = item {
+                        let _ = printer.print_declaration(decl);
+                    }
+                }
+                String::from_utf8_lossy(&buf).into_owned()
+            }
+            ParseResult::Unparseable(msg) => {
+                format!("(unparseable: {})", msg.as_deref().unwrap_or("unknown"))
+            }
+        };
+        self.writeln(&format!("// [AST dump for {}]", name_str));
+        for line in sexp.lines() {
+            self.writeln(&format!("// {}", line));
+        }
+    }
+
+    /// 指定された関数名が AST ダンプ対象かどうかを判定し、対象なら CompoundStmt をコメントとして出力
+    fn dump_ast_comment_for_body(&mut self, name_str: &str, body: &CompoundStmt) {
+        if self.dump_ast_for.as_deref() != Some(name_str) {
+            return;
+        }
+        let mut buf = Vec::new();
+        let mut printer = SexpPrinter::new(&mut buf, self.interner);
+        for item in &body.items {
+            match item {
+                BlockItem::Stmt(stmt) => { let _ = printer.print_stmt(stmt); }
+                BlockItem::Decl(decl) => { let _ = printer.print_declaration(decl); }
+            }
+        }
+        let sexp = String::from_utf8_lossy(&buf).into_owned();
+        self.writeln(&format!("// [AST dump for {}]", name_str));
+        for line in sexp.lines() {
+            self.writeln(&format!("// {}", line));
         }
     }
 
@@ -972,10 +1042,16 @@ impl<'a> RustCodegen<'a> {
                             }
                         }
                     }
+                    // bindings.rs の関数戻り値型を参照
+                    if let Some(ret_ty) = self.get_callee_return_type(self.interner.get(*name)) {
+                        if is_pointer_type_str(ret_ty) {
+                            return TypeHint::Pointer;
+                        }
+                    }
                 }
                 TypeHint::Unknown
             }
-            ExprKind::MacroCall { name, .. } => {
+            ExprKind::MacroCall { name, expanded, .. } => {
                 if let Some(callee) = self.macro_ctx.macros.get(name) {
                     for c in &callee.type_env.return_constraints {
                         if is_type_repr_pointer(&c.ty) {
@@ -983,7 +1059,8 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
-                TypeHint::Unknown
+                // return_constraints が無ければ expanded にフォールバック
+                self.infer_type_hint(expanded, info)
             }
             ExprKind::AddrOf(_) => TypeHint::Pointer,
             ExprKind::Deref(inner) => {
@@ -1123,6 +1200,18 @@ impl<'a> RustCodegen<'a> {
                 }
                 false
             }
+            ExprKind::MacroCall { name, expanded, .. } => {
+                // マクロの戻り値型を参照
+                if let Some(callee) = self.macro_ctx.macros.get(name) {
+                    for c in &callee.type_env.return_constraints {
+                        if is_type_repr_pointer(&c.ty) {
+                            return true;
+                        }
+                    }
+                }
+                // expanded にフォールバック
+                self.is_pointer_expr_inline(expanded)
+            }
             _ => false,
         }
     }
@@ -1192,14 +1281,15 @@ impl<'a> RustCodegen<'a> {
                 }
                 None
             }
-            ExprKind::MacroCall { name, .. } => {
+            ExprKind::MacroCall { name, expanded, .. } => {
                 // マクロの戻り値型を参照
                 if let Some(macro_info) = self.macro_ctx.macros.get(name) {
                     if let Some(ty) = macro_info.get_return_type() {
                         return Some(ty.to_rust_string(self.interner));
                     }
                 }
-                None
+                // expanded にフォールバック
+                self.infer_expr_type_str_inline(expanded)
             }
             ExprKind::Conditional { then_expr, .. } => {
                 self.infer_expr_type_str_inline(then_expr)
@@ -1722,6 +1812,9 @@ impl<'a> RustCodegen<'a> {
         } else {
             format!("{}, {}", thx_param, params_with_types)
         };
+
+        // AST ダンプ（デバッグ用）
+        self.dump_ast_comment_for_expr(name_str, &info.parse_result);
 
         // ドキュメントコメント
         let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
@@ -2303,7 +2396,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(inner, info)
                 };
-                format!("{{ {} += 1; {} }}", e, e)
+                if self.infer_type_hint(inner, info) == TypeHint::Pointer {
+                    format!("{{ {} = {}.wrapping_add(1); {} }}", e, e, e)
+                } else {
+                    format!("{{ {} += 1; {} }}", e, e)
+                }
             }
             ExprKind::PreDec(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -2314,7 +2411,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(inner, info)
                 };
-                format!("{{ {} -= 1; {} }}", e, e)
+                if self.infer_type_hint(inner, info) == TypeHint::Pointer {
+                    format!("{{ {} = {}.wrapping_sub(1); {} }}", e, e, e)
+                } else {
+                    format!("{{ {} -= 1; {} }}", e, e)
+                }
             }
             ExprKind::PostInc(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -2325,7 +2426,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(inner, info)
                 };
-                format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+                if self.infer_type_hint(inner, info) == TypeHint::Pointer {
+                    format!("{{ let _t = {}; {} = {}.wrapping_add(1); _t }}", e, e, e)
+                } else {
+                    format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+                }
             }
             ExprKind::PostDec(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -2336,7 +2441,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(inner, info)
                 };
-                format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+                if self.infer_type_hint(inner, info) == TypeHint::Pointer {
+                    format!("{{ let _t = {}; {} = {}.wrapping_sub(1); _t }}", e, e, e)
+                } else {
+                    format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+                }
             }
             ExprKind::UnaryPlus(inner) => {
                 self.expr_to_rust(inner, info)
@@ -2860,6 +2969,9 @@ impl<'a> RustCodegen<'a> {
         // THX 依存性を判定
         let is_thx_dependent = self.is_inline_fn_thx_dependent(&func_def.declarator.derived);
         let thx_info = if is_thx_dependent { " [THX]" } else { "" };
+
+        // AST ダンプ（デバッグ用）
+        self.dump_ast_comment_for_body(name_str, &func_def.body);
 
         // ドキュメントコメント
         self.writeln(&format!("/// {}{} - inline function", name_str, thx_info));
@@ -3727,7 +3839,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust_inline(inner)
                 };
-                format!("{{ {} += 1; {} }}", e, e)
+                if self.is_pointer_expr_inline(inner) {
+                    format!("{{ {} = {}.wrapping_add(1); {} }}", e, e, e)
+                } else {
+                    format!("{{ {} += 1; {} }}", e, e)
+                }
             }
             ExprKind::PreDec(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -3738,7 +3854,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust_inline(inner)
                 };
-                format!("{{ {} -= 1; {} }}", e, e)
+                if self.is_pointer_expr_inline(inner) {
+                    format!("{{ {} = {}.wrapping_sub(1); {} }}", e, e, e)
+                } else {
+                    format!("{{ {} -= 1; {} }}", e, e)
+                }
             }
             ExprKind::PostInc(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -3749,7 +3869,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust_inline(inner)
                 };
-                format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+                if self.is_pointer_expr_inline(inner) {
+                    format!("{{ let _t = {}; {} = {}.wrapping_add(1); _t }}", e, e, e)
+                } else {
+                    format!("{{ let _t = {}; {} += 1; _t }}", e, e)
+                }
             }
             ExprKind::PostDec(inner) => {
                 let e = if let ExprKind::MacroCall { expanded, .. } = &inner.kind {
@@ -3760,7 +3884,11 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust_inline(inner)
                 };
-                format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+                if self.is_pointer_expr_inline(inner) {
+                    format!("{{ let _t = {}; {} = {}.wrapping_sub(1); _t }}", e, e, e)
+                } else {
+                    format!("{{ let _t = {}; {} -= 1; _t }}", e, e)
+                }
             }
             ExprKind::UnaryPlus(inner) => self.expr_to_rust_inline(inner),
             ExprKind::UnaryMinus(inner) => {
@@ -4158,7 +4286,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 continue;
             }
 
-            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict));
+            let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                .with_dump_ast_for(self.config.dump_ast_for.clone());
             let generated = codegen.generate_inline_fn(**name, func_def);
 
             if generated.has_unresolved_names() {
@@ -4362,7 +4491,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
-                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict));
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                        .with_dump_ast_for(self.config.dump_ast_for.clone());
                     let generated = codegen.generate_macro(info);
 
                     if generated.has_unresolved_names() {

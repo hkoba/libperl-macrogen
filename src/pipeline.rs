@@ -195,6 +195,8 @@ pub struct CodegenConfig {
     pub emit_macros: bool,
     /// ヘッダーに出力する use 文（空ならデフォルト）
     pub use_statements: Vec<String>,
+    /// AST ダンプ対象関数名（デバッグ用）
+    pub dump_ast_for: Option<String>,
 }
 
 impl Default for CodegenConfig {
@@ -206,6 +208,7 @@ impl Default for CodegenConfig {
             emit_inline_fns: true,
             emit_macros: true,
             use_statements: Vec::new(),
+            dump_ast_for: None,
         }
     }
 }
@@ -218,6 +221,7 @@ impl CodegenConfig {
             emit_macros: self.emit_macros,
             include_source_location: self.macro_comments,
             use_statements: self.use_statements.clone(),
+            dump_ast_for: self.dump_ast_for.clone(),
         }
     }
 }
@@ -349,6 +353,12 @@ impl PipelineBuilder {
     /// マクロ定義位置コメントを有効化
     pub fn with_macro_comments(mut self) -> Self {
         self.codegen.macro_comments = true;
+        self
+    }
+
+    /// AST ダンプ対象関数名を指定（デバッグ用）
+    pub fn with_dump_ast_for(mut self, name: impl Into<String>) -> Self {
+        self.codegen.dump_ast_for = Some(name.into());
         self
     }
 
@@ -600,6 +610,12 @@ impl InferredPipeline {
     /// マクロ定義位置コメントを有効化
     pub fn with_macro_comments(mut self) -> Self {
         self.codegen_config.macro_comments = true;
+        self
+    }
+
+    /// AST ダンプ対象関数名を指定（デバッグ用）
+    pub fn with_dump_ast_for(mut self, name: impl Into<String>) -> Self {
+        self.codegen_config.dump_ast_for = Some(name.into());
         self
     }
 
