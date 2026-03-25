@@ -373,6 +373,10 @@ fn is_pointer_type_str(ty: &str) -> bool {
     ty.starts_with("*mut ") || ty.starts_with("*const ")
 }
 
+fn is_float_type_str(ty: &str) -> bool {
+    matches!(ty, "f32" | "f64" | "NV" | "c_double" | "c_float")
+}
+
 /// 型文字列が const ポインタ型かどうか判定
 fn is_const_pointer_type_str(ty: &str) -> bool {
     ty.starts_with("*const ")
@@ -458,6 +462,136 @@ fn wider_integer_type(a: &str, b: &str) -> Option<&'static str> {
 /// ポインタ型文字列から参照先の型を取得
 fn deref_type(ty: &str) -> Option<&str> {
     ty.strip_prefix("*mut ").or_else(|| ty.strip_prefix("*const "))
+}
+
+/// マクロ本体を走査し、`&mut param` や代入先として使用されるパラメータを検出する
+fn collect_mut_params(parse_result: &ParseResult, params: &[MacroParam]) -> HashSet<InternedStr> {
+    let param_names: HashSet<InternedStr> = params.iter().map(|p| p.name).collect();
+    let mut result = HashSet::new();
+    match parse_result {
+        ParseResult::Expression(expr) => collect_mut_params_from_expr(expr, &param_names, &mut result),
+        ParseResult::Statement(items) => {
+            for item in items {
+                if let BlockItem::Stmt(stmt) = item {
+                    collect_mut_params_from_stmt(stmt, &param_names, &mut result);
+                }
+            }
+        }
+        ParseResult::Unparseable(_) => {}
+    }
+    result
+}
+
+fn collect_mut_params_from_expr(expr: &Expr, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
+    match &expr.kind {
+        ExprKind::AddrOf(inner) => {
+            // &mut param → param needs mut
+            if let ExprKind::Ident(name) = &inner.kind {
+                if params.contains(name) {
+                    result.insert(*name);
+                }
+            }
+            collect_mut_params_from_expr(inner, params, result);
+        }
+        ExprKind::Assign { lhs, rhs, .. } => {
+            // param = ... or param += ... → param needs mut
+            if let ExprKind::Ident(name) = &lhs.kind {
+                if params.contains(name) {
+                    result.insert(*name);
+                }
+            }
+            collect_mut_params_from_expr(lhs, params, result);
+            collect_mut_params_from_expr(rhs, params, result);
+        }
+        ExprKind::PreInc(inner) | ExprKind::PreDec(inner) |
+        ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
+            if let ExprKind::Ident(name) = &inner.kind {
+                if params.contains(name) {
+                    result.insert(*name);
+                }
+            }
+            collect_mut_params_from_expr(inner, params, result);
+        }
+        // Recurse into subexpressions
+        ExprKind::Binary { lhs, rhs, .. } => {
+            collect_mut_params_from_expr(lhs, params, result);
+            collect_mut_params_from_expr(rhs, params, result);
+        }
+        ExprKind::Deref(inner) | ExprKind::UnaryMinus(inner) | ExprKind::BitNot(inner) |
+        ExprKind::LogNot(inner) | ExprKind::Cast { expr: inner, .. } => {
+            collect_mut_params_from_expr(inner, params, result);
+        }
+        ExprKind::Call { func, args } => {
+            collect_mut_params_from_expr(func, params, result);
+            for arg in args {
+                collect_mut_params_from_expr(arg, params, result);
+            }
+        }
+        ExprKind::MacroCall { expanded, args, .. } => {
+            collect_mut_params_from_expr(expanded, params, result);
+            for arg in args {
+                collect_mut_params_from_expr(arg, params, result);
+            }
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            collect_mut_params_from_expr(cond, params, result);
+            collect_mut_params_from_expr(then_expr, params, result);
+            collect_mut_params_from_expr(else_expr, params, result);
+        }
+        ExprKind::Comma { lhs, rhs } => {
+            collect_mut_params_from_expr(lhs, params, result);
+            collect_mut_params_from_expr(rhs, params, result);
+        }
+        ExprKind::Member { expr: inner, .. } | ExprKind::PtrMember { expr: inner, .. } => {
+            collect_mut_params_from_expr(inner, params, result);
+        }
+        ExprKind::StmtExpr(compound) => {
+            for item in &compound.items {
+                if let BlockItem::Stmt(stmt) = item {
+                    collect_mut_params_from_stmt(stmt, params, result);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_mut_params_from_stmt(stmt: &Stmt, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
+    match stmt {
+        Stmt::Expr(Some(expr), _) => collect_mut_params_from_expr(expr, params, result),
+        Stmt::Return(Some(expr), _) => collect_mut_params_from_expr(expr, params, result),
+        Stmt::If { cond, then_stmt, else_stmt, .. } => {
+            collect_mut_params_from_expr(cond, params, result);
+            collect_mut_params_from_stmt(then_stmt, params, result);
+            if let Some(else_s) = else_stmt {
+                collect_mut_params_from_stmt(else_s, params, result);
+            }
+        }
+        Stmt::Compound(compound) => {
+            for item in &compound.items {
+                if let BlockItem::Stmt(s) = item {
+                    collect_mut_params_from_stmt(s, params, result);
+                }
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            collect_mut_params_from_expr(cond, params, result);
+            collect_mut_params_from_stmt(body, params, result);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(ForInit::Expr(e)) = init {
+                collect_mut_params_from_expr(e, params, result);
+            }
+            if let Some(c) = cond {
+                collect_mut_params_from_expr(c, params, result);
+            }
+            if let Some(s) = step {
+                collect_mut_params_from_expr(s, params, result);
+            }
+            collect_mut_params_from_stmt(body, params, result);
+        }
+        _ => {}
+    }
 }
 
 /// 構造体フィールド名 → 型の逆引きマップを構築
@@ -852,8 +986,31 @@ impl<'a> RustCodegen<'a> {
                 TypeHint::Unknown
             }
             ExprKind::AddrOf(_) => TypeHint::Pointer,
-            ExprKind::Deref(_) => TypeHint::Unknown,
-            ExprKind::PtrMember { .. } | ExprKind::Member { .. } => TypeHint::Unknown,
+            ExprKind::Deref(inner) => {
+                // ポインタ to ポインタの deref → ポインタ
+                if let Some(ty) = self.infer_expr_type_str(inner, info) {
+                    if let Some(derefed) = deref_type(&ty) {
+                        if is_pointer_type_str(derefed) {
+                            return TypeHint::Pointer;
+                        }
+                    }
+                }
+                TypeHint::Unknown
+            }
+            ExprKind::PtrMember { member, .. } | ExprKind::Member { member, .. } => {
+                let member_str = self.interner.get(*member);
+                if let Some(ty) = self.field_type_map.get(member_str) {
+                    if is_pointer_type_str(ty) {
+                        TypeHint::Pointer
+                    } else if ty == "bool" {
+                        TypeHint::Bool
+                    } else {
+                        TypeHint::Integer
+                    }
+                } else {
+                    TypeHint::Unknown
+                }
+            }
             ExprKind::Binary { op, .. } => {
                 match op {
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
@@ -936,6 +1093,19 @@ impl<'a> RustCodegen<'a> {
                 has_pointer
             }
             ExprKind::AddrOf(_) => true,
+            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
+                let member_str = self.interner.get(*member);
+                self.field_type_map.get(member_str).is_some_and(|ty| is_pointer_type_str(ty))
+            }
+            ExprKind::Deref(inner) => {
+                // ポインタ to ポインタの deref
+                if let Some(ty) = self.infer_expr_type_str_inline(inner) {
+                    if let Some(derefed) = deref_type(&ty) {
+                        return is_pointer_type_str(derefed);
+                    }
+                }
+                false
+            }
             ExprKind::Call { func, .. } => {
                 // マクロの戻り値型を参照
                 if let ExprKind::Ident(name) = &func.kind {
@@ -944,6 +1114,29 @@ impl<'a> RustCodegen<'a> {
                             if is_type_repr_pointer(&c.ty) {
                                 return true;
                             }
+                        }
+                    }
+                    // rust_decl_dict の関数戻り値型を参照
+                    if let Some(ret_ty) = self.get_callee_return_type(self.interner.get(*name)) {
+                        return is_pointer_type_str(ret_ty);
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// 式が enum 型かどうかを推定（バリアント識別子または enum 型を返す関数呼び出し）
+    fn is_enum_expr(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Ident(name) => self.enum_dict.is_enum_variant(*name),
+            ExprKind::Call { func, .. } => {
+                if let ExprKind::Ident(name) = &func.kind {
+                    let func_name = self.interner.get(*name);
+                    if let Some(ret_ty) = self.get_callee_return_type(func_name) {
+                        if let Some(interned) = self.interner.lookup(ret_ty) {
+                            return self.enum_dict.is_target_enum(interned);
                         }
                     }
                 }
@@ -1406,7 +1599,30 @@ impl<'a> RustCodegen<'a> {
                 }
             }
         }
-        self.expr_to_rust(expr, info)
+        let result = self.expr_to_rust(expr, info);
+        // 整数型の幅不一致キャスト挿入
+        if let Some(callee_name) = callee {
+            let func_name = self.interner.get(callee_name);
+            if let Some(expected_ty) = self.get_callee_param_type(func_name, arg_index) {
+                let actual_ty = self.infer_expr_type_str(expr, info);
+                return self.cast_integer_arg_if_needed(&result, actual_ty.as_deref(), expected_ty);
+            }
+        }
+        result
+    }
+
+    /// 整数型の幅が不一致の場合に `as` キャストを挿入する
+    fn cast_integer_arg_if_needed(&self, arg_str: &str, actual_ty: Option<&str>, expected_ty: &str) -> String {
+        if let Some(actual) = actual_ty {
+            let na = normalize_integer_type(actual);
+            let ne = normalize_integer_type(expected_ty);
+            if let (Some(a), Some(e)) = (na, ne) {
+                if a != e {
+                    return format!("({} as {})", arg_str, e);
+                }
+            }
+        }
+        arg_str.to_string()
     }
 
     /// マクロ呼び出し形式で出力すべきかを判定
@@ -1599,6 +1815,7 @@ impl<'a> RustCodegen<'a> {
     /// パラメータリストを構築（型情報付き）
     /// type/cast パラメータは型パラメータなので値引数からは除外する
     fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
+        let mut_params = collect_mut_params(&info.parse_result, &info.params);
         info.params.iter()
             .enumerate()
             .filter(|(i, _)| {
@@ -1608,7 +1825,8 @@ impl<'a> RustCodegen<'a> {
             .map(|(i, p)| {
                 let name = escape_rust_keyword(self.interner.get(p.name));
                 let ty = self.get_param_type(p, info, i);
-                format!("{}: {}", name, ty)
+                let mut_prefix = if mut_params.contains(&p.name) { "mut " } else { "" };
+                format!("{}{}: {}", mut_prefix, name, ty)
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -1893,6 +2111,37 @@ impl<'a> RustCodegen<'a> {
                         let l = self.expr_to_rust(lhs, info);
                         let r = self.expr_to_rust(rhs, info);
                         return format!("{}.offset_from({})", l, r);
+                    }
+                }
+
+                // enum 型比較 → as u32 キャスト
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
+                    if self.is_enum_expr(lhs) || self.is_enum_expr(rhs) {
+                        let l = self.expr_to_rust(lhs, info);
+                        let r = self.expr_to_rust(rhs, info);
+                        return format!("(({} as u32) {} ({} as u32))", l, bin_op_to_rust(*op), r);
+                    }
+                }
+
+                // float vs int literal → int literal を float に変換
+                if matches!(&rhs.kind, ExprKind::IntLit(_)) {
+                    if let Some(lty) = self.infer_expr_type_str(lhs, info) {
+                        if is_float_type_str(&lty) {
+                            let l = self.expr_to_rust(lhs, info);
+                            if let ExprKind::IntLit(v) = &rhs.kind {
+                                return format!("({} {} {}.0)", l, bin_op_to_rust(*op), v);
+                            }
+                        }
+                    }
+                }
+                if matches!(&lhs.kind, ExprKind::IntLit(_)) {
+                    if let Some(rty) = self.infer_expr_type_str(rhs, info) {
+                        if is_float_type_str(&rty) {
+                            let r = self.expr_to_rust(rhs, info);
+                            if let ExprKind::IntLit(v) = &lhs.kind {
+                                return format!("({}.0 {} {})", v, bin_op_to_rust(*op), r);
+                            }
+                        }
                     }
                 }
 
@@ -2182,6 +2431,14 @@ impl<'a> RustCodegen<'a> {
                 let r = self.expr_to_rust(rhs, info);
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    AssignOp::AddAssign | AssignOp::SubAssign => {
+                        if self.infer_type_hint(lhs, info) == TypeHint::Pointer {
+                            let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                            format!("{{ {} = {}.{}({} as usize); {} }}", l, l, method, r, l)
+                        } else {
+                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                        }
+                    }
                     AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
                         let lt = self.infer_expr_type_str(lhs, info);
                         let rt = self.infer_expr_type_str(rhs, info);
@@ -2791,6 +3048,14 @@ impl<'a> RustCodegen<'a> {
                     let r = self.expr_to_rust_inline(rhs);
                     match op {
                         AssignOp::Assign => format!("{}{} = {};", indent, l, r),
+                        AssignOp::AddAssign | AssignOp::SubAssign => {
+                            if self.is_pointer_expr_inline(lhs) {
+                                let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                                format!("{}{} = {}.{}({} as usize);", indent, l, l, method, r)
+                            } else {
+                                format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+                            }
+                        }
                         AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
                             let lt = self.infer_expr_type_str_inline(lhs);
                             let rt = self.infer_expr_type_str_inline(rhs);
@@ -3251,6 +3516,60 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
+                // ポインタ ± 整数 → .offset() (マクロ codegen と対称)
+                if matches!(op, BinOp::Add | BinOp::Sub) {
+                    let lp = self.is_pointer_expr_inline(lhs);
+                    let rp = self.is_pointer_expr_inline(rhs);
+                    if lp && !rp {
+                        let l = self.expr_to_rust_inline(lhs);
+                        let r = self.expr_to_rust_inline(rhs);
+                        return if *op == BinOp::Add {
+                            format!("{}.offset({} as isize)", l, r)
+                        } else {
+                            format!("{}.offset(-({} as isize))", l, r)
+                        };
+                    }
+                    if rp && !lp && *op == BinOp::Add {
+                        let l = self.expr_to_rust_inline(lhs);
+                        let r = self.expr_to_rust_inline(rhs);
+                        return format!("{}.offset({} as isize)", r, l);
+                    }
+                    // ポインタ - ポインタ → .offset_from()
+                    if lp && rp && *op == BinOp::Sub {
+                        let l = self.expr_to_rust_inline(lhs);
+                        let r = self.expr_to_rust_inline(rhs);
+                        return format!("{}.offset_from({})", l, r);
+                    }
+                }
+                // enum 型比較 → as u32 キャスト
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
+                    if self.is_enum_expr(lhs) || self.is_enum_expr(rhs) {
+                        let l = self.expr_to_rust_inline(lhs);
+                        let r = self.expr_to_rust_inline(rhs);
+                        return format!("(({} as u32) {} ({} as u32))", l, bin_op_to_rust(*op), r);
+                    }
+                }
+                // float vs int literal → int literal を float に変換
+                if matches!(&rhs.kind, ExprKind::IntLit(_)) {
+                    if let Some(lty) = self.infer_expr_type_str_inline(lhs) {
+                        if is_float_type_str(&lty) {
+                            let l = self.expr_to_rust_inline(lhs);
+                            if let ExprKind::IntLit(v) = &rhs.kind {
+                                return format!("({} {} {}.0)", l, bin_op_to_rust(*op), v);
+                            }
+                        }
+                    }
+                }
+                if matches!(&lhs.kind, ExprKind::IntLit(_)) {
+                    if let Some(rty) = self.infer_expr_type_str_inline(rhs) {
+                        if is_float_type_str(&rty) {
+                            let r = self.expr_to_rust_inline(rhs);
+                            if let ExprKind::IntLit(v) = &lhs.kind {
+                                return format!("({}.0 {} {})", v, bin_op_to_rust(*op), r);
+                            }
+                        }
+                    }
+                }
                 let l = self.expr_to_rust_inline(lhs);
                 let r = self.expr_to_rust_inline(rhs);
                 // 論理演算子の場合、オペランドを bool に変換
@@ -3369,7 +3688,13 @@ impl<'a> RustCodegen<'a> {
                             _ => {}
                         }
                     }
-                    self.expr_to_rust_inline(arg)
+                    let result = self.expr_to_rust_inline(arg);
+                    // 整数型の幅不一致キャスト挿入
+                    if let Some(expected_ty) = self.get_callee_param_type(&f, param_idx) {
+                        let actual_ty = self.infer_expr_type_str_inline(arg);
+                        return self.cast_integer_arg_if_needed(&result, actual_ty.as_deref(), expected_ty);
+                    }
+                    result
                 }));
                 format!("{}({})", f, a.join(", "))
             }
@@ -3527,6 +3852,14 @@ impl<'a> RustCodegen<'a> {
                 let r = self.expr_to_rust_inline(rhs);
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    AssignOp::AddAssign | AssignOp::SubAssign => {
+                        if self.is_pointer_expr_inline(lhs) {
+                            let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                            format!("{{ {} = {}.{}({} as usize); {} }}", l, l, method, r, l)
+                        } else {
+                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                        }
+                    }
                     AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
                         let lt = self.infer_expr_type_str_inline(lhs);
                         let rt = self.infer_expr_type_str_inline(rhs);
