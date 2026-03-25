@@ -404,16 +404,25 @@ fn normalize_integer_type(ty: &str) -> Option<&'static str> {
         "u8" | "U8" | "c_uchar" => Some("u8"),
         "u16" | "U16" | "c_ushort" => Some("u16"),
         "u32" | "U32" | "c_uint" => Some("u32"),
-        "u64" | "U64" | "c_ulong" | "c_ulonglong"
+        "u64" | "U64" | "UV" | "c_ulong" | "c_ulonglong"
             | "PERL_UINTMAX_T" => Some("u64"),
         "i8" | "I8" | "c_schar" | "c_char" => Some("i8"),
         "i16" | "I16" | "c_short" => Some("i16"),
         "i32" | "I32" | "c_int" => Some("i32"),
-        "i64" | "I64" | "c_long" | "c_longlong" => Some("i64"),
+        "i64" | "I64" | "IV" | "c_long" | "c_longlong" => Some("i64"),
         "usize" | "STRLEN" => Some("usize"),
-        "isize" | "SSize_t" => Some("isize"),
+        "isize" | "SSize_t" | "ssize_t" | "PADOFFSET" => Some("isize"),
         _ => None,
     }
+}
+
+/// 64-bit プラットフォームで i64/isize, u64/usize を同一視して比較
+fn integer_types_compatible(a: &str, b: &str) -> bool {
+    if a == b { return true; }
+    matches!((a, b),
+        ("i64", "isize") | ("isize", "i64") |
+        ("u64", "usize") | ("usize", "u64")
+    )
 }
 
 /// 整数型の幅ランク (昇格順序判定用)
@@ -1285,6 +1294,14 @@ impl<'a> RustCodegen<'a> {
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
             ExprKind::Call { func, .. } => {
+                // メソッド呼び出し: receiver.method(arg)
+                // offset/wrapping_add/wrapping_sub はレシーバと同じ型を返す
+                if let ExprKind::Member { expr: receiver, member, .. } = &func.kind {
+                    let method_name = self.interner.get(*member);
+                    if matches!(method_name, "offset" | "wrapping_add" | "wrapping_sub" | "wrapping_offset") {
+                        return self.infer_expr_type_inline(receiver);
+                    }
+                }
                 if let ExprKind::Ident(name) = &func.kind {
                     let func_name = self.interner.get(*name);
                     if let Some(ret_ut) = self.get_callee_return_type(func_name) {
@@ -1440,6 +1457,14 @@ impl<'a> RustCodegen<'a> {
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
             ExprKind::Call { func, .. } => {
+                // メソッド呼び出し: receiver.method(arg)
+                // offset/wrapping_add/wrapping_sub はレシーバと同じ型を返す
+                if let ExprKind::Member { expr: receiver, member, .. } = &func.kind {
+                    let method_name = self.interner.get(*member);
+                    if matches!(method_name, "offset" | "wrapping_add" | "wrapping_sub" | "wrapping_offset") {
+                        return self.infer_expr_type(receiver, info);
+                    }
+                }
                 if let ExprKind::Ident(name) = &func.kind {
                     let func_name = self.interner.get(*name);
                     if let Some(ret_ut) = self.get_callee_return_type(func_name) {
@@ -1545,6 +1570,31 @@ impl<'a> RustCodegen<'a> {
         self.rust_decl_dict?.fns.get(func_name).and_then(|f| {
             f.params.get(arg_index).map(|p| &p.uty)
         })
+    }
+
+    /// 呼び出し先関数のパラメータ型を取得（inline 関数/マクロ関数もフォールバック）
+    fn get_callee_param_type_extended(&mut self, func_name: &str, arg_index: usize) -> Option<UnifiedType> {
+        // 1. bindings.rs
+        if let Some(ut) = self.get_callee_param_type(func_name, arg_index) {
+            return Some(ut.clone());
+        }
+        // 2. inline 関数
+        if let Some(interned) = self.interner.lookup(func_name) {
+            if let Some(dict) = self.inline_fn_dict {
+                if let Some(func_def) = dict.get(interned) {
+                    for d in &func_def.declarator.derived {
+                        if let DerivedDecl::Function(param_list) = d {
+                            if let Some(param) = param_list.params.get(arg_index) {
+                                let ty = self.param_type_only(param);
+                                return Some(UnifiedType::from_rust_str(&ty));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// 呼び出し先関数の指定引数位置が bool 型かどうか判定（自家生成マクロも参照）
@@ -1673,6 +1723,17 @@ impl<'a> RustCodegen<'a> {
             let param = escape_rust_keyword(self.interner.get(*name));
             return format!("{}.as_ptr() as *const c_char", param);
         }
+        // null pointer パラメータへの 0 リテラル変換
+        if is_null_literal(expr) {
+            if let Some(callee_name) = callee {
+                let func_name = self.interner.get(callee_name).to_string();
+                if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
+                    if expected_ut.is_pointer() {
+                        return null_ptr_expr(&expected_ut);
+                    }
+                }
+            }
+        }
         // bool パラメータへの整数リテラル変換
         if let Some(callee_name) = callee {
             let func_name = self.interner.get(callee_name);
@@ -1685,10 +1746,10 @@ impl<'a> RustCodegen<'a> {
             }
         }
         let result = self.expr_to_rust(expr, info);
-        // 整数型の幅不一致キャスト挿入
+        // 整数型の幅不一致キャスト挿入 (bindings.rs + inline 関数)
         if let Some(callee_name) = callee {
-            let func_name = self.interner.get(callee_name);
-            if let Some(expected_ut) = self.get_callee_param_type(func_name, arg_index) {
+            let func_name = self.interner.get(callee_name).to_string();
+            if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
                 let actual_ut = self.infer_expr_type(expr, info);
                 let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                 let expected_ty_str = expected_ut.to_rust_string();
@@ -1704,12 +1765,42 @@ impl<'a> RustCodegen<'a> {
             let na = normalize_integer_type(actual);
             let ne = normalize_integer_type(expected_ty);
             if let (Some(a), Some(e)) = (na, ne) {
-                if a != e {
+                if !integer_types_compatible(a, e) {
                     return format!("({} as {})", arg_str, e);
                 }
             }
         }
         arg_str.to_string()
+    }
+
+    /// 返り値式の整数型キャストが必要ならキャスト済み文字列を返す
+    fn cast_return_expr_if_needed(&self, expr: &Expr, info: &MacroInferInfo, rust_expr: &str) -> Option<String> {
+        let ret_ut = self.current_return_type.as_ref()?;
+        let expr_ut = self.infer_expr_type(expr, info)?;
+        let ret_s = ret_ut.to_rust_string();
+        let expr_s = expr_ut.to_rust_string();
+        let nr = normalize_integer_type(&ret_s)?;
+        let ne = normalize_integer_type(&expr_s)?;
+        if !integer_types_compatible(nr, ne) {
+            Some(format!("({} as {})", rust_expr, nr))
+        } else {
+            None
+        }
+    }
+
+    /// 返り値式の整数型キャストが必要ならキャスト済み文字列を返す (inline 版)
+    fn cast_return_expr_if_needed_inline(&self, expr: &Expr, rust_expr: &str) -> Option<String> {
+        let ret_ut = self.current_return_type.as_ref()?;
+        let expr_ut = self.infer_expr_type_inline(expr)?;
+        let ret_s = ret_ut.to_rust_string();
+        let expr_s = expr_ut.to_rust_string();
+        let nr = normalize_integer_type(&ret_s)?;
+        let ne = normalize_integer_type(&expr_s)?;
+        if !integer_types_compatible(nr, ne) {
+            Some(format!("({} as {})", rust_expr, nr))
+        } else {
+            None
+        }
     }
 
     /// マクロ呼び出し形式で出力すべきかを判定
@@ -1861,6 +1952,8 @@ impl<'a> RustCodegen<'a> {
                     && !is_string_bool_expr(&rust_expr) {
                     // bool 関数: 式が bool でなければ != 0 で変換
                     self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
+                } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
+                    self.writeln(&format!("{}{}", body_indent, casted));
                 } else {
                     self.writeln(&format!("{}{}", body_indent, rust_expr));
                 }
@@ -2729,7 +2822,11 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
-                format!("return {};", self.expr_to_rust(expr, info))
+                let e = self.expr_to_rust(expr, info);
+                if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &e) {
+                    return format!("return {};", casted);
+                }
+                format!("return {};", e)
             }
             Stmt::Return(None, _) => "return;".to_string(),
             _ => self.todo_marker("stmt")
@@ -2950,8 +3047,31 @@ impl<'a> RustCodegen<'a> {
     pub fn generate_inline_fn(mut self, name: crate::InternedStr, func_def: &FunctionDef) -> GeneratedCode {
         let name_str = self.interner.get(name);
 
+        // mutable パラメータを検出
+        let mut_params = {
+            let mut param_names = HashSet::new();
+            for d in &func_def.declarator.derived {
+                if let DerivedDecl::Function(param_list) = d {
+                    for p in &param_list.params {
+                        if let Some(ref declarator) = p.declarator {
+                            if let Some(param_name) = declarator.name {
+                                param_names.insert(param_name);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut result = HashSet::new();
+            for item in &func_def.body.items {
+                if let BlockItem::Stmt(stmt) = item {
+                    collect_mut_params_from_stmt(stmt, &param_names, &mut result);
+                }
+            }
+            result
+        };
+
         // パラメータリストを取得
-        let params_str = self.build_fn_param_list(&func_def.declarator.derived);
+        let params_str = self.build_fn_param_list(&func_def.declarator.derived, &mut_params);
 
         // 戻り値の型を取得（基本型）
         let return_type = self.decl_specs_to_rust(&func_def.specs);
@@ -3022,11 +3142,11 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// DerivedDecl から関数パラメータリストを構築
-    fn build_fn_param_list(&mut self, derived: &[DerivedDecl]) -> String {
+    fn build_fn_param_list(&mut self, derived: &[DerivedDecl], mut_params: &HashSet<InternedStr>) -> String {
         for d in derived {
             if let DerivedDecl::Function(param_list) = d {
                 let params: Vec<_> = param_list.params.iter()
-                    .map(|p| self.param_decl_to_rust(p))
+                    .map(|p| self.param_decl_to_rust(p, mut_params))
                     .collect();
                 let mut result = params.join(", ");
                 if param_list.is_variadic {
@@ -3062,10 +3182,11 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// ParamDecl を Rust パラメータ宣言に変換
-    fn param_decl_to_rust(&mut self, param: &ParamDecl) -> String {
-        let name = param.declarator
+    fn param_decl_to_rust(&mut self, param: &ParamDecl, mut_params: &HashSet<InternedStr>) -> String {
+        let param_name_interned = param.declarator
             .as_ref()
-            .and_then(|d| d.name)
+            .and_then(|d| d.name);
+        let name = param_name_interned
             .map(|n| escape_rust_keyword(self.interner.get(n)))
             .unwrap_or_else(|| "_".to_string());
 
@@ -3078,7 +3199,13 @@ impl<'a> RustCodegen<'a> {
             ty
         };
 
-        format!("{}: {}", name, ty)
+        let mut_prefix = if param_name_interned.is_some_and(|n| mut_params.contains(&n)) {
+            "mut "
+        } else {
+            ""
+        };
+
+        format!("{}{}: {}", mut_prefix, name, ty)
     }
 
     /// Declaration を Rust の let 宣言に変換
@@ -3203,7 +3330,11 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
-                format!("{}return {};", indent, self.expr_to_rust_inline(expr))
+                let e = self.expr_to_rust_inline(expr);
+                if let Some(casted) = self.cast_return_expr_if_needed_inline(expr, &e) {
+                    return format!("{}return {};", indent, casted);
+                }
+                format!("{}return {};", indent, e)
             }
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
@@ -3783,6 +3914,14 @@ impl<'a> RustCodegen<'a> {
                 let arg_offset = if needs_my_perl { 1usize } else { 0 };
                 a.extend(args.iter().enumerate().map(|(i, arg)| {
                     let param_idx = i + arg_offset;
+                    // null pointer パラメータへの 0 リテラル変換
+                    if is_null_literal(arg) {
+                        if let Some(expected_ut) = self.get_callee_param_type_extended(&f, param_idx) {
+                            if expected_ut.is_pointer() {
+                                return null_ptr_expr(&expected_ut);
+                            }
+                        }
+                    }
                     if self.callee_param_is_bool(&f, param_idx) {
                         match &arg.kind {
                             ExprKind::IntLit(0) => return "false".to_string(),
@@ -3791,8 +3930,8 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                     let result = self.expr_to_rust_inline(arg);
-                    // 整数型の幅不一致キャスト挿入
-                    if let Some(expected_ut) = self.get_callee_param_type(&f, param_idx) {
+                    // 整数型の幅不一致キャスト挿入 (bindings.rs + inline 関数)
+                    if let Some(expected_ut) = self.get_callee_param_type_extended(&f, param_idx) {
                         let actual_ut = self.infer_expr_type_inline(arg);
                         let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                         let expected_ty_str = expected_ut.to_rust_string();

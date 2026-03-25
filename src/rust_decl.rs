@@ -136,6 +136,13 @@ impl RustDeclDict {
                     self.structs.insert(name.clone(), RustStruct { name, fields });
                 }
             }
+            Item::Union(item_union) => {
+                if Self::is_pub(&item_union.vis) {
+                    let name = item_union.ident.to_string();
+                    let fields = Self::extract_fields(&Fields::Named(item_union.fields.clone()));
+                    self.structs.insert(name.clone(), RustStruct { name, fields });
+                }
+            }
             Item::Fn(item_fn) => {
                 if Self::is_pub(&item_fn.vis) {
                     if let Some(rust_fn) = Self::extract_fn(&item_fn.sig) {

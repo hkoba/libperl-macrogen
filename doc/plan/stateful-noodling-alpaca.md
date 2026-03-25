@@ -1,318 +1,311 @@
-# Plan: 文字列ベース型比較から UnifiedType 構造型への移行
+# Plan: `consider using` help エラーの修正
 
 ## Context
 
-コード生成パス (`rust_codegen.rs`) の型判定が文字列比較に依存しており、
-syn ライブラリの `to_token_stream().to_string()` が `"* mut T"` (スペース入り) を
-出力する問題で脆弱性がある。`normalize_type_str()` や二重プレフィックスチェックで
-回避しているが、根本的でない。
+`~/blob/libperl-rs/12-macrogen-2-build.zsh` の統合テストで 594 エラーが発生。
+`./categorize-help-diags.tcl tmp/build-error.log` でカテゴリ分けした結果、
+以下のエラーパターンが判明した（`remove these parentheses` 警告 999 件を除く）。
 
-既に定義済みだが **未使用** の `UnifiedType` (`src/unified_type.rs`) を
-コード生成パスに導入し、文字列ベースの型比較を構造的な型判定に置き換える。
+| カテゴリ | 件数 | 根本原因 |
+|----------|------|----------|
+| null pointer (null_mut) | 31 | 関数引数の `0` が pointer 型に変換されない |
+| null pointer (null) | 3 | 同上 (const pointer) |
+| u32→i32 conversion | 33 | 返り値/引数の整数幅不一致 |
+| usize→i32 conversion | 9 | 同上 |
+| u64→u32 conversion | 8 | ビット演算結果の幅不一致 |
+| i8→i32 conversion | 6 | 文字リテラルキャスト |
+| u32→u8 conversion | 4 | ビット演算結果の幅不一致 |
+| consider making mutable | 9 | inline 関数パラメータに mut 未付与 |
+| pointer + integer (wrapping_add) | 4 | pointer 演算が未検出 |
+| pointer - pointer (offset_from) | 1 | 同上 |
+| BitAnd/BitOr/BitAndAssign/BitOrAssign | 8 | 異なる幅の整数間のビット演算 |
+| trait 制約不足 (Add/Sub/Rem/PartialEq/Clone) | 12 | ジェネリック関数の trait bound 不足 |
+| float literal | 1 | float vs int リテラル比較 |
+| did you mean / provide argument | 4 | マクロ展開の引数順序/個数エラー |
+| その他 (u8→u64, usize→isize 等) | ~15 | 整数幅不一致の各バリエーション |
 
-### 解消対象の脆弱な関数
-
-| 関数 | 呼出数 | 置換先 |
-|------|--------|--------|
-| `is_pointer_type_str(&str)` | 15 | `ut.is_pointer()` |
-| `is_const_pointer_type_str(&str)` | 1 | `ut.is_const_pointer()` |
-| `deref_type(&str) -> Option<&str>` | 4 | `ut.inner_type()` |
-| `normalize_type_str(&str)` | 1 | 不要になる |
-| `is_float_type_str(&str)` | 2 | `ut.is_float()` |
+**目標**: 高コスト・高影響度の修正から優先して実施し、エラー数を大幅削減する。
 
 ## 修正ファイル
 
 | ファイル | 変更内容 |
 |---------|---------|
-| `src/unified_type.rs` | ヘルパーメソッド追加 |
-| `src/rust_decl.rs` | UnifiedType フィールド追加 |
-| `src/rust_codegen.rs` | データストア・消費者の移行 |
+| `src/rust_codegen.rs` | 主な修正すべて (null pointer, mut params, 返り値キャスト, ビット演算幅) |
+| `src/rust_decl.rs` | union フィールドの追加 (pointer 演算検出に必要) |
 
-## Phase 0: UnifiedType にヘルパーメソッド追加
+## Phase 1: 関数引数の null pointer 変換 (34 件削減見込み)
 
-**ファイル**: `src/unified_type.rs`
+**問題**: `0` が関数引数として渡されるとき、呼び出し先のパラメータ型が
+ポインタ型の場合に `std::ptr::null_mut()` / `std::ptr::null()` に変換されない。
 
-既存メソッド: `is_pointer()`, `inner_type()`, `is_named()`, `as_named()`
+**例**:
+```rust
+// 現在の出力:
+sv_2pv(my_perl, sv, 0)  // 0 は *mut usize 型のはず
+// 期待する出力:
+sv_2pv(my_perl, sv, std::ptr::null_mut())
+```
 
-追加するメソッド:
+**既存コード**: `expr_to_rust_arg()` (L1665-1699) は bool/整数キャスト処理があるが、
+null pointer 処理がない。inline 側の Call 処理 (L3784-3802) も同様。
+
+### 変更 1: `expr_to_rust_arg()` に null pointer 検出を追加
 
 ```rust
-pub fn is_const_pointer(&self) -> bool {
-    matches!(self, Self::Pointer { is_const: true, .. })
-}
-
-pub fn is_float(&self) -> bool {
-    matches!(self, Self::Float | Self::Double | Self::LongDouble)
-        || matches!(self, Self::Named(n) if n == "NV")
-}
-
-pub fn is_bool(&self) -> bool {
-    matches!(self, Self::Bool)
-}
-
-pub fn is_void(&self) -> bool {
-    matches!(self, Self::Void)
+// L1676 付近 (bool 変換の前に挿入)
+// null pointer パラメータへの 0 リテラル変換
+if let Some(callee_name) = callee {
+    let func_name = self.interner.get(callee_name);
+    if let Some(expected_ut) = self.get_callee_param_type(func_name, arg_index) {
+        if expected_ut.is_pointer() && is_null_literal(expr) {
+            return null_ptr_expr(expected_ut);
+        }
+    }
 }
 ```
 
-単体テストも追加。
-
-**検証**: `cargo test`
-
-## Phase 1: RustDeclDict に UnifiedType フィールド追加 (二重保持)
-
-**ファイル**: `src/rust_decl.rs`
-
-既存の `ty: String` フィールドと並行して `uty: UnifiedType` を追加。
-既存コードを一切壊さず、新しいフィールドだけ追加する。
+### 変更 2: inline Call 処理 (L3784-3802) に同様の null pointer 検出を追加
 
 ```rust
-pub struct RustParam {
-    pub name: String,
-    pub ty: String,
-    pub uty: UnifiedType,       // NEW
-}
-
-pub struct RustField {
-    pub name: String,
-    pub ty: String,
-    pub uty: UnifiedType,       // NEW
-}
-
-pub struct RustFn {
-    pub name: String,
-    pub params: Vec<RustParam>,
-    pub ret_ty: Option<String>,
-    pub uret_ty: Option<UnifiedType>,  // NEW
-}
-
-pub struct RustConst {
-    pub name: String,
-    pub ty: String,
-    pub uty: UnifiedType,       // NEW
-}
-
-pub struct RustTypeAlias {
-    pub name: String,
-    pub ty: String,
-    pub uty: UnifiedType,       // NEW
+// L3792 付近 (bool 変換の後に挿入)
+if let Some(expected_ut) = self.get_callee_param_type(&f, param_idx) {
+    if expected_ut.is_pointer() && is_null_literal(arg) {
+        return null_ptr_expr(expected_ut);
+    }
 }
 ```
 
-変換は既存の `type_to_string()` 出力を `UnifiedType::from_rust_str()` で構造化:
+**検証**: `cargo test` + 統合テスト
+
+## Phase 2: inline 関数パラメータの `mut` 付与 (9 件削減見込み)
+
+**問題**: inline 関数の `param_decl_to_rust()` (L3065-3082) はパラメータを
+常に immutable で宣言する。マクロ側には `collect_mut_params()` (L451-578) が
+あるが、inline 関数側では未使用。
+
+**例**:
+```rust
+// 現在の出力:
+pub unsafe fn Perl_utf8_hop(s: *mut U8, off: ssize_t) -> *mut U8 {
+    { let _t = s; s = s.wrapping_add(1); _t };  // ERROR: cannot assign to immutable
+// 期待する出力:
+pub unsafe fn Perl_utf8_hop(mut s: *mut U8, mut off: ssize_t) -> *mut U8 {
+```
+
+### 変更: `generate_inline_fn()` (L2950) で mutation 検出を追加
+
+1. 関数本体の AST (`body`) からパラメータ名を集める
+2. `collect_mut_params_from_stmt()` を使って mutable なパラメータを検出
+3. `build_fn_param_list()` (L3025) に `mut_params: &HashSet<InternedStr>` 引数を追加
+4. `param_decl_to_rust()` に `is_mut: bool` 引数を追加し、`mut ` プレフィックスを生成
+
+具体的な変更:
 
 ```rust
-fn type_to_unified(ty: &Type) -> UnifiedType {
-    UnifiedType::from_rust_str(&Self::type_to_string(ty))
+// generate_inline_fn() 内、パラメータリスト構築前:
+let param_names: HashSet<InternedStr> = /* 関数パラメータ名を収集 */;
+let mut_params = {
+    let mut result = HashSet::new();
+    collect_mut_params_from_stmt(body, &param_names, &mut result);
+    result
+};
+let param_list = self.build_fn_param_list_with_mut(derived, &mut_params);
+```
+
+`build_fn_param_list` / `param_decl_to_rust` を変更して `mut_params` を受け取り、
+該当パラメータに `mut ` プレフィックスを付ける。
+
+**検証**: `cargo test` + 統合テスト
+
+## Phase 3: 返り値の整数型キャスト (33+ 件削減見込み)
+
+**問題**: 関数の返り値型が `i32` だが式の推論型が `u32` の場合、
+`as i32` キャストが挿入されない。
+
+**3 つのサブパターン**:
+
+### 3a. Expression 形式のマクロ関数の返り値
+
+**場所**: マクロ codegen の `ParseResult::Expression` 処理 (L1852-1866)
+
+現在: 式をそのまま出力（void/bool チェックのみ）
+修正: 式の推論型と `current_return_type` を比較し、整数幅が不一致なら `as` キャスト挿入
+
+```rust
+// L1864 の else ブロック内:
+} else {
+    // 返り値型と推論型が異なる整数型なら as キャストを挿入
+    if let Some(ref ret_ut) = self.current_return_type {
+        if let Some(expr_ut) = self.infer_expr_type(expr, info) {
+            let ret_s = ret_ut.to_rust_string();
+            let expr_s = expr_ut.to_rust_string();
+            let nr = normalize_integer_type(&ret_s);
+            let ne = normalize_integer_type(&expr_s);
+            if let (Some(r), Some(e)) = (nr, ne) {
+                if r != e {
+                    self.writeln(&format!("{}({} as {})", body_indent, rust_expr, r));
+                    // continue to next
+                    ...
+                }
+            }
+        }
+    }
+    self.writeln(&format!("{}{}", body_indent, rust_expr));
 }
 ```
 
-`from_rust_str()` は syn の `"* mut"` スペース問題を内部で正規化済み (L261-264)。
+### 3b. `return expr;` 文のマクロ/inline 関数
 
-`process_item()` 内の全構造体構築箇所で `uty`/`uret_ty` を設定。
+**場所**: `stmt_to_rust()` (L2713-2732), `stmt_to_rust_inline()` (L3187-3207)
 
-**検証**: `cargo test` (既存テストは ty: String を参照するので変更なし)
-
-## Phase 2: `field_type_map` を UnifiedType に移行
-
-**ファイル**: `src/rust_codegen.rs`
-
-### 変更 1: 型を変更
+現在: null pointer と bool のみ特殊処理。整数型不一致は処理なし。
+修正: 既存の null/bool 処理の後に整数キャスト処理を追加。
 
 ```rust
-// L843: HashMap<String, String> → HashMap<String, UnifiedType>
-field_type_map: HashMap<String, UnifiedType>,
+// L2730 付近（bool 処理の後）:
+// 整数型の返り値キャスト
+let e = self.expr_to_rust(expr, info);
+if let Some(expr_ut) = self.infer_expr_type(expr, info) {
+    let ret_s = rt.to_rust_string();
+    let expr_s = expr_ut.to_rust_string();
+    let nr = normalize_integer_type(&ret_s);
+    let ne = normalize_integer_type(&expr_s);
+    if let (Some(r), Some(e_norm)) = (nr, ne) {
+        if r != e_norm {
+            return format!("return ({} as {});", e, r);
+        }
+    }
+}
+return format!("return {};", e);
 ```
 
-### 変更 2: `build_field_type_map()` (L603-629)
+同等のロジックを `stmt_to_rust_inline()` にも適用。
+
+### 3c. 暗黙の返り値（if-else の最後の式など）
+
+マクロの Expression 形式ではなく Statement 形式で、最後の式が暗黙に返り値に
+なるケースも同じパターンで対応する。ただし、これは Phase 3a で Expression パスが
+カバーする範囲が広いため、残りのケース数は少ない見込み。
+
+**検証**: `cargo test` + 統合テスト
+
+## Phase 4: 関数引数の整数型キャスト強化 (10+ 件削減見込み)
+
+**問題**: `cast_integer_arg_if_needed()` は既に存在するが、以下のケースで機能しない:
+- 呼び出し先が自前生成マクロの場合、`get_callee_param_type()` が `None` を返す
+- `normalize_integer_type()` が認識しない型名の場合
+
+### 変更 1: マクロ呼び出しでも型情報を取得
+
+`expr_to_rust_arg()` で `get_callee_param_type()` が `None` の場合、
+`macro_ctx` からマクロのパラメータ型を取得するフォールバックを追加。
+
+### 変更 2: `normalize_integer_type()` の対応型を拡充
+
+現在未対応の可能性がある型 (`ssize_t`, `STRLEN` 等) を追加。
+
+**検証**: `cargo test` + 統合テスト
+
+## Phase 5: pointer 演算の検出改善 (5 件削減見込み)
+
+**問題**: `svu_pv + xpv_cur` のような pointer + integer が `wrapping_add()` に
+変換されない。また `array_ptr - alloc_ptr` が `offset_from()` に変換されない。
+
+**根本原因**: `RustDeclDict::process_item()` (`src/rust_decl.rs` L114) が
+`Item::Union` を処理していないため、union フィールド (`svu_pv`, `svu_iv` 等) が
+`field_type_map` に含まれない。`is_pointer_expr_inline()` / `infer_type_hint()` の
+`Member`/`PtrMember` arm は `field_type_map` を参照するため、pointer 検出に失敗。
+
+**例**:
+```rust
+// 現在の出力 (pointer + integer が素の + のまま):
+(*(((*sv).sv_u).svu_pv + (*((*sv).sv_any as *mut XPV)).xpv_cur))
+// 期待する出力:
+(*(((*sv).sv_u).svu_pv.wrapping_add((*((*sv).sv_any as *mut XPV)).xpv_cur)))
+```
+
+### 変更: `src/rust_decl.rs` の `process_item()` に `Item::Union` 処理を追加
 
 ```rust
-fn build_field_type_map(dict: Option<&RustDeclDict>) -> HashMap<String, UnifiedType> {
-    // field.uty.clone() を使用。normalize_type_str() は不要になる。
-    // 型の衝突判定: UnifiedType の PartialEq で構造比較。
+// L132-138 の Item::Struct と同様:
+Item::Union(item_union) => {
+    if Self::is_pub(&item_union.vis) {
+        let name = item_union.ident.to_string();
+        let fields = Self::extract_fields(&item_union.fields);
+        self.structs.insert(name.clone(), RustStruct { name, fields });
+    }
 }
 ```
 
-### 変更 3: 消費者 6 箇所を更新
+union フィールドを `structs` に追加することで、`build_field_type_map()` が
+union フィールドも含むようになり、pointer 検出が正しく動作する。
 
-| 行 | 現在 | 変更後 |
-|----|------|--------|
-| L1090 | `is_pointer_type_str(ty)` | `ut.is_pointer()` |
-| L1081 | `deref_type(ty)` + `is_pointer_type_str` | `ut.inner_type().map(|t| t.is_pointer())` |
-| L1203 | `is_pointer_type_str(ty)` | `ut.is_pointer()` |
-| L1209 | `deref_type` + `is_pointer_type_str` | `ut.inner_type().map(|t| t.is_pointer())` |
-| L1283 | `.cloned()` → String | `.map(|ut| ut.to_rust_string())` |
-| L1436 | `.cloned()` → String | `.map(|ut| ut.to_rust_string())` |
+**注意**: union フィールド名の衝突も `build_field_type_map()` の conflict 検出で
+正しく処理される（同名・同型なら統合、異型ならスキップ）。
 
-### 変更 4: `normalize_type_str()` を削除 (L633-638)
+**検証**: `cargo test` + 統合テスト
 
-**検証**: `cargo test` + `~/blob/libperl-rs/12-macrogen-2-build.zsh`
+## Phase 6: ビット演算の型推論改善 (8+ 件削減見込み)
 
-## Phase 3: `get_callee_return_type` / `get_callee_param_type` を UnifiedType に移行
+**問題**: `BitAnd`/`BitOr`/`BitAndAssign`/`BitOrAssign` でのキャストロジックは
+既に実装済み (L2238-2254, L2541-2554, L3165-3178, L3682-3698) だが、
+型推論が複雑な式チェーンで失敗するため、キャストが挿入されない。
 
-**ファイル**: `src/rust_codegen.rs`
+**エラー例**:
+```rust
+// u8 &= u32: LHS が *(HEK_KEY(hek) as *mut c_uchar).offset(...).offset(...)
+// → Deref(メソッドチェーン) の型推論が None を返す
+*(ptr as *mut c_uchar).offset(n).offset(m) &= (!HVhek_UTF8);
 
-### 変更 1: 戻り値型を変更
+// u64 | u8: RHS の cast 結果が u8 で、LHS が u64
+uv = ((uv << 6) | (((*s) as U8) & mask));
+// → BitOr の wider_integer_type で u64 が選ばれるが、`(expr as U8)` の型推論で
+//   U8 → normalize → u8 で、wider_integer_type("u64", "u8") → "u64"
+//   → RHS にキャスト挿入されるはず。`infer_expr_type` が Binary(BitAnd) の型を
+//   正しく返せていない可能性。
+```
+
+**根本原因**: `infer_expr_type` / `infer_expr_type_inline` の `Call` arm (L1432-1443)
+が **メソッドチェーン** (`.offset()` 等) の戻り値型を推論できない。
+
+### 変更: `infer_expr_type` の Call arm にメソッド呼び出しの型推論を追加
+
+`.offset()` / `.wrapping_add()` / `.wrapping_sub()` メソッドはレシーバと同じ型を返す。
+この知識を `infer_expr_type` に追加:
 
 ```rust
-// L1626: Option<&str> → Option<&UnifiedType>
-fn get_callee_return_type(&self, func_name: &str) -> Option<&UnifiedType> {
-    self.rust_decl_dict?.fns.get(func_name).and_then(|f| f.uret_ty.as_ref())
+ExprKind::Call { func, args } => {
+    // メソッド呼び出し: receiver.method(arg)
+    // offset/wrapping_add/wrapping_sub はレシーバと同じ型を返す
+    if let ExprKind::Member { expr: receiver, member } = &func.kind {
+        let method_name = self.interner.get(*member);
+        if matches!(method_name, "offset" | "wrapping_add" | "wrapping_sub") {
+            return self.infer_expr_type(receiver, info);
+        }
+    }
+    // 既存の関数呼び出し型推論...
 }
-
-// L1571: Option<&str> → Option<&UnifiedType>
-fn get_callee_param_type(&self, func_name: &str, arg_index: usize) -> Option<&UnifiedType> {
-    self.rust_decl_dict?.fns.get(func_name).and_then(|f|
-        f.params.get(arg_index).map(|p| &p.uty)
-    )
-}
 ```
 
-### 変更 2: 消費者を更新
+同等の変更を `infer_expr_type_inline` にも適用。
 
-`get_callee_return_type` 消費者:
+**注意**: Phase 5 で union フィールドが `field_type_map` に追加されることで、
+一部のエラーは Phase 5 だけで解消される可能性がある。
 
-| 行 | 現在 | 変更後 |
-|----|------|--------|
-| L1058 | `is_pointer_type_str(ret_ty)` | `ret_ut.is_pointer()` |
-| L1226 | `is_pointer_type_str(ret_ty)` | `ret_ut.is_pointer()` |
-| L1319 | `ret_ty.to_string()` | `ret_ut.to_rust_string()` |
-| L1472 | `ret_ty.to_string()` | `ret_ut.to_rust_string()` |
-| L1642 | `ret_ty == "bool"` | `ret_ut.is_bool()` |
+**検証**: `cargo test` + 統合テスト
 
-`get_callee_param_type` 消費者:
+## Phase 7 (後日): 残りのエラー修正
 
-| 行 | 現在 | 変更後 |
-|----|------|--------|
-| L1580 | `param_ty == "bool"` | `param_ut.is_bool()` |
-| L1718 | `expected_ty` → `normalize_integer_type` | `expected_ut.to_rust_string()` → `normalize_integer_type` |
+以下は件数が少なく、修正の複雑さが高いため後日対応：
 
-**検証**: `cargo test` + `~/blob/libperl-rs/12-macrogen-2-build.zsh`
+- **ジェネリック関数の trait bound** (12 件): `<T: Copy + PartialEq<i32> + Add<u32>>` など
+  - `build_generic_clause()` で型パラメータの使用パターンから必要な trait を推定
+  - 複雑度が高く、影響する関数数も限られる
 
-## Phase 4: `current_param_types` と `current_return_type` を UnifiedType に移行
+- **`did you mean` / `provide argument`** (4 件): マクロ展開の引数順序/個数エラー
+  - 個別のマクロ展開バグ（hv_common, Perl_custom_op_get_field）
 
-**ファイル**: `src/rust_codegen.rs`
-
-### 変更 1: 型を変更
-
-```rust
-// L823: Option<String> → Option<UnifiedType>
-current_return_type: Option<UnifiedType>,
-// L829: HashMap<InternedStr, String> → HashMap<InternedStr, UnifiedType>
-current_param_types: HashMap<InternedStr, UnifiedType>,
-```
-
-### 変更 2: 格納箇所を更新
-
-```rust
-// L1781: collect_decl_names
-let ty_str = self.apply_derived_to_type(&base_type, &derived);
-self.current_param_types.insert(name, UnifiedType::from_rust_str(&ty_str));
-
-// L2995: generate_inline_fn
-let ty_str = self.param_type_only(p);
-self.current_param_types.insert(param_name, UnifiedType::from_rust_str(&ty_str));
-
-// L1839: macro get_return_type
-self.current_return_type = Some(UnifiedType::from_rust_str(&return_type));
-
-// L2986: inline fn
-self.current_return_type = Some(UnifiedType::from_rust_str(&return_type));
-```
-
-### 変更 3: 消費者を更新 (~15 箇所)
-
-`current_param_types` 消費者:
-
-| 行 | 現在 | 変更後 |
-|----|------|--------|
-| L1170 | `ty == "bool"` | `ut.is_bool()` |
-| L1189 | `is_pointer_type_str(ty)` | `ut.is_pointer()` |
-| L1266 | `.cloned()` → String | `.map(|ut| ut.to_rust_string())` |
-
-`current_return_type` 消費者:
-
-| 行 | 現在 | 変更後 |
-|----|------|--------|
-| L1881 | `== Some("()")` | `.is_void()` |
-| L1884 | `== Some("bool")` | `.is_bool()` |
-| L2694,2711 | `is_pointer_type_str(rt)` + `is_null_literal` | `ut.is_pointer()` + `ut.is_const_pointer()` |
-| L2734,3206 | 同上 (return 文) | 同上 |
-| L2533,3965 | `.clone()` for type_hint | `.map(|ut| ut.to_rust_string())` |
-
-**検証**: `cargo test` + `~/blob/libperl-rs/12-macrogen-2-build.zsh`
-
-## Phase 5: `infer_expr_type_str` を `Option<UnifiedType>` に移行
-
-**ファイル**: `src/rust_codegen.rs`
-
-最大の変更フェーズ。`infer_expr_type_str()` と `infer_expr_type_str_inline()` の
-戻り値を `Option<String>` → `Option<UnifiedType>` に変更。
-
-### 変更 1: 関数シグネチャ変更
-
-```rust
-fn infer_expr_type_str(&self, expr: &Expr, info: &MacroInferInfo) -> Option<UnifiedType>
-fn infer_expr_type_str_inline(&self, expr: &Expr) -> Option<UnifiedType>
-```
-
-### 変更 2: 関数内部の各 match arm
-
-- Ident → `current_param_types.get()` は Phase 4 で既に `&UnifiedType` を返す
-- Member/PtrMember → `field_type_map.get()` は Phase 2 で既に `&UnifiedType` を返す
-- Call → `get_callee_return_type()` は Phase 3 で既に `&UnifiedType` を返す
-- Cast → `UnifiedType::from_rust_str(&type_name_to_type_str_readonly(...))`
-- Deref → `inner_ut.inner_type().cloned()`
-- Binary → 再帰呼出しの結果がそのまま `Option<UnifiedType>`
-- リテラル → `Some(UnifiedType::Int { signed: false, size: IntSize::Int })` など
-
-### 変更 3: 消費者 (~20 箇所) を更新
-
-| パターン | 消費者の変更 |
-|----------|------------|
-| ポインタ判定 (L1079, L1207) | `ut.is_pointer()` |
-| float 判定 (L2234, L2244, L3671, L3681) | `ut.is_float()` |
-| 整数幅比較 (L2264, L2565, L3185, L3997) | `ut.to_rust_string()` → `normalize_integer_type()` |
-| 引数キャスト (L1719) | `ut.to_rust_string()` → `cast_integer_arg_if_needed()` |
-
-### 変更 4: 旧関数削除
-
-- `is_pointer_type_str()`
-- `is_const_pointer_type_str()`
-- `deref_type()`
-- `is_float_type_str()`
-- `null_ptr_expr(&str)` → `null_ptr_expr(&UnifiedType)` に変更
-
-**検証**: `cargo test` + `~/blob/libperl-rs/12-macrogen-2-build.zsh` + regression test
-
-## Phase 6 (後日): String フィールド削除
-
-`RustDeclDict` の `ty: String` / `ret_ty: Option<String>` フィールドを削除し、
-`uty` → `ty` にリネーム。Phase 5 完了後に実施。
-
-## 設計ポイント
-
-### なぜ TypeRepr ではなく UnifiedType か
-
-| 基準 | UnifiedType | TypeRepr |
-|------|------------|---------|
-| `PartialEq, Eq, Hash` | ✓ derive 済み | ✗ source 情報が異なる |
-| `from_rust_str()` | ✓ syn 対応済み | ✗ なし |
-| 複雑さ | シンプル (9 variant) | 複雑 (3 大 variant) |
-| codegen 親和性 | 高い | 推論向け |
-
-TypeRepr は `semantic.rs` の型推論に特化。UnifiedType は codegen パス向け。
-
-### syn 問題の完全解消ポイント
-
-syn の `"* mut T"` 問題は、型文字列が codegen パスに入る **3 つの入口** で発生:
-
-1. `field_type_map` ← Phase 2 で解消 (`UnifiedType::from_rust_str` が正規化)
-2. `get_callee_return_type()` ← Phase 3 で解消
-3. `get_callee_param_type()` ← Phase 3 で解消
-
-Phase 0-4 完了時点で **syn 脆弱性は完全に排除** される。
-Phase 5 は正確性ではなく **アーキテクチャの一貫性** のための改善。
+- **float literal** (1 件): 既存処理の適用漏れ（LHS が float でも変数の場合に未適用）
 
 ## 検証コマンド (各 Phase 共通)
 
@@ -320,7 +313,17 @@ Phase 5 は正確性ではなく **アーキテクチャの一貫性** のため
 cargo test
 ~/blob/libperl-rs/12-macrogen-2-build.zsh
 grep -c '^error' tmp/build-error.log
-grep 'consider using' tmp/build-error.log | sort | uniq -c | sort -rn
+./categorize-help-diags.tcl tmp/build-error.log 2>&1 | grep -v 'remove these parentheses'
 ```
 
-生成コードの出力が Phase 間で変化しないことを確認 (regression test)。
+## 削減見込み
+
+| Phase | 削減見込み | 累計残り |
+|-------|-----------|---------|
+| 現状 | - | 594 |
+| Phase 1 (null pointer) | ~34 | ~560 |
+| Phase 2 (mut params) | ~9 | ~551 |
+| Phase 3 (返り値キャスト) | ~33 | ~518 |
+| Phase 4 (引数キャスト強化) | ~10 | ~508 |
+| Phase 5 (pointer 演算) | ~5 | ~503 |
+| Phase 6 (ビット代入演算) | ~8 | ~495 |
