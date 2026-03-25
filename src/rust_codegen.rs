@@ -1020,6 +1020,15 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
+                // current_param_types（ローカル変数含む）
+                if let Some(ut) = self.current_param_types.get(name) {
+                    if ut.is_pointer() {
+                        return TypeHint::Pointer;
+                    }
+                    if ut.is_bool() {
+                        return TypeHint::Bool;
+                    }
+                }
                 TypeHint::Unknown
             }
             ExprKind::Call { func, .. } => {
@@ -1124,7 +1133,8 @@ impl<'a> RustCodegen<'a> {
         if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
             return expr_str.to_string();
         }
-        if self.infer_type_hint(expr, info) == TypeHint::Pointer {
+        if self.infer_type_hint(expr, info) == TypeHint::Pointer
+            || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
             return format!("!{}.is_null()", expr_str);
         }
         format!("(({}) != 0)", expr_str)
@@ -1154,7 +1164,8 @@ impl<'a> RustCodegen<'a> {
         if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
             return expr_str.to_string();
         }
-        if self.is_pointer_expr_inline(expr) {
+        if self.is_pointer_expr_inline(expr)
+            || self.infer_expr_type_inline(expr).is_some_and(|ut| ut.is_pointer()) {
             return format!("!{}.is_null()", expr_str);
         }
         format!("(({}) != 0)", expr_str)
@@ -1407,6 +1418,10 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
+                // current_param_types（ローカル変数含む）
+                if let Some(ut) = self.current_param_types.get(name) {
+                    return Some(ut.clone());
+                }
                 // 定数の型
                 if let Some(dict) = self.rust_decl_dict {
                     let name_str = self.interner.get(*name);
@@ -1578,8 +1593,8 @@ impl<'a> RustCodegen<'a> {
         if let Some(ut) = self.get_callee_param_type(func_name, arg_index) {
             return Some(ut.clone());
         }
-        // 2. inline 関数
         if let Some(interned) = self.interner.lookup(func_name) {
+            // 2. inline 関数
             if let Some(dict) = self.inline_fn_dict {
                 if let Some(func_def) = dict.get(interned) {
                     for d in &func_def.declarator.derived {
@@ -1589,6 +1604,41 @@ impl<'a> RustCodegen<'a> {
                                 return Some(UnifiedType::from_rust_str(&ty));
                             }
                             break;
+                        }
+                    }
+                }
+            }
+            // 3. 自家生成マクロ関数の type_env からパラメータ型を取得
+            if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
+                // THX 依存の場合、arg_index 0 は my_perl なのでスキップ
+                let macro_param_idx = if macro_info.is_thx_dependent {
+                    if arg_index == 0 {
+                        return Some(UnifiedType::from_rust_str("*mut PerlInterpreter"));
+                    }
+                    arg_index - 1
+                } else {
+                    arg_index
+                };
+                if let Some(param) = macro_info.params.get(macro_param_idx) {
+                    // 方法1: param_to_exprs 逆引き辞書
+                    if let Some(expr_ids) = macro_info.type_env.param_to_exprs.get(&param.name) {
+                        for expr_id in expr_ids {
+                            if let Some(constraints) = macro_info.type_env.expr_constraints.get(expr_id) {
+                                for c in constraints {
+                                    if !c.ty.is_void() {
+                                        let ty = c.ty.to_rust_string(self.interner);
+                                        return Some(UnifiedType::from_rust_str(&ty));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 方法2: MacroParam の ExprId
+                    let expr_id = param.expr_id();
+                    if let Some(constraints) = macro_info.type_env.expr_constraints.get(&expr_id) {
+                        if let Some(first) = constraints.first() {
+                            let ty = first.ty.to_rust_string(self.interner);
+                            return Some(UnifiedType::from_rust_str(&ty));
                         }
                     }
                 }
@@ -1849,6 +1899,18 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// Declaration からローカル変数の型のみ収集して current_param_types に追加
+    /// (current_local_names には追加しない — 未解決シンボル検出に影響しないように)
+    fn collect_decl_types(&mut self, decl: &Declaration) {
+        let base_type = self.decl_specs_to_rust(&decl.specs);
+        for init_decl in &decl.declarators {
+            if let Some(name) = init_decl.declarator.name {
+                let ty = self.apply_derived_to_type(&base_type, &init_decl.declarator.derived);
+                self.current_param_types.insert(name, UnifiedType::from_rust_str(&ty));
+            }
+        }
+    }
+
     /// バッファに行を書き込み
     fn writeln(&mut self, s: &str) {
         self.buffer.push_str(s);
@@ -1950,8 +2012,13 @@ impl<'a> RustCodegen<'a> {
                 } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
                     && !self.is_bool_expr_with_dict(expr)
                     && !is_string_bool_expr(&rust_expr) {
-                    // bool 関数: 式が bool でなければ != 0 で変換
-                    self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
+                    // bool 関数: 式がポインタなら .is_null() で変換
+                    if self.infer_type_hint(expr, info) == TypeHint::Pointer
+                        || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
+                        self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
+                    } else {
+                        self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
+                    }
                 } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
                     self.writeln(&format!("{}{}", body_indent, casted));
                 } else {
@@ -2216,21 +2283,29 @@ impl<'a> RustCodegen<'a> {
 
                 // ポインタ == 0 / != 0 → .is_null()
                 if matches!(op, BinOp::Eq | BinOp::Ne) {
-                    if lh == TypeHint::Pointer && is_null_literal(rhs) {
-                        let l = self.expr_to_rust(lhs, info);
-                        return if *op == BinOp::Eq {
-                            format!("{}.is_null()", l)
-                        } else {
-                            format!("!{}.is_null()", l)
-                        };
+                    if is_null_literal(rhs) {
+                        let is_ptr = lh == TypeHint::Pointer
+                            || self.infer_expr_type(lhs, info).is_some_and(|ut| ut.is_pointer());
+                        if is_ptr {
+                            let l = self.expr_to_rust(lhs, info);
+                            return if *op == BinOp::Eq {
+                                format!("{}.is_null()", l)
+                            } else {
+                                format!("!{}.is_null()", l)
+                            };
+                        }
                     }
-                    if rh == TypeHint::Pointer && is_null_literal(lhs) {
-                        let r = self.expr_to_rust(rhs, info);
-                        return if *op == BinOp::Eq {
-                            format!("{}.is_null()", r)
-                        } else {
-                            format!("!{}.is_null()", r)
-                        };
+                    if is_null_literal(lhs) {
+                        let is_ptr = rh == TypeHint::Pointer
+                            || self.infer_expr_type(rhs, info).is_some_and(|ut| ut.is_pointer());
+                        if is_ptr {
+                            let r = self.expr_to_rust(rhs, info);
+                            return if *op == BinOp::Eq {
+                                format!("{}.is_null()", r)
+                            } else {
+                                format!("!{}.is_null()", r)
+                            };
+                        }
                     }
                     // bool_expr != 0 → bool_expr, bool_expr == 0 → !bool_expr
                     if self.is_bool_expr_with_dict(lhs) {
@@ -2479,6 +2554,10 @@ impl<'a> RustCodegen<'a> {
                     // 内側が既に bool を返す式なら != 0 は不要
                     if self.is_bool_expr_with_dict(inner) {
                         e
+                    } else if self.infer_type_hint(inner, info) == TypeHint::Pointer
+                        || self.infer_expr_type(inner, info).is_some_and(|ut| ut.is_pointer()) {
+                        // ポインタ → bool: !ptr.is_null()
+                        format!("!{}.is_null()", e)
                     } else {
                         format!("(({}) != 0)", e)
                     }
@@ -2683,6 +2762,7 @@ impl<'a> RustCodegen<'a> {
                             parts.push(self.stmt_to_rust(stmt, info));
                         }
                         BlockItem::Decl(decl) => {
+                            self.collect_decl_types(decl);
                             let decl_str = self.decl_to_rust_let(decl, "");
                             for line in decl_str.lines() {
                                 let trimmed = line.trim();
@@ -3251,6 +3331,7 @@ impl<'a> RustCodegen<'a> {
         for item in &stmt.items {
             match item {
                 BlockItem::Decl(decl) => {
+                    self.collect_decl_types(decl);
                     result.push_str(&self.decl_to_rust_let(decl, indent));
                 }
                 BlockItem::Stmt(s) => {
@@ -3364,6 +3445,7 @@ impl<'a> RustCodegen<'a> {
                             result.push_str("\n");
                         }
                         BlockItem::Decl(decl) => {
+                            self.collect_decl_types(decl);
                             let nested_indent = format!("{}    ", indent);
                             result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
                         }
@@ -3394,6 +3476,7 @@ impl<'a> RustCodegen<'a> {
                             result.push_str(&format!("{}{};\n", nested_indent, self.expr_to_rust_inline(expr)));
                         }
                         ForInit::Decl(decl) => {
+                            self.collect_decl_types(decl);
                             result.push_str(&self.decl_to_rust_let(decl, &nested_indent));
                         }
                     }
@@ -3602,6 +3685,7 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 BlockItem::Decl(decl) => {
+                    self.collect_decl_types(decl);
                     // 宣言は直前の case に追加
                     if let Some(last) = cases.last_mut() {
                         last.body_stmts.push(self.decl_to_rust_let(decl, &body_indent));
@@ -3699,21 +3783,29 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Binary { op, lhs, rhs } => {
                 // ポインタ == 0 / != 0 → .is_null() (マクロ codegen と対称)
                 if matches!(op, BinOp::Eq | BinOp::Ne) {
-                    if self.is_pointer_expr_inline(lhs) && is_null_literal(rhs) {
-                        let l = self.expr_to_rust_inline(lhs);
-                        return if *op == BinOp::Eq {
-                            format!("{}.is_null()", l)
-                        } else {
-                            format!("!{}.is_null()", l)
-                        };
+                    if is_null_literal(rhs) {
+                        let is_ptr = self.is_pointer_expr_inline(lhs)
+                            || self.infer_expr_type_inline(lhs).is_some_and(|ut| ut.is_pointer());
+                        if is_ptr {
+                            let l = self.expr_to_rust_inline(lhs);
+                            return if *op == BinOp::Eq {
+                                format!("{}.is_null()", l)
+                            } else {
+                                format!("!{}.is_null()", l)
+                            };
+                        }
                     }
-                    if self.is_pointer_expr_inline(rhs) && is_null_literal(lhs) {
-                        let r = self.expr_to_rust_inline(rhs);
-                        return if *op == BinOp::Eq {
-                            format!("{}.is_null()", r)
-                        } else {
-                            format!("!{}.is_null()", r)
-                        };
+                    if is_null_literal(lhs) {
+                        let is_ptr = self.is_pointer_expr_inline(rhs)
+                            || self.infer_expr_type_inline(rhs).is_some_and(|ut| ut.is_pointer());
+                        if is_ptr {
+                            let r = self.expr_to_rust_inline(rhs);
+                            return if *op == BinOp::Eq {
+                                format!("{}.is_null()", r)
+                            } else {
+                                format!("!{}.is_null()", r)
+                            };
+                        }
                     }
                     // bool_expr != 0 → bool_expr, bool_expr == 0 → !bool_expr
                     if self.is_bool_expr_with_dict(lhs) {
@@ -3979,6 +4071,10 @@ impl<'a> RustCodegen<'a> {
                     // 内側が既に bool を返す式なら != 0 は不要
                     if self.is_bool_expr_with_dict(inner) {
                         e
+                    } else if self.is_pointer_expr_inline(inner)
+                        || self.infer_expr_type_inline(inner).is_some_and(|ut| ut.is_pointer()) {
+                        // ポインタ → bool: !ptr.is_null()
+                        format!("!{}.is_null()", e)
                     } else {
                         format!("(({}) != 0)", e)
                     }
@@ -4171,6 +4267,7 @@ impl<'a> RustCodegen<'a> {
                             parts.push(self.stmt_to_rust_inline(stmt, ""));
                         }
                         BlockItem::Decl(decl) => {
+                            self.collect_decl_types(decl);
                             let decl_str = self.decl_to_rust_let(decl, "");
                             for line in decl_str.lines() {
                                 let trimmed = line.trim();
