@@ -1346,16 +1346,53 @@ impl<'a> RustCodegen<'a> {
 
     /// TypeName から型文字列を取得（読み取り専用、整数型を正しく解決する版）
     fn type_name_to_type_str_readonly(&self, type_name: &crate::ast::TypeName) -> String {
-        let has_pointer = type_name.declarator.as_ref()
-            .map(|d| d.derived.iter().any(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer { .. })))
+        // ポインタの個数をカウント
+        let pointer_count = type_name.declarator.as_ref()
+            .map(|d| d.derived.iter().filter(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer(_))).count())
+            .unwrap_or(0);
+        // const チェック（最後のポインタ修飾子から）
+        let is_const_ptr = type_name.declarator.as_ref()
+            .and_then(|d| d.derived.iter().rev().find_map(|dd| {
+                if let crate::ast::DerivedDecl::Pointer(qualifiers) = dd {
+                    Some(qualifiers.is_const)
+                } else {
+                    None
+                }
+            }))
             .unwrap_or(false);
-        if has_pointer {
-            return "*mut unknown".to_string();
+        // 基本型を取得
+        let base = self.base_type_str_readonly(&type_name.specs.type_specs);
+        // ポインタをラップ
+        let mut result = base;
+        for _ in 0..pointer_count {
+            let prefix = if is_const_ptr { "*const " } else { "*mut " };
+            result = format!("{}{}", prefix, result);
         }
+        result
+    }
+
+    /// TypeSpec リストから基本型名を取得する（読み取り専用）
+    fn base_type_str_readonly(&self, type_specs: &[TypeSpec]) -> String {
         // typedef 名を優先
-        for spec in &type_name.specs.type_specs {
+        for spec in type_specs {
             if let TypeSpec::TypedefName(name) = spec {
                 return self.interner.get(*name).to_string();
+            }
+        }
+        // struct/union/enum 名
+        for spec in type_specs {
+            match spec {
+                TypeSpec::Struct(s) | TypeSpec::Union(s) => {
+                    if let Some(n) = &s.name {
+                        return self.interner.get(*n).to_string();
+                    }
+                }
+                TypeSpec::Enum(e) => {
+                    if let Some(n) = &e.name {
+                        return self.interner.get(*n).to_string();
+                    }
+                }
+                _ => {}
             }
         }
         let mut is_void = false;
@@ -1364,7 +1401,7 @@ impl<'a> RustCodegen<'a> {
         let mut is_short = false;
         let mut is_long = 0usize;
         let mut is_unsigned = false;
-        for spec in &type_name.specs.type_specs {
+        for spec in type_specs {
             match spec {
                 TypeSpec::Void => is_void = true,
                 TypeSpec::Char => is_char = true,
@@ -1377,7 +1414,7 @@ impl<'a> RustCodegen<'a> {
                 _ => {}
             }
         }
-        if is_void { return "()".to_string(); }
+        if is_void { return "c_void".to_string(); }
         if is_char { return if is_unsigned { "c_uchar".to_string() } else { "c_char".to_string() }; }
         if is_short { return if is_unsigned { "c_ushort".to_string() } else { "c_short".to_string() }; }
         if is_long >= 2 { return if is_unsigned { "c_ulonglong".to_string() } else { "c_longlong".to_string() }; }
@@ -1388,20 +1425,7 @@ impl<'a> RustCodegen<'a> {
 
     /// type_name_to_rust の読み取り専用版（&self で呼び出し可能）
     fn type_name_to_rust_readonly(&self, type_name: &crate::ast::TypeName) -> String {
-        // 簡易版：TypeSpec からポインタ型かどうかを判定
-        let has_pointer = type_name.declarator.as_ref()
-            .map(|d| d.derived.iter().any(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer { .. })))
-            .unwrap_or(false);
-        if has_pointer {
-            return "*mut unknown".to_string(); // ポインタ型であることが分かれば十分
-        }
-        // Bool チェック
-        for spec in &type_name.specs.type_specs {
-            if matches!(spec, TypeSpec::Bool) {
-                return "bool".to_string();
-            }
-        }
-        "int".to_string() // デフォルトは整数型
+        self.type_name_to_type_str_readonly(type_name)
     }
 
     /// 式の型を推定（macro 関数用）
@@ -2449,6 +2473,24 @@ impl<'a> RustCodegen<'a> {
                                 }
                             }
                         }
+                        // ビット演算で片方のみ型が判明している場合、他方をキャスト
+                        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+                            match (&lt, &rt) {
+                                (Some(lut), None) => {
+                                    let ls = lut.to_rust_string();
+                                    if let Some(nl) = normalize_integer_type(&ls) {
+                                        return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, nl);
+                                    }
+                                }
+                                (None, Some(rut)) => {
+                                    let rs = rut.to_rust_string();
+                                    if let Some(nr) = normalize_integer_type(&rs) {
+                                        return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         format!("({} {} {})", l, bin_op_to_rust(*op), r)
                     }
                     _ => format!("({} {} {})", l, bin_op_to_rust(*op), r)
@@ -2752,6 +2794,13 @@ impl<'a> RustCodegen<'a> {
                             if nl.is_some() && nr.is_some() && nl != nr {
                                 let target = nl.unwrap();
                                 return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, target, l);
+                            }
+                        }
+                        // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
+                        if let (Some(lut), None) = (&lt, &rt) {
+                            let ls = lut.to_rust_string();
+                            if let Some(nl) = normalize_integer_type(&ls) {
+                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
                         format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
@@ -3432,6 +3481,13 @@ impl<'a> RustCodegen<'a> {
                                     return format!("{}{} {} ({} as {});", indent, l, assign_op_to_rust(*op), r, target);
                                 }
                             }
+                            // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
+                            if let (Some(lut), None) = (&lt, &rt) {
+                                let ls = lut.to_rust_string();
+                                if let Some(nl) = normalize_integer_type(&ls) {
+                                    return format!("{}{} {} ({} as {});", indent, l, assign_op_to_rust(*op), r, nl);
+                                }
+                            }
                             format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
                         }
                         _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
@@ -3983,6 +4039,24 @@ impl<'a> RustCodegen<'a> {
                                 }
                             }
                         }
+                        // ビット演算で片方のみ型が判明している場合、他方をキャスト
+                        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+                            match (&lt, &rt) {
+                                (Some(lut), None) => {
+                                    let ls = lut.to_rust_string();
+                                    if let Some(nl) = normalize_integer_type(&ls) {
+                                        return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, nl);
+                                    }
+                                }
+                                (None, Some(rut)) => {
+                                    let rs = rut.to_rust_string();
+                                    if let Some(nr) = normalize_integer_type(&rs) {
+                                        return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         format!("({} {} {})", l, bin_op_to_rust(*op), r)
                     }
                     _ => format!("({} {} {})", l, bin_op_to_rust(*op), r)
@@ -4292,6 +4366,13 @@ impl<'a> RustCodegen<'a> {
                             if nl.is_some() && nr.is_some() && nl != nr {
                                 let target = nl.unwrap();
                                 return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, target, l);
+                            }
+                        }
+                        // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
+                        if let (Some(lut), None) = (&lt, &rt) {
+                            let ls = lut.to_rust_string();
+                            if let Some(nl) = normalize_integer_type(&ls) {
+                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
                         format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
