@@ -1306,7 +1306,7 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
             }
-            ExprKind::BitNot(inner) => self.infer_expr_type_inline(inner),
+            ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type_inline(inner),
             ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
@@ -1503,7 +1503,7 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
             }
-            ExprKind::BitNot(inner) => self.infer_expr_type(inner, info),
+            ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type(inner, info),
             ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
@@ -2462,6 +2462,17 @@ impl<'a> RustCodegen<'a> {
                                     return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
                                 }
                             }
+                            // float vs integer: 整数オペランドを float にキャスト
+                            if lut.is_float() && !rut.is_float() {
+                                let ls = lut.to_rust_string();
+                                let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
+                                return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, float_ty);
+                            }
+                            if rut.is_float() && !lut.is_float() {
+                                let rs = rut.to_rust_string();
+                                let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
+                                return format!("(({} as {}) {} {})", l, float_ty, bin_op_to_rust(*op), r);
+                            }
                             let ls = lut.to_rust_string();
                             let rs = rut.to_rust_string();
                             if let Some(wider) = wider_integer_type(&ls, &rs) {
@@ -2472,6 +2483,20 @@ impl<'a> RustCodegen<'a> {
                                     return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, wider);
                                 }
                             }
+                        }
+                        // float vs integer (片方のみ型が判明): 整数を float にキャスト
+                        match (&lt, &rt) {
+                            (Some(lut), None) if lut.is_float() => {
+                                let ls = lut.to_rust_string();
+                                let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
+                                return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, float_ty);
+                            }
+                            (None, Some(rut)) if rut.is_float() => {
+                                let rs = rut.to_rust_string();
+                                let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
+                                return format!("(({} as {}) {} {})", l, float_ty, bin_op_to_rust(*op), r);
+                            }
+                            _ => {}
                         }
                         // ビット演算で片方のみ型が判明している場合、他方をキャスト
                         if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
@@ -2755,6 +2780,27 @@ impl<'a> RustCodegen<'a> {
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
                 let t = self.expr_with_type_hint(then_expr, info, type_hint.as_deref());
                 let e = self.expr_with_type_hint(else_expr, info, type_hint.as_deref());
+                // if/else ブランチの型が異なる場合、wider type にキャスト
+                let tt = self.infer_expr_type(then_expr, info);
+                let et = self.infer_expr_type(else_expr, info);
+                if let (Some(tut), Some(eut)) = (&tt, &et) {
+                    let ts = tut.to_rust_string();
+                    let es = eut.to_rust_string();
+                    let nt = normalize_integer_type(&ts);
+                    let ne = normalize_integer_type(&es);
+                    if let (Some(tn), Some(en)) = (nt, ne) {
+                        if tn != en {
+                            if let Some(wider) = wider_integer_type(&ts, &es) {
+                                let norm_t = normalize_integer_type(&ts);
+                                if norm_t != Some(wider) {
+                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", cond_str, t, wider, e);
+                                } else {
+                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", cond_str, t, e, wider);
+                                }
+                            }
+                        }
+                    }
+                }
                 format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
@@ -4028,6 +4074,17 @@ impl<'a> RustCodegen<'a> {
                                     return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
                                 }
                             }
+                            // float vs integer: 整数オペランドを float にキャスト
+                            if lut.is_float() && !rut.is_float() {
+                                let ls = lut.to_rust_string();
+                                let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
+                                return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, float_ty);
+                            }
+                            if rut.is_float() && !lut.is_float() {
+                                let rs = rut.to_rust_string();
+                                let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
+                                return format!("(({} as {}) {} {})", l, float_ty, bin_op_to_rust(*op), r);
+                            }
                             let ls = lut.to_rust_string();
                             let rs = rut.to_rust_string();
                             if let Some(wider) = wider_integer_type(&ls, &rs) {
@@ -4038,6 +4095,20 @@ impl<'a> RustCodegen<'a> {
                                     return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, wider);
                                 }
                             }
+                        }
+                        // float vs integer (片方のみ型が判明): 整数を float にキャスト
+                        match (&lt, &rt) {
+                            (Some(lut), None) if lut.is_float() => {
+                                let ls = lut.to_rust_string();
+                                let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
+                                return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, float_ty);
+                            }
+                            (None, Some(rut)) if rut.is_float() => {
+                                let rs = rut.to_rust_string();
+                                let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
+                                return format!("(({} as {}) {} {})", l, float_ty, bin_op_to_rust(*op), r);
+                            }
+                            _ => {}
                         }
                         // ビット演算で片方のみ型が判明している場合、他方をキャスト
                         if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
@@ -4327,6 +4398,27 @@ impl<'a> RustCodegen<'a> {
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
                 let t = self.expr_with_type_hint_inline(then_expr, type_hint.as_deref());
                 let e = self.expr_with_type_hint_inline(else_expr, type_hint.as_deref());
+                // if/else ブランチの型が異なる場合、wider type にキャスト
+                let tt = self.infer_expr_type_inline(then_expr);
+                let et = self.infer_expr_type_inline(else_expr);
+                if let (Some(tut), Some(eut)) = (&tt, &et) {
+                    let ts = tut.to_rust_string();
+                    let es = eut.to_rust_string();
+                    let nt = normalize_integer_type(&ts);
+                    let ne = normalize_integer_type(&es);
+                    if let (Some(tn), Some(en)) = (nt, ne) {
+                        if tn != en {
+                            if let Some(wider) = wider_integer_type(&ts, &es) {
+                                let norm_t = normalize_integer_type(&ts);
+                                if norm_t != Some(wider) {
+                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", cond_str, t, wider, e);
+                                } else {
+                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", cond_str, t, e, wider);
+                                }
+                            }
+                        }
+                    }
+                }
                 format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
