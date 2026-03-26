@@ -1298,10 +1298,16 @@ impl<'a> RustCodegen<'a> {
                     | BinOp::Le | BinOp::Ge | BinOp::LogAnd | BinOp::LogOr => {
                         Some(UnifiedType::Bool)
                     }
-                    _ => None,
+                    // 算術演算: LHS の型を返す（Add, Sub, Mul, Div, Mod）
+                    _ => {
+                        let lt = self.infer_expr_type_inline(lhs);
+                        if lt.is_some() { return lt; }
+                        self.infer_expr_type_inline(rhs)
+                    }
                 }
             }
             ExprKind::BitNot(inner) => self.infer_expr_type_inline(inner),
+            ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
             ExprKind::Call { func, .. } => {
@@ -1465,10 +1471,16 @@ impl<'a> RustCodegen<'a> {
                     | BinOp::Le | BinOp::Ge | BinOp::LogAnd | BinOp::LogOr => {
                         Some(UnifiedType::Bool)
                     }
-                    _ => None,
+                    // 算術演算: LHS の型を返す（Add, Sub, Mul, Div, Mod）
+                    _ => {
+                        let lt = self.infer_expr_type(lhs, info);
+                        if lt.is_some() { return lt; }
+                        self.infer_expr_type(rhs, info)
+                    }
                 }
             }
             ExprKind::BitNot(inner) => self.infer_expr_type(inner, info),
+            ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
             ExprKind::Call { func, .. } => {
@@ -2350,7 +2362,11 @@ impl<'a> RustCodegen<'a> {
 
                 // ポインタ ± 整数 → .offset()
                 if matches!(op, BinOp::Add | BinOp::Sub) {
-                    if lh == TypeHint::Pointer && rh != TypeHint::Pointer {
+                    let lp = lh == TypeHint::Pointer
+                        || self.infer_expr_type(lhs, info).is_some_and(|ut| ut.is_pointer());
+                    let rp = rh == TypeHint::Pointer
+                        || self.infer_expr_type(rhs, info).is_some_and(|ut| ut.is_pointer());
+                    if lp && !rp {
                         let l = self.expr_to_rust(lhs, info);
                         let r = self.expr_to_rust(rhs, info);
                         return if *op == BinOp::Add {
@@ -2359,13 +2375,13 @@ impl<'a> RustCodegen<'a> {
                             format!("{}.offset(-({} as isize))", l, r)
                         };
                     }
-                    if rh == TypeHint::Pointer && lh != TypeHint::Pointer && *op == BinOp::Add {
+                    if rp && !lp && *op == BinOp::Add {
                         let l = self.expr_to_rust(lhs, info);
                         let r = self.expr_to_rust(rhs, info);
                         return format!("{}.offset({} as isize)", r, l);
                     }
                     // ポインタ - ポインタ → .offset_from()
-                    if lh == TypeHint::Pointer && rh == TypeHint::Pointer && *op == BinOp::Sub {
+                    if lp && rp && *op == BinOp::Sub {
                         let l = self.expr_to_rust(lhs, info);
                         let r = self.expr_to_rust(rhs, info);
                         return format!("{}.offset_from({})", l, r);
@@ -2403,10 +2419,25 @@ impl<'a> RustCodegen<'a> {
                         let r_bool = self.wrap_as_bool_condition_macro(rhs, &r, info);
                         format!("({} {} {})", l_bool, bin_op_to_rust(*op), r_bool)
                     }
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                         let lt = self.infer_expr_type(lhs, info);
                         let rt = self.infer_expr_type(rhs, info);
                         if let (Some(lut), Some(rut)) = (&lt, &rt) {
+                            // bool オペランドを整数にキャスト（C の暗黙変換）
+                            if rut.is_bool() {
+                                let ls = lut.to_rust_string();
+                                if let Some(nl) = normalize_integer_type(&ls) {
+                                    return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, nl);
+                                }
+                            }
+                            if lut.is_bool() {
+                                let rs = rut.to_rust_string();
+                                if let Some(nr) = normalize_integer_type(&rs) {
+                                    return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
+                                }
+                            }
                             let ls = lut.to_rust_string();
                             let rs = rut.to_rust_string();
                             if let Some(wider) = wider_integer_type(&ls, &rs) {
@@ -3309,6 +3340,24 @@ impl<'a> RustCodegen<'a> {
                 match init {
                     Initializer::Expr(expr) => {
                         let init_expr = self.expr_to_rust_inline(expr);
+                        // 宣言型と式の推論型が異なる整数型なら as キャストを挿入
+                        let init_expr = if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
+                            let decl_s = ty.clone();
+                            let expr_s = expr_ut.to_rust_string();
+                            let nd = normalize_integer_type(&decl_s);
+                            let ne = normalize_integer_type(&expr_s);
+                            if let (Some(d), Some(e)) = (nd, ne) {
+                                if !integer_types_compatible(d, e) {
+                                    format!("({} as {})", init_expr, d)
+                                } else {
+                                    init_expr
+                                }
+                            } else {
+                                init_expr
+                            }
+                        } else {
+                            init_expr
+                        };
                         result.push_str(&format!("{}let {}: {} = {};\n", indent, name, ty, init_expr));
                     }
                     Initializer::List(_) => {
@@ -3849,8 +3898,10 @@ impl<'a> RustCodegen<'a> {
                 }
                 // ポインタ ± 整数 → .offset() (マクロ codegen と対称)
                 if matches!(op, BinOp::Add | BinOp::Sub) {
-                    let lp = self.is_pointer_expr_inline(lhs);
-                    let rp = self.is_pointer_expr_inline(rhs);
+                    let lp = self.is_pointer_expr_inline(lhs)
+                        || self.infer_expr_type_inline(lhs).is_some_and(|ut| ut.is_pointer());
+                    let rp = self.is_pointer_expr_inline(rhs)
+                        || self.infer_expr_type_inline(rhs).is_some_and(|ut| ut.is_pointer());
                     if lp && !rp {
                         let l = self.expr_to_rust_inline(lhs);
                         let r = self.expr_to_rust_inline(rhs);
@@ -3902,10 +3953,25 @@ impl<'a> RustCodegen<'a> {
                         let r_bool = self.wrap_as_bool_condition_inline(rhs, &r);
                         format!("({} {} {})", l_bool, bin_op_to_rust(*op), r_bool)
                     }
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    | BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                    | BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
                         let lt = self.infer_expr_type_inline(lhs);
                         let rt = self.infer_expr_type_inline(rhs);
                         if let (Some(lut), Some(rut)) = (&lt, &rt) {
+                            // bool オペランドを整数にキャスト（C の暗黙変換）
+                            if rut.is_bool() {
+                                let ls = lut.to_rust_string();
+                                if let Some(nl) = normalize_integer_type(&ls) {
+                                    return format!("({} {} ({} as {}))", l, bin_op_to_rust(*op), r, nl);
+                                }
+                            }
+                            if lut.is_bool() {
+                                let rs = rut.to_rust_string();
+                                if let Some(nr) = normalize_integer_type(&rs) {
+                                    return format!("(({} as {}) {} {})", l, nr, bin_op_to_rust(*op), r);
+                                }
+                            }
                             let ls = lut.to_rust_string();
                             let rs = rut.to_rust_string();
                             if let Some(wider) = wider_integer_type(&ls, &rs) {

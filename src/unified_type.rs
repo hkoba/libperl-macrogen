@@ -258,10 +258,11 @@ impl UnifiedType {
     /// - `"*const c_char"` → `Pointer { inner: Char { signed: None }, is_const: true }`
     /// - `"c_int"` → `Int { signed: true, size: IntSize::Int }`
     pub fn from_rust_str(s: &str) -> Self {
-        // synのto_token_stream().to_string()は "* mut" のようにスペースを入れるため正規化
+        // synのto_token_stream().to_string()は "* mut" や " :: " のようにスペースを入れるため正規化
         let normalized = s
             .replace("* mut", "*mut")
-            .replace("* const", "*const");
+            .replace("* const", "*const")
+            .replace(" :: ", "::");
         let trimmed = normalized.trim();
 
         if trimmed.is_empty() {
@@ -302,8 +303,10 @@ impl UnifiedType {
     /// Rust の基本型をパース
     fn parse_rust_basic_type(s: &str) -> Self {
         // std:: プレフィックスを除去
+        // syn の to_token_stream() は ":: std" のようにスペースを入れるので trim が必要
         let s = s
             .strip_prefix("::")
+            .map(|s| s.trim_start())
             .unwrap_or(s);
         let s = s
             .strip_prefix("std::")
