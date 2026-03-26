@@ -371,6 +371,26 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
 
 
 /// 式が NULL リテラル（整数 0 または (void*)0 のような Cast）かどうか判定
+/// Perl の SV サブタイプ（GV, HV, AV, CV, IO 等）から SV へのポインタキャストかどうかを判定
+fn is_sv_subtype_cast(from: &UnifiedType, to: &UnifiedType) -> bool {
+    let from_name = match from.inner_type() {
+        Some(UnifiedType::Named(name)) => name.as_str(),
+        _ => return false,
+    };
+    let to_name = match to.inner_type() {
+        Some(UnifiedType::Named(name)) => name.as_str(),
+        _ => return false,
+    };
+    // SV サブタイプのリスト
+    const SV_SUBTYPES: &[&str] = &["GV", "HV", "AV", "CV", "IO", "p5rx", "REGEXP"];
+    // SV ↔ サブタイプ（双方向）
+    (SV_SUBTYPES.contains(&from_name) && to_name == "SV")
+        || (from_name == "SV" && SV_SUBTYPES.contains(&to_name))
+        // c_void ↔ 任意のポインタ
+        || to_name == "c_void"
+        || from_name == "c_void"
+}
+
 fn is_null_literal(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::IntLit(0) => true,
@@ -1845,7 +1865,7 @@ impl<'a> RustCodegen<'a> {
         result
     }
 
-    /// 整数型の幅が不一致の場合に `as` キャストを挿入する
+    /// 整数型の幅が不一致の場合、またはポインタ型のサブタイプ変換が必要な場合に `as` キャストを挿入する
     fn cast_integer_arg_if_needed(&self, arg_str: &str, actual_ty: Option<&str>, expected_ty: &str) -> String {
         if let Some(actual) = actual_ty {
             let na = normalize_integer_type(actual);
@@ -1853,6 +1873,22 @@ impl<'a> RustCodegen<'a> {
             if let (Some(a), Some(e)) = (na, ne) {
                 if !integer_types_compatible(a, e) {
                     return format!("({} as {})", arg_str, e);
+                }
+            }
+            // ポインタ型のサブタイプ変換 (e.g., *mut GV → *mut SV)
+            if actual != expected_ty {
+                let actual_ut = UnifiedType::from_rust_str(actual);
+                let expected_ut = UnifiedType::from_rust_str(expected_ty);
+                if actual_ut.is_pointer() && expected_ut.is_pointer() {
+                    if is_sv_subtype_cast(&actual_ut, &expected_ut) {
+                        // const/mut を保持: actual が const なら *const SV にキャスト
+                        let cast_ty = if actual.contains("*const") {
+                            expected_ty.replace("*mut", "*const")
+                        } else {
+                            expected_ty.to_string()
+                        };
+                        return format!("({} as {})", arg_str, cast_ty);
+                    }
                 }
             }
         }
