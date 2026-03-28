@@ -3238,7 +3238,15 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(lhs, info)
                 };
-                let r = self.expr_to_rust(rhs, info);
+                let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
+                    if self.infer_expr_type(lhs, info).is_some_and(|ut| ut.is_const_pointer()) {
+                        "std::ptr::null()".to_string()
+                    } else {
+                        "std::ptr::null_mut()".to_string()
+                    }
+                } else {
+                    self.expr_to_rust(rhs, info)
+                };
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
                     AssignOp::AddAssign | AssignOp::SubAssign => {
@@ -3930,7 +3938,17 @@ impl<'a> RustCodegen<'a> {
                     } else {
                         self.expr_to_rust_inline(lhs)
                     };
-                    let r = self.expr_to_rust_inline(rhs);
+                    let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
+                        // null リテラルは代入先の型に合わせて null_mut()/null() を生成
+                        // Rust は代入先から型推論できるので型注釈不要
+                        if self.infer_expr_type_inline(lhs).is_some_and(|ut| ut.is_const_pointer()) {
+                            "std::ptr::null()".to_string()
+                        } else {
+                            "std::ptr::null_mut()".to_string()
+                        }
+                    } else {
+                        self.expr_to_rust_inline(rhs)
+                    };
                     match op {
                         AssignOp::Assign => format!("{}{} = {};", indent, l, r),
                         AssignOp::AddAssign | AssignOp::SubAssign => {
@@ -4863,7 +4881,15 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust_inline(lhs)
                 };
-                let r = self.expr_to_rust_inline(rhs);
+                let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
+                    if self.infer_expr_type_inline(lhs).is_some_and(|ut| ut.is_const_pointer()) {
+                        "std::ptr::null()".to_string()
+                    } else {
+                        "std::ptr::null_mut()".to_string()
+                    }
+                } else {
+                    self.expr_to_rust_inline(rhs)
+                };
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
                     AssignOp::AddAssign | AssignOp::SubAssign => {
