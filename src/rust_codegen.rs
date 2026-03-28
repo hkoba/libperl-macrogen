@@ -1135,6 +1135,8 @@ pub struct RustCodegen<'a> {
     const_pointer_positions: HashSet<usize>,
     /// このマクロが bool を返すと判定されたか
     is_bool_return: bool,
+    /// codegen で bool を返すと判定されたマクロの集合（呼び出し先の bool 判定用）
+    bool_return_macros: HashSet<InternedStr>,
 }
 
 /// コード生成全体を管理する構造体
@@ -1197,6 +1199,7 @@ impl<'a> RustCodegen<'a> {
             dump_ast_for: None,
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
+            bool_return_macros: HashSet::new(),
         }
     }
 
@@ -1212,9 +1215,10 @@ impl<'a> RustCodegen<'a> {
         self
     }
 
-    /// bool 戻り値フラグを設定
-    pub fn with_bool_return(mut self, is_bool: bool) -> Self {
+    /// bool 戻り値フラグと bool マクロ集合を設定
+    pub fn with_bool_return(mut self, is_bool: bool, bool_macros: HashSet<InternedStr>) -> Self {
         self.is_bool_return = is_bool;
+        self.bool_return_macros = bool_macros;
         self
     }
 
@@ -1455,6 +1459,23 @@ impl<'a> RustCodegen<'a> {
         if self.is_bool_expr_with_dict(expr) {
             return expr_str.to_string();
         }
+        // パラメータが bool 型なら != 0 不要
+        if let ExprKind::Ident(name) = &expr.kind {
+            if let Some(ut) = self.current_param_types.get(name) {
+                if ut.is_bool() {
+                    return expr_str.to_string();
+                }
+            }
+        }
+        // フィールドが bool 型なら != 0 不要
+        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
+            let member_str = self.interner.get(*member);
+            if let Some(ut) = self.field_type_map.get(member_str) {
+                if ut.is_bool() {
+                    return expr_str.to_string();
+                }
+            }
+        }
         // __builtin_expect(cond, val) → cond の型をチェック
         if let ExprKind::Call { func, args, .. } = &expr.kind {
             if let ExprKind::Ident(name) = &func.kind {
@@ -1489,6 +1510,15 @@ impl<'a> RustCodegen<'a> {
         // bool 型変数の検出
         if let ExprKind::Ident(name) = &expr.kind {
             if let Some(ut) = self.current_param_types.get(name) {
+                if ut.is_bool() {
+                    return expr_str.to_string();
+                }
+            }
+        }
+        // フィールドが bool 型なら != 0 不要
+        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
+            let member_str = self.interner.get(*member);
+            if let Some(ut) = self.field_type_map.get(member_str) {
                 if ut.is_bool() {
                     return expr_str.to_string();
                 }
@@ -2079,6 +2109,10 @@ impl<'a> RustCodegen<'a> {
         // 関数呼び出しの戻り値型が bool かチェック
         if let ExprKind::Call { func, .. } = &expr.kind {
             if let ExprKind::Ident(name) = &func.kind {
+                // 0. codegen で bool と判定されたマクロ
+                if self.bool_return_macros.contains(name) {
+                    return true;
+                }
                 let func_name = self.interner.get(*name);
                 // 1. bindings.rs の関数
                 if let Some(ret_ut) = self.get_callee_return_type(func_name) {
@@ -2101,6 +2135,12 @@ impl<'a> RustCodegen<'a> {
                         }
                     }
                 }
+            }
+        }
+        // MacroCall の場合も bool_return_macros をチェック
+        if let ExprKind::MacroCall { name, .. } = &expr.kind {
+            if self.bool_return_macros.contains(name) {
+                return true;
             }
         }
         false
@@ -2449,22 +2489,22 @@ impl<'a> RustCodegen<'a> {
 
     /// パラメータリストを構築（型情報付き）
     /// type/cast パラメータは型パラメータなので値引数からは除外する
+    /// 副作用: 各パラメータの型を current_param_types に登録する
     fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
         let mut_params = collect_mut_params(&info.parse_result, &info.params);
-        info.params.iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                // type/cast パラメータは値引数ではないので除外
-                !info.generic_type_params.contains_key(&(*i as i32))
-            })
-            .map(|(i, p)| {
-                let name = escape_rust_keyword(self.interner.get(p.name));
-                let ty = self.get_param_type(p, info, i);
-                let mut_prefix = if mut_params.contains(&p.name) { "mut " } else { "" };
-                format!("{}{}: {}", mut_prefix, name, ty)
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        let mut parts = Vec::new();
+        for (i, p) in info.params.iter().enumerate() {
+            if info.generic_type_params.contains_key(&(i as i32)) {
+                continue;
+            }
+            let name = escape_rust_keyword(self.interner.get(p.name));
+            let ty = self.get_param_type(p, info, i);
+            // current_param_types に登録（bool 判定等で使用）
+            self.current_param_types.insert(p.name, UnifiedType::from_rust_str(&ty));
+            let mut_prefix = if mut_params.contains(&p.name) { "mut " } else { "" };
+            parts.push(format!("{}{}: {}", mut_prefix, name, ty));
+        }
+        parts.join(", ")
     }
 
     /// パラメータの型を取得
@@ -5436,7 +5476,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_const_pointer_positions(const_positions)
-                        .with_bool_return(is_bool);
+                        .with_bool_return(is_bool, self.bool_return_macros.clone());
                     let generated = codegen.generate_macro(info);
 
                     if generated.has_unresolved_names() {
