@@ -340,6 +340,31 @@ fn is_boolean_expr_recursive(expr: &Expr, interner: &StringInterner) -> bool {
     false
 }
 
+/// コンテキスト付き bool 式判定: 呼び出し先マクロ/外部関数の戻り値型も考慮
+fn is_boolean_expr_with_context(
+    expr: &Expr,
+    bool_return_macros: &HashSet<InternedStr>,
+    bool_return_externals: &HashSet<InternedStr>,
+) -> bool {
+    if is_boolean_expr(expr) {
+        return true;
+    }
+    match &expr.kind {
+        ExprKind::Call { func, .. } => {
+            if let ExprKind::Ident(name) = &func.kind {
+                return bool_return_macros.contains(name)
+                    || bool_return_externals.contains(name);
+            }
+        }
+        ExprKind::MacroCall { name, .. } => {
+            return bool_return_macros.contains(name)
+                || bool_return_externals.contains(name);
+        }
+        _ => {}
+    }
+    false
+}
+
 /// TypeRepr がポインタ型かどうか判定
 fn is_type_repr_pointer(ty: &crate::type_repr::TypeRepr) -> bool {
     use crate::type_repr::TypeRepr;
@@ -1108,6 +1133,8 @@ pub struct RustCodegen<'a> {
     dump_ast_for: Option<String>,
     /// const ポインタに変換可能なパラメータの引数位置集合
     const_pointer_positions: HashSet<usize>,
+    /// このマクロが bool を返すと判定されたか
+    is_bool_return: bool,
 }
 
 /// コード生成全体を管理する構造体
@@ -1133,6 +1160,8 @@ pub struct CodegenDriver<'a, W: Write> {
     generatable_macros: HashSet<InternedStr>,
     /// const ポインタに変換可能なマクロパラメータ: マクロ名 → const パラメータの引数位置集合
     const_pointer_params: HashMap<InternedStr, HashSet<usize>>,
+    /// bool を返すと判定されたマクロの集合
+    bool_return_macros: HashSet<InternedStr>,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -1167,6 +1196,7 @@ impl<'a> RustCodegen<'a> {
             field_type_map: build_field_type_map(rust_decl_dict),
             dump_ast_for: None,
             const_pointer_positions: HashSet::new(),
+            is_bool_return: false,
         }
     }
 
@@ -1179,6 +1209,12 @@ impl<'a> RustCodegen<'a> {
     /// const ポインタ位置を設定
     pub fn with_const_pointer_positions(mut self, positions: HashSet<usize>) -> Self {
         self.const_pointer_positions = positions;
+        self
+    }
+
+    /// bool 戻り値フラグを設定
+    pub fn with_bool_return(mut self, is_bool: bool) -> Self {
+        self.is_bool_return = is_bool;
         self
     }
 
@@ -2493,12 +2529,13 @@ impl<'a> RustCodegen<'a> {
             return generic_name.clone();
         }
 
+        // 依存順パスで bool と判定されていればそのまま bool を返す
+        if self.is_bool_return {
+            return "bool".to_string();
+        }
+
         match &info.parse_result {
-            ParseResult::Expression(expr) => {
-                // 本体式が bool を返すなら戻り値型は bool
-                if is_boolean_expr(expr) {
-                    return "bool".to_string();
-                }
+            ParseResult::Expression(_) => {
                 if let Some(ty) = info.get_return_type() {
                     return self.type_repr_to_rust(ty);
                 }
@@ -4944,6 +4981,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             successfully_generated_inlines: HashSet::new(),
             generatable_macros: HashSet::new(),
             const_pointer_params: HashMap::new(),
+            bool_return_macros: HashSet::new(),
         }
     }
 
@@ -5331,6 +5369,24 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // const_params を self に保存（generate_macro_function で参照）
         self.const_pointer_params = callee_const_params;
 
+        // ── bool 戻り値型解析パス ──
+        // 依存順（リーフ先頭）で各マクロの戻り値が bool かを判定
+        let bool_return_externals = self.seed_bool_return_externals(result);
+        let mut bool_return_macros: HashSet<InternedStr> = HashSet::new();
+
+        for &name in &sorted_names {
+            if let Some(info) = result.infer_ctx.macros.get(&name) {
+                if !info.is_parseable() || info.calls_unavailable { continue; }
+                if let ParseResult::Expression(expr) = &info.parse_result {
+                    if is_boolean_expr_with_context(expr, &bool_return_macros, &bool_return_externals) {
+                        bool_return_macros.insert(name);
+                    }
+                }
+            }
+        }
+
+        self.bool_return_macros = bool_return_macros;
+
         // 正常生成されたマクロを追跡
         let mut successfully_generated: HashSet<InternedStr> = HashSet::new();
 
@@ -5376,9 +5432,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     // 新しい RustCodegen を使ってマクロを生成
                     let const_positions = self.const_pointer_params.get(&name)
                         .cloned().unwrap_or_default();
+                    let is_bool = self.bool_return_macros.contains(&name);
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
-                        .with_const_pointer_positions(const_positions);
+                        .with_const_pointer_positions(const_positions)
+                        .with_bool_return(is_bool);
                     let generated = codegen.generate_macro(info);
 
                     if generated.has_unresolved_names() {
@@ -5511,6 +5569,30 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
         }
         false
+    }
+
+    /// bindings.rs/inline関数 から bool を返す関数名を収集
+    fn seed_bool_return_externals(&self, result: &InferResult) -> HashSet<InternedStr> {
+        let mut externals = HashSet::new();
+        // bindings.rs の関数で戻り値が bool のもの
+        if let Some(ref dict) = result.rust_decl_dict {
+            for (name, func) in &dict.fns {
+                if func.ret_ty.as_deref() == Some("bool") {
+                    if let Some(name_id) = self.interner.lookup(name) {
+                        externals.insert(name_id);
+                    }
+                }
+            }
+        }
+        // inline 関数で戻り値が Bool のもの
+        for (name_id, fn_info) in result.inline_fn_dict.iter() {
+            let has_bool_return = fn_info.specs.type_specs.iter()
+                .any(|ts| matches!(ts, TypeSpec::Bool));
+            if has_bool_return {
+                externals.insert(*name_id);
+            }
+        }
+        externals
     }
 
     fn topological_sort_macros(
