@@ -2494,7 +2494,11 @@ impl<'a> RustCodegen<'a> {
         }
 
         match &info.parse_result {
-            ParseResult::Expression(_) => {
+            ParseResult::Expression(expr) => {
+                // 本体式が bool を返すなら戻り値型は bool
+                if is_boolean_expr(expr) {
+                    return "bool".to_string();
+                }
                 if let Some(ty) = info.get_return_type() {
                     return self.type_repr_to_rust(ty);
                 }
