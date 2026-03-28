@@ -2525,9 +2525,24 @@ impl<'a> RustCodegen<'a> {
         // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
         // void 以外の型を優先的に選択する
         if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param_name) {
+            // 優先パス: bindings.rs の FnParam 制約を最優先
             for expr_id in expr_ids {
                 if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    // void 以外の型を探す
+                    for c in constraints {
+                        if c.ty.is_fn_param_source() && !c.ty.is_void() {
+                            if should_be_const {
+                                let mut ty = c.ty.clone();
+                                ty.make_outer_pointer_const();
+                                return self.type_repr_to_rust(&ty);
+                            }
+                            return self.type_repr_to_rust(&c.ty);
+                        }
+                    }
+                }
+            }
+            // フォールバック: void 以外の任意の型制約
+            for expr_id in expr_ids {
+                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
                     for c in constraints {
                         if !c.ty.is_void() {
                             if should_be_const {

@@ -687,6 +687,11 @@ impl TypeRepr {
     ///
     /// ポインタを含まない void 型の場合に true を返す。
     /// `void *` は false を返す（有効なポインタ型のため）。
+    /// bindings.rs の FnParam ソースかどうか
+    pub fn is_fn_param_source(&self) -> bool {
+        matches!(self, TypeRepr::RustType { source: RustTypeSource::FnParam { .. }, .. })
+    }
+
     pub fn is_void(&self) -> bool {
         match self {
             TypeRepr::CType { specs, derived, .. } => {
