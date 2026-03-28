@@ -712,6 +712,15 @@ impl MacroInferContext {
             }
         };
 
+        // _CANNOT を含むマクロは生成抑制（fakesdio.h/nostdio.h 由来）
+        let has_cannot = expanded_tokens.iter().any(|t| {
+            matches!(&t.kind, TokenKind::StringLit(s) if s == b"CANNOT")
+        });
+        if has_cannot {
+            info.calls_unavailable = true;
+            return (info, has_pasting_direct, false);
+        }
+
         // assert_(cond) の後にカンマを注入（パースエラー防止）
         let expanded_tokens = inject_comma_after_assert_underscore(
             &expanded_tokens,

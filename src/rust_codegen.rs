@@ -371,6 +371,26 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
 
 
 /// 式が NULL リテラル（整数 0 または (void*)0 のような Cast）かどうか判定
+/// assert(expr || !"message") パターンの RHS からメッセージ文字列を抽出
+fn extract_assert_message(expr: &Expr) -> Option<String> {
+    if let ExprKind::LogNot(inner) = &expr.kind {
+        if let ExprKind::StringLit(bytes) = &inner.kind {
+            return Some(String::from_utf8_lossy(bytes).into_owned());
+        }
+    }
+    None
+}
+
+/// assert 条件が `real_cond || !"message"` パターンかどうかを分解する
+fn decompose_assert_with_message(condition: &Expr) -> Option<(&Expr, String)> {
+    if let ExprKind::Binary { op: BinOp::LogOr, lhs, rhs } = &condition.kind {
+        if let Some(msg) = extract_assert_message(rhs) {
+            return Some((lhs, msg));
+        }
+    }
+    None
+}
+
 /// Perl の SV サブタイプ（GV, HV, AV, CV, IO 等）から SV へのポインタキャストかどうかを判定
 fn is_sv_subtype_cast(from: &UnifiedType, to: &UnifiedType) -> bool {
     let from_name = match from.inner_type() {
@@ -2891,13 +2911,20 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             ExprKind::Assert { kind, condition } => {
-                let cond = self.expr_to_rust(condition, info);
-                let assert_expr = if is_boolean_expr(condition) {
-                    format!("assert!({})", cond)
-                } else if self.infer_type_hint(condition, info) == TypeHint::Pointer {
-                    format!("assert!(!{}.is_null())", cond)
+                // assert(expr || !"message") パターンの検出
+                let assert_expr = if let Some((real_cond, msg)) = decompose_assert_with_message(condition) {
+                    let c = self.expr_to_rust(real_cond, info);
+                    let cond_str = self.wrap_as_bool_condition_macro(real_cond, &c, info);
+                    format!("assert!({}, \"{}\")", cond_str, msg)
                 } else {
-                    format!("assert!(({}) != 0)", cond)
+                    let cond = self.expr_to_rust(condition, info);
+                    if is_boolean_expr(condition) {
+                        format!("assert!({})", cond)
+                    } else if self.infer_type_hint(condition, info) == TypeHint::Pointer {
+                        format!("assert!(!{}.is_null())", cond)
+                    } else {
+                        format!("assert!(({}) != 0)", cond)
+                    }
                 };
                 match kind {
                     AssertKind::Assert => assert_expr,
@@ -4509,13 +4536,20 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             ExprKind::Assert { kind, condition } => {
-                let cond = self.expr_to_rust_inline(condition);
-                let assert_expr = if is_boolean_expr(condition) {
-                    format!("assert!({})", cond)
-                } else if self.is_pointer_expr_inline(condition) {
-                    format!("assert!(!{}.is_null())", cond)
+                // assert(expr || !"message") パターンの検出
+                let assert_expr = if let Some((real_cond, msg)) = decompose_assert_with_message(condition) {
+                    let c = self.expr_to_rust_inline(real_cond);
+                    let cond_str = self.wrap_as_bool_condition_inline(real_cond, &c);
+                    format!("assert!({}, \"{}\")", cond_str, msg)
                 } else {
-                    format!("assert!(({}) != 0)", cond)
+                    let cond = self.expr_to_rust_inline(condition);
+                    if is_boolean_expr(condition) {
+                        format!("assert!({})", cond)
+                    } else if self.is_pointer_expr_inline(condition) {
+                        format!("assert!(!{}.is_null())", cond)
+                    } else {
+                        format!("assert!(({}) != 0)", cond)
+                    }
                 };
                 match kind {
                     AssertKind::Assert => assert_expr,
