@@ -497,6 +497,252 @@ fn wider_integer_type(a: &str, b: &str) -> Option<&'static str> {
 }
 
 /// マクロ本体を走査し、`&mut param` や代入先として使用されるパラメータを検出する
+/// ポインタパラメータが *mut である必要があるかを判定する。
+/// callee_const_params: 呼び出し先マクロで *const に確定したパラメータ情報
+///   key = マクロ名(InternedStr), value = const パラメータの引数位置集合
+fn collect_must_mut_pointer_params(
+    parse_result: &ParseResult,
+    params: &[MacroParam],
+    callee_const_params: &HashMap<InternedStr, HashSet<usize>>,
+) -> HashSet<InternedStr> {
+    let param_names: HashSet<InternedStr> = params.iter().map(|p| p.name).collect();
+    let mut result = HashSet::new();
+    match parse_result {
+        ParseResult::Expression(expr) => {
+            collect_must_mut_from_expr(expr, &param_names, callee_const_params, &mut result);
+        }
+        ParseResult::Statement(items) => {
+            for item in items {
+                if let BlockItem::Stmt(stmt) = item {
+                    collect_must_mut_from_stmt(stmt, &param_names, callee_const_params, &mut result);
+                }
+            }
+        }
+        ParseResult::Unparseable(_) => {}
+    }
+    result
+}
+
+fn collect_must_mut_from_stmt(
+    stmt: &Stmt,
+    params: &HashSet<InternedStr>,
+    callee_const: &HashMap<InternedStr, HashSet<usize>>,
+    result: &mut HashSet<InternedStr>,
+) {
+    match stmt {
+        Stmt::Expr(Some(expr), _) | Stmt::Return(Some(expr), _) => {
+            collect_must_mut_from_expr(expr, params, callee_const, result);
+        }
+        Stmt::Compound(compound) => {
+            for item in &compound.items {
+                match item {
+                    BlockItem::Stmt(s) => collect_must_mut_from_stmt(s, params, callee_const, result),
+                    BlockItem::Decl(decl) => {
+                        for init_decl in &decl.declarators {
+                            if let Some(Initializer::Expr(init)) = &init_decl.init {
+                                collect_must_mut_from_expr(init, params, callee_const, result);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::If { cond, then_stmt, else_stmt, .. } => {
+            collect_must_mut_from_expr(cond, params, callee_const, result);
+            collect_must_mut_from_stmt(then_stmt, params, callee_const, result);
+            if let Some(e) = else_stmt {
+                collect_must_mut_from_stmt(e, params, callee_const, result);
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
+            collect_must_mut_from_expr(cond, params, callee_const, result);
+            collect_must_mut_from_stmt(body, params, callee_const, result);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(ForInit::Expr(e)) = init { collect_must_mut_from_expr(e, params, callee_const, result); }
+            if let Some(e) = cond { collect_must_mut_from_expr(e, params, callee_const, result); }
+            if let Some(e) = step { collect_must_mut_from_expr(e, params, callee_const, result); }
+            collect_must_mut_from_stmt(body, params, callee_const, result);
+        }
+        Stmt::Switch { expr, body, .. } => {
+            collect_must_mut_from_expr(expr, params, callee_const, result);
+            collect_must_mut_from_stmt(body, params, callee_const, result);
+        }
+        _ => {}
+    }
+}
+
+fn collect_must_mut_from_expr(
+    expr: &Expr,
+    params: &HashSet<InternedStr>,
+    callee_const: &HashMap<InternedStr, HashSet<usize>>,
+    result: &mut HashSet<InternedStr>,
+) {
+    match &expr.kind {
+        // *param = expr, param->field = expr → param must be *mut
+        ExprKind::Assign { lhs, rhs, .. } => {
+            mark_lvalue_mut(lhs, params, result);
+            collect_must_mut_from_expr(lhs, params, callee_const, result);
+            collect_must_mut_from_expr(rhs, params, callee_const, result);
+        }
+        // ++(*param), (*param)++ 等
+        ExprKind::PreInc(inner) | ExprKind::PreDec(inner) |
+        ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
+            mark_lvalue_mut(inner, params, result);
+            collect_must_mut_from_expr(inner, params, callee_const, result);
+        }
+        // func(param) — 呼び出し先の引数 mutability をチェック
+        ExprKind::Call { func, args } => {
+            // 呼び出し先マクロの const 情報をチェック
+            if let ExprKind::Ident(func_name) = &func.kind {
+                let const_arg_positions = callee_const.get(func_name);
+                for (i, arg) in args.iter().enumerate() {
+                    if let ExprKind::Ident(arg_name) = &arg.kind {
+                        if params.contains(arg_name) {
+                            // 呼び出し先の i 番目が const なら mut 不要
+                            let is_const_at_callee = const_arg_positions
+                                .map_or(false, |positions| positions.contains(&i));
+                            if !is_const_at_callee {
+                                // 呼び出し先が const でない（or 情報なし）→ mut 必要
+                                result.insert(*arg_name);
+                            }
+                        }
+                    }
+                    collect_must_mut_from_expr(arg, params, callee_const, result);
+                }
+            } else {
+                for arg in args {
+                    collect_must_mut_from_expr(arg, params, callee_const, result);
+                }
+            }
+            collect_must_mut_from_expr(func, params, callee_const, result);
+        }
+        // 再帰
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Comma { lhs, rhs } => {
+            collect_must_mut_from_expr(lhs, params, callee_const, result);
+            collect_must_mut_from_expr(rhs, params, callee_const, result);
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            collect_must_mut_from_expr(cond, params, callee_const, result);
+            collect_must_mut_from_expr(then_expr, params, callee_const, result);
+            collect_must_mut_from_expr(else_expr, params, callee_const, result);
+        }
+        // MacroCall(name, args) — 呼び出し先マクロの引数 mutability をチェック
+        ExprKind::MacroCall { name, args, expanded, .. } => {
+            let const_arg_positions = callee_const.get(name);
+            for (i, arg) in args.iter().enumerate() {
+                if let ExprKind::Ident(arg_name) = &arg.kind {
+                    if params.contains(arg_name) {
+                        let is_const_at_callee = const_arg_positions
+                            .map_or(false, |positions| positions.contains(&i));
+                        if !is_const_at_callee {
+                            result.insert(*arg_name);
+                        }
+                    }
+                }
+                collect_must_mut_from_expr(arg, params, callee_const, result);
+            }
+            collect_must_mut_from_expr(expanded, params, callee_const, result);
+        }
+        ExprKind::Deref(inner) | ExprKind::UnaryMinus(inner) | ExprKind::BitNot(inner) |
+        ExprKind::LogNot(inner) | ExprKind::AddrOf(inner) |
+        ExprKind::Cast { expr: inner, .. } => {
+            collect_must_mut_from_expr(inner, params, callee_const, result);
+        }
+        ExprKind::Member { expr: inner, .. } | ExprKind::PtrMember { expr: inner, .. } => {
+            collect_must_mut_from_expr(inner, params, callee_const, result);
+        }
+        ExprKind::Sizeof(inner) => {
+            collect_must_mut_from_expr(inner, params, callee_const, result);
+        }
+        ExprKind::Assert { condition, .. } => {
+            collect_must_mut_from_expr(condition, params, callee_const, result);
+        }
+        ExprKind::StmtExpr(compound) => {
+            for item in &compound.items {
+                match item {
+                    BlockItem::Stmt(s) => collect_must_mut_from_stmt(s, params, callee_const, result),
+                    BlockItem::Decl(decl) => {
+                        for init_decl in &decl.declarators {
+                            if let Some(Initializer::Expr(init)) = &init_decl.init {
+                                collect_must_mut_from_expr(init, params, callee_const, result);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 代入先の式に含まれるパラメータを must-mut としてマークする
+fn mark_lvalue_mut(expr: &Expr, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
+    match &expr.kind {
+        // *param = ... → param must be *mut
+        ExprKind::Deref(inner) => {
+            if let ExprKind::Ident(name) = &inner.kind {
+                if params.contains(name) {
+                    result.insert(*name);
+                }
+            }
+            // (*param).field の場合も再帰的にチェック
+            mark_lvalue_mut(inner, params, result);
+        }
+        // param->field = ... → param must be *mut
+        ExprKind::PtrMember { expr: inner, .. } => {
+            if let ExprKind::Ident(name) = &inner.kind {
+                if params.contains(name) {
+                    result.insert(*name);
+                }
+            }
+            mark_lvalue_mut(inner, params, result);
+        }
+        // (*param).field = ... → param must be *mut
+        ExprKind::Member { expr: inner, .. } => {
+            mark_lvalue_mut(inner, params, result);
+        }
+        // (SomeType*)param → キャスト先が *mut ならパラメータも mut
+        ExprKind::Cast { expr: inner, type_name } => {
+            if let ExprKind::Ident(name) = &inner.kind {
+                if params.contains(name) {
+                    // キャスト先がポインタで non-const なら mut 必要
+                    let has_non_const_ptr = type_name.declarator.as_ref()
+                        .map(|d| d.derived.iter().any(|dd| {
+                            matches!(dd, crate::ast::DerivedDecl::Pointer(q) if !q.is_const)
+                        }))
+                        .unwrap_or(false);
+                    if has_non_const_ptr {
+                        result.insert(*name);
+                    }
+                }
+            }
+            mark_lvalue_mut(inner, params, result);
+        }
+        // MacroCall(name, expanded) → expanded 形式で lvalue を再帰チェック
+        ExprKind::MacroCall { expanded, args, .. } => {
+            mark_lvalue_mut(expanded, params, result);
+            // 引数にパラメータが直接渡されている場合もチェック
+            for arg in args {
+                mark_lvalue_mut(arg, params, result);
+            }
+        }
+        // Call の lvalue 使用: func(param) が lvalue として使われる場合
+        // マクロ関数の呼び出し結果が lvalue なら、引数パラメータは *mut 必要
+        ExprKind::Call { args, .. } => {
+            for arg in args {
+                if let ExprKind::Ident(name) = &arg.kind {
+                    if params.contains(name) {
+                        result.insert(*name);
+                    }
+                }
+                mark_lvalue_mut(arg, params, result);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_mut_params(parse_result: &ParseResult, params: &[MacroParam]) -> HashSet<InternedStr> {
     let param_names: HashSet<InternedStr> = params.iter().map(|p| p.name).collect();
     let mut result = HashSet::new();
@@ -860,6 +1106,8 @@ pub struct RustCodegen<'a> {
     field_type_map: HashMap<String, UnifiedType>,
     /// AST ダンプ対象関数名（デバッグ用）
     dump_ast_for: Option<String>,
+    /// const ポインタに変換可能なパラメータの引数位置集合
+    const_pointer_positions: HashSet<usize>,
 }
 
 /// コード生成全体を管理する構造体
@@ -883,6 +1131,8 @@ pub struct CodegenDriver<'a, W: Write> {
     successfully_generated_inlines: HashSet<InternedStr>,
     /// 生成可能と予測されるマクロの集合（inline→macro カスケード検出用）
     generatable_macros: HashSet<InternedStr>,
+    /// const ポインタに変換可能なマクロパラメータ: マクロ名 → const パラメータの引数位置集合
+    const_pointer_params: HashMap<InternedStr, HashSet<usize>>,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -916,12 +1166,19 @@ impl<'a> RustCodegen<'a> {
             inline_fn_dict,
             field_type_map: build_field_type_map(rust_decl_dict),
             dump_ast_for: None,
+            const_pointer_positions: HashSet::new(),
         }
     }
 
     /// AST ダンプ対象関数名を設定（デバッグ用）
     pub fn with_dump_ast_for(mut self, name: Option<String>) -> Self {
         self.dump_ast_for = name;
+        self
+    }
+
+    /// const ポインタ位置を設定
+    pub fn with_const_pointer_positions(mut self, positions: HashSet<usize>) -> Self {
+        self.const_pointer_positions = positions;
         self
     }
 
@@ -2187,6 +2444,7 @@ impl<'a> RustCodegen<'a> {
         }
 
         let param_name = param.name;
+        let should_be_const = self.const_pointer_positions.contains(&param_index);
 
         // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
         // void 以外の型を優先的に選択する
@@ -2196,6 +2454,11 @@ impl<'a> RustCodegen<'a> {
                     // void 以外の型を探す
                     for c in constraints {
                         if !c.ty.is_void() {
+                            if should_be_const {
+                                let mut ty = c.ty.clone();
+                                ty.make_outer_pointer_const();
+                                return self.type_repr_to_rust(&ty);
+                            }
                             return self.type_repr_to_rust(&c.ty);
                         }
                     }
@@ -2207,6 +2470,11 @@ impl<'a> RustCodegen<'a> {
         let expr_id = param.expr_id();
         if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
             if let Some(first) = constraints.first() {
+                if should_be_const {
+                    let mut ty = first.ty.clone();
+                    ty.make_outer_pointer_const();
+                    return self.type_repr_to_rust(&ty);
+                }
                 return self.type_repr_to_rust(&first.ty);
             }
         }
@@ -4671,6 +4939,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             used_libc_fns: HashSet::new(),
             successfully_generated_inlines: HashSet::new(),
             generatable_macros: HashSet::new(),
+            const_pointer_params: HashMap::new(),
         }
     }
 
@@ -5023,6 +5292,41 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // 依存順にソート（葉マクロ先頭）
         let sorted_names = self.topological_sort_macros(&macros);
 
+        // ── const/mut ポインタ解析パス ──
+        // 依存順（リーフ先頭）で各マクロのポインタパラメータが *const で済むか判定
+        // callee_const_params: マクロ名 → const であるパラメータの引数位置集合
+        let mut callee_const_params: HashMap<InternedStr, HashSet<usize>> = HashMap::new();
+
+        // bindings.rs/inline関数 の引数 const 情報を事前収集
+        self.seed_callee_const_from_externals(result, &mut callee_const_params);
+
+        for &name in &sorted_names {
+            if let Some(info) = result.infer_ctx.macros.get(&name) {
+                if !info.is_parseable() || info.calls_unavailable { continue; }
+                let must_mut = collect_must_mut_pointer_params(
+                    &info.parse_result,
+                    &info.params,
+                    &callee_const_params,
+                );
+                // ポインタ型パラメータで must-mut でないものを const として記録
+                let mut const_positions = HashSet::new();
+                for (i, param) in info.params.iter().enumerate() {
+                    if !must_mut.contains(&param.name) {
+                        // このパラメータの型がポインタ型か確認
+                        if self.param_has_pointer_type(param, info) {
+                            const_positions.insert(i);
+                        }
+                    }
+                }
+                if !const_positions.is_empty() {
+                    callee_const_params.insert(name, const_positions);
+                }
+            }
+        }
+
+        // const_params を self に保存（generate_macro_function で参照）
+        self.const_pointer_params = callee_const_params;
+
         // 正常生成されたマクロを追跡
         let mut successfully_generated: HashSet<InternedStr> = HashSet::new();
 
@@ -5066,8 +5370,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match status {
                 GenerateStatus::Success => {
                     // 新しい RustCodegen を使ってマクロを生成
+                    let const_positions = self.const_pointer_params.get(&name)
+                        .cloned().unwrap_or_default();
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
-                        .with_dump_ast_for(self.config.dump_ast_for.clone());
+                        .with_dump_ast_for(self.config.dump_ast_for.clone())
+                        .with_const_pointer_positions(const_positions);
                     let generated = codegen.generate_macro(info);
 
                     if generated.has_unresolved_names() {
@@ -5129,6 +5436,79 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     ///
     /// Kahn's algorithm を使用。`info.uses` の関係から DAG を構築し、
     /// 入次数 0 のノードから順に処理する。
+    /// bindings.rs/inline関数 の引数 const 情報を事前収集
+    fn seed_callee_const_from_externals(
+        &self,
+        result: &InferResult,
+        callee_const: &mut HashMap<InternedStr, HashSet<usize>>,
+    ) {
+        // bindings.rs の関数パラメータから const 情報を収集
+        if let Some(ref dict) = result.rust_decl_dict {
+            for (name, func) in &dict.fns {
+                if let Some(name_id) = self.interner.lookup(name) {
+                    let mut const_positions = HashSet::new();
+                    for (i, param) in func.params.iter().enumerate() {
+                        if param.ty.contains("*const") {
+                            const_positions.insert(i);
+                        }
+                    }
+                    if !const_positions.is_empty() {
+                        callee_const.insert(name_id, const_positions);
+                    }
+                }
+            }
+        }
+        // inline 関数のパラメータから const 情報を収集
+        for (name_id, fn_info) in result.inline_fn_dict.iter() {
+            let mut const_positions = HashSet::new();
+            // declarator から関数パラメータリストを取得
+            for dd in &fn_info.declarator.derived {
+                if let crate::ast::DerivedDecl::Function(param_list) = dd {
+                    for (i, param) in param_list.params.iter().enumerate() {
+                        if let Some(ref decl) = param.declarator {
+                            let has_const_ptr = decl.derived.iter().any(|d| {
+                                matches!(d, crate::ast::DerivedDecl::Pointer(q) if q.is_const)
+                            });
+                            if has_const_ptr {
+                                const_positions.insert(i);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            if !const_positions.is_empty() {
+                callee_const.insert(*name_id, const_positions);
+            }
+        }
+    }
+
+    /// パラメータがポインタ型を持つかどうか
+    fn param_has_pointer_type(&self, param: &MacroParam, info: &MacroInferInfo) -> bool {
+        // param_to_exprs 経由で型制約を確認
+        if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param.name) {
+            for expr_id in expr_ids {
+                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                    for c in constraints {
+                        if c.ty.has_outer_pointer() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // フォールバック
+        let expr_id = param.expr_id();
+        if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
+            for c in constraints {
+                if c.ty.has_outer_pointer() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn topological_sort_macros(
         &self,
         macros: &[(&InternedStr, &MacroInferInfo)],

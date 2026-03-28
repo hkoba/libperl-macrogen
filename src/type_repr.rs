@@ -707,6 +707,46 @@ impl TypeRepr {
         }
     }
 
+    /// 最外ポインタの is_const を true に変更する
+    pub fn make_outer_pointer_const(&mut self) {
+        match self {
+            TypeRepr::CType { derived, .. } => {
+                // derived の最後（最外側）のポインタを const に
+                for d in derived.iter_mut().rev() {
+                    if let CDerivedType::Pointer { is_const, .. } = d {
+                        *is_const = true;
+                        return;
+                    }
+                }
+            }
+            TypeRepr::RustType { repr, .. } => {
+                repr.make_outer_pointer_const();
+            }
+            TypeRepr::Inferred(inferred) => {
+                match inferred {
+                    InferredType::SymbolLookup { resolved_type, .. } => {
+                        resolved_type.make_outer_pointer_const();
+                    }
+                    InferredType::Cast { target_type } => {
+                        target_type.make_outer_pointer_const();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// 最外ポインタを持つかどうか
+    pub fn has_outer_pointer(&self) -> bool {
+        match self {
+            TypeRepr::CType { derived, .. } => {
+                derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. }))
+            }
+            TypeRepr::RustType { repr, .. } => repr.has_outer_pointer(),
+            _ => false,
+        }
+    }
+
     /// Apidoc の型文字列から TypeRepr を作成
     pub fn from_apidoc_string(s: &str, interner: &crate::intern::StringInterner) -> Self {
         // C 型文字列をパース
@@ -1119,6 +1159,20 @@ impl CTypeSpecs {
             CTypeSpecs::TypedefName(n) => interner.get(*n).to_string(),
             CTypeSpecs::UnknownTypedef(s) => s.clone(),
         }
+    }
+}
+
+impl RustTypeRepr {
+    /// 最外ポインタの is_const を true に変更する
+    pub fn make_outer_pointer_const(&mut self) {
+        if let RustTypeRepr::Pointer { is_const, .. } = self {
+            *is_const = true;
+        }
+    }
+
+    /// 最外ポインタを持つかどうか
+    pub fn has_outer_pointer(&self) -> bool {
+        matches!(self, RustTypeRepr::Pointer { .. })
     }
 }
 
