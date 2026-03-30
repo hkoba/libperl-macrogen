@@ -1713,8 +1713,8 @@ impl<'a> RustCodegen<'a> {
         let pointer_count = type_name.declarator.as_ref()
             .map(|d| d.derived.iter().filter(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer(_))).count())
             .unwrap_or(0);
-        // const チェック（最後のポインタ修飾子から）
-        let is_const_ptr = type_name.declarator.as_ref()
+        // const チェック: ポインタ修飾子 または specs の const 修飾子
+        let ptr_is_const = type_name.declarator.as_ref()
             .and_then(|d| d.derived.iter().rev().find_map(|dd| {
                 if let crate::ast::DerivedDecl::Pointer(qualifiers) = dd {
                     Some(qualifiers.is_const)
@@ -1723,6 +1723,8 @@ impl<'a> RustCodegen<'a> {
                 }
             }))
             .unwrap_or(false);
+        // C の "const T *" では const が specs 側にある
+        let is_const_ptr = ptr_is_const || (pointer_count == 1 && type_name.specs.qualifiers.is_const);
         // 基本型を取得
         let base = self.base_type_str_readonly(&type_name.specs.type_specs);
         // ポインタをラップ
@@ -2242,8 +2244,24 @@ impl<'a> RustCodegen<'a> {
                         };
                         return format!("({} as {})", arg_str, cast_ty);
                     }
+                    // const→mut 変換 (C の暗黙変換に対応)
+                    if actual.contains("*const") && expected_ty.contains("*mut") {
+                        let actual_as_mut = actual.replace("*const", "*mut");
+                        if actual_as_mut == expected_ty {
+                            return format!("({} as {})", arg_str, expected_ty);
+                        }
+                        // SV subtype + const→mut 複合 (e.g., *const GV → *mut SV)
+                        let actual_as_mut_ut = UnifiedType::from_rust_str(&actual_as_mut);
+                        if is_sv_subtype_cast(&actual_as_mut_ut, &expected_ut) {
+                            return format!("({} as {})", arg_str, expected_ty);
+                        }
+                    }
                 }
             }
+        }
+        // フォールバック: actual_ty が不明でも期待型がポインタで引数文字列に *const があればキャスト
+        if expected_ty.contains("*mut") && arg_str.contains("as *const") {
+            return format!("({} as {})", arg_str, expected_ty);
         }
         arg_str.to_string()
     }
@@ -3885,6 +3903,32 @@ impl<'a> RustCodegen<'a> {
                             } else {
                                 init_expr
                             }
+                        } else {
+                            init_expr
+                        };
+                        // ポインタの const/mut 不一致キャスト
+                        // let a: *mut U8 = (s1 as *const U8) → (s1 as *const U8) as *mut U8
+                        let init_expr = if ty.contains("*mut") && !ty.contains("*const") {
+                            if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
+                                if expr_ut.is_const_pointer() {
+                                    format!("({} as {})", init_expr, ty)
+                                } else {
+                                    init_expr
+                                }
+                            } else if init_expr.contains("as *const") {
+                                // infer できなくても文字列上で *const が見えたらキャスト
+                                format!("({} as {})", init_expr, ty)
+                            } else {
+                                init_expr
+                            }
+                        } else {
+                            init_expr
+                        };
+                        // null リテラルの場合は型推論に任せて std::ptr::null_mut()
+                        let init_expr = if is_null_literal(expr) && ty.contains("*mut") {
+                            "std::ptr::null_mut()".to_string()
+                        } else if is_null_literal(expr) && ty.contains("*const") {
+                            "std::ptr::null()".to_string()
                         } else {
                             init_expr
                         };
