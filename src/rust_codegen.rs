@@ -2266,34 +2266,42 @@ impl<'a> RustCodegen<'a> {
         arg_str.to_string()
     }
 
-    /// 返り値式の整数型キャストが必要ならキャスト済み文字列を返す
+    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す
     fn cast_return_expr_if_needed(&self, expr: &Expr, info: &MacroInferInfo, rust_expr: &str) -> Option<String> {
         let ret_ut = self.current_return_type.as_ref()?;
         let expr_ut = self.infer_expr_type(expr, info)?;
         let ret_s = ret_ut.to_rust_string();
         let expr_s = expr_ut.to_rust_string();
-        let nr = normalize_integer_type(&ret_s)?;
-        let ne = normalize_integer_type(&expr_s)?;
-        if !integer_types_compatible(nr, ne) {
-            Some(format!("({} as {})", rust_expr, nr))
-        } else {
-            None
+        // 整数型キャスト
+        if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
+            if !integer_types_compatible(nr, ne) {
+                return Some(format!("({} as {})", rust_expr, nr));
+            }
         }
+        // ポインタ const→mut キャスト
+        if ret_ut.is_pointer() && !ret_ut.is_const_pointer() && expr_ut.is_const_pointer() {
+            return Some(format!("({} as {})", rust_expr, ret_s));
+        }
+        None
     }
 
-    /// 返り値式の整数型キャストが必要ならキャスト済み文字列を返す (inline 版)
+    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す (inline 版)
     fn cast_return_expr_if_needed_inline(&self, expr: &Expr, rust_expr: &str) -> Option<String> {
         let ret_ut = self.current_return_type.as_ref()?;
         let expr_ut = self.infer_expr_type_inline(expr)?;
         let ret_s = ret_ut.to_rust_string();
         let expr_s = expr_ut.to_rust_string();
-        let nr = normalize_integer_type(&ret_s)?;
-        let ne = normalize_integer_type(&expr_s)?;
-        if !integer_types_compatible(nr, ne) {
-            Some(format!("({} as {})", rust_expr, nr))
-        } else {
-            None
+        // 整数型キャスト
+        if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
+            if !integer_types_compatible(nr, ne) {
+                return Some(format!("({} as {})", rust_expr, nr));
+            }
         }
+        // ポインタ const→mut キャスト
+        if ret_ut.is_pointer() && !ret_ut.is_const_pointer() && expr_ut.is_const_pointer() {
+            return Some(format!("({} as {})", rust_expr, ret_s));
+        }
+        None
     }
 
     /// マクロ呼び出し形式で出力すべきかを判定
