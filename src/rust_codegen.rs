@@ -3221,14 +3221,32 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let c = self.expr_to_rust(cond, info);
-                // 条件が既に bool なら != 0 を追加しない
                 let cond_str = self.wrap_as_bool_condition_macro(cond, &c, info);
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
+                // null リテラル分岐の型推論
+                let tt = self.infer_expr_type(then_expr, info);
+                let et = self.infer_expr_type(else_expr, info);
+                if is_null_literal(else_expr) {
+                    if let Some(ref tut) = tt {
+                        if tut.is_pointer() {
+                            let t = self.expr_with_type_hint(then_expr, info, type_hint.as_deref());
+                            let e = null_ptr_expr(tut);
+                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                        }
+                    }
+                }
+                if is_null_literal(then_expr) {
+                    if let Some(ref eut) = et {
+                        if eut.is_pointer() {
+                            let t = null_ptr_expr(eut);
+                            let e = self.expr_with_type_hint(else_expr, info, type_hint.as_deref());
+                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                        }
+                    }
+                }
                 let t = self.expr_with_type_hint(then_expr, info, type_hint.as_deref());
                 let e = self.expr_with_type_hint(else_expr, info, type_hint.as_deref());
                 // if/else ブランチの型が異なる場合、wider type にキャスト
-                let tt = self.infer_expr_type(then_expr, info);
-                let et = self.infer_expr_type(else_expr, info);
                 if let (Some(tut), Some(eut)) = (&tt, &et) {
                     let ts = tut.to_rust_string();
                     let es = eut.to_rust_string();
@@ -4890,14 +4908,32 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let c = self.expr_to_rust_inline(cond);
-                // 条件が既に bool なら != 0 を追加しない
                 let cond_str = self.wrap_as_bool_condition_inline(cond, &c);
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
+                // null リテラル分岐の型推論: 他方のポインタ型に合わせて null_mut()/null()
+                let tt = self.infer_expr_type_inline(then_expr);
+                let et = self.infer_expr_type_inline(else_expr);
+                if is_null_literal(else_expr) {
+                    if let Some(ref tut) = tt {
+                        if tut.is_pointer() {
+                            let t = self.expr_with_type_hint_inline(then_expr, type_hint.as_deref());
+                            let e = null_ptr_expr(tut);
+                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                        }
+                    }
+                }
+                if is_null_literal(then_expr) {
+                    if let Some(ref eut) = et {
+                        if eut.is_pointer() {
+                            let t = null_ptr_expr(eut);
+                            let e = self.expr_with_type_hint_inline(else_expr, type_hint.as_deref());
+                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                        }
+                    }
+                }
                 let t = self.expr_with_type_hint_inline(then_expr, type_hint.as_deref());
                 let e = self.expr_with_type_hint_inline(else_expr, type_hint.as_deref());
                 // if/else ブランチの型が異なる場合、wider type にキャスト
-                let tt = self.infer_expr_type_inline(then_expr);
-                let et = self.infer_expr_type_inline(else_expr);
                 if let (Some(tut), Some(eut)) = (&tt, &et) {
                     let ts = tut.to_rust_string();
                     let es = eut.to_rust_string();
