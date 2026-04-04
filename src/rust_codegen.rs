@@ -2057,7 +2057,13 @@ impl<'a> RustCodegen<'a> {
         // 2. 自家生成マクロ関数のパラメータ型
         if let Some(interned) = self.interner.lookup(func_name) {
             if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
-                if let Some(param) = macro_info.params.get(arg_index) {
+                // THX マクロは my_perl が自動挿入されるのでオフセットを引く
+                let macro_arg_index = if macro_info.is_thx_dependent && arg_index > 0 {
+                    arg_index - 1
+                } else {
+                    arg_index
+                };
+                if let Some(param) = macro_info.params.get(macro_arg_index) {
                     // type_env からパラメータの型制約を取得
                     if let Some(expr_ids) = macro_info.type_env.param_to_exprs.get(&param.name) {
                         for expr_id in expr_ids {
@@ -2107,6 +2113,23 @@ impl<'a> RustCodegen<'a> {
     fn is_bool_expr_with_dict(&self, expr: &Expr) -> bool {
         if is_boolean_expr_recursive(expr, self.interner) {
             return true;
+        }
+        // パラメータが bool 型
+        if let ExprKind::Ident(name) = &expr.kind {
+            if let Some(ut) = self.current_param_types.get(name) {
+                if ut.is_bool() {
+                    return true;
+                }
+            }
+        }
+        // フィールドが bool 型
+        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
+            let member_str = self.interner.get(*member);
+            if let Some(ut) = self.field_type_map.get(member_str) {
+                if ut.is_bool() {
+                    return true;
+                }
+            }
         }
         // 関数呼び出しの戻り値型が bool かチェック
         if let ExprKind::Call { func, .. } = &expr.kind {
