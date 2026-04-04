@@ -421,6 +421,13 @@ pub fn run_inference_with_preprocessor(
         c_fn_thx_count,
     };
 
+    // Phase 2 最終パス: パラメータ/戻り値型の確定（const/mut, bool）
+    infer_ctx.resolve_param_and_return_types(
+        pp.interner(),
+        rust_decl_dict.as_ref(),
+        &inline_fn_dict,
+    );
+
     Ok(Some(InferResult {
         infer_ctx,
         fields_dict,

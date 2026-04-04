@@ -295,7 +295,7 @@ fn is_zero_constant(expr: &Expr) -> bool {
 /// 式が bool として扱える形式かどうかを判定
 ///
 /// キャスト `(expr as bool)` を含む場合も true を返す
-fn is_boolean_expr(expr: &Expr) -> bool {
+pub fn is_boolean_expr(expr: &Expr) -> bool {
     match &expr.kind {
         ExprKind::Binary { op, .. } => matches!(op,
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge |
@@ -341,7 +341,7 @@ fn is_boolean_expr_recursive(expr: &Expr, interner: &StringInterner) -> bool {
 }
 
 /// コンテキスト付き bool 式判定: 呼び出し先マクロ/外部関数の戻り値型も考慮
-fn is_boolean_expr_with_context(
+pub fn is_boolean_expr_with_context(
     expr: &Expr,
     bool_return_macros: &HashSet<InternedStr>,
     bool_return_externals: &HashSet<InternedStr>,
@@ -525,7 +525,7 @@ fn wider_integer_type(a: &str, b: &str) -> Option<&'static str> {
 /// ポインタパラメータが *mut である必要があるかを判定する。
 /// callee_const_params: 呼び出し先マクロで *const に確定したパラメータ情報
 ///   key = マクロ名(InternedStr), value = const パラメータの引数位置集合
-fn collect_must_mut_pointer_params(
+pub fn collect_must_mut_pointer_params(
     parse_result: &ParseResult,
     params: &[MacroParam],
     callee_const_params: &HashMap<InternedStr, HashSet<usize>>,
@@ -548,7 +548,7 @@ fn collect_must_mut_pointer_params(
     result
 }
 
-fn collect_must_mut_from_stmt(
+pub fn collect_must_mut_from_stmt(
     stmt: &Stmt,
     params: &HashSet<InternedStr>,
     callee_const: &HashMap<InternedStr, HashSet<usize>>,
@@ -597,7 +597,7 @@ fn collect_must_mut_from_stmt(
     }
 }
 
-fn collect_must_mut_from_expr(
+pub fn collect_must_mut_from_expr(
     expr: &Expr,
     params: &HashSet<InternedStr>,
     callee_const: &HashMap<InternedStr, HashSet<usize>>,
@@ -702,7 +702,7 @@ fn collect_must_mut_from_expr(
 }
 
 /// 代入先の式に含まれるパラメータを must-mut としてマークする
-fn mark_lvalue_mut(expr: &Expr, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
+pub fn mark_lvalue_mut(expr: &Expr, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
     match &expr.kind {
         // *param = ... → param must be *mut
         ExprKind::Deref(inner) => {
@@ -3349,7 +3349,7 @@ impl<'a> RustCodegen<'a> {
                     format!("assert!({}, \"{}\")", cond_str, msg)
                 } else {
                     let cond = self.expr_to_rust(condition, info);
-                    if is_boolean_expr(condition) {
+                    if is_boolean_expr(condition) || self.is_bool_expr_with_dict(condition) {
                         format!("assert!({})", cond)
                     } else if self.infer_type_hint(condition, info) == TypeHint::Pointer {
                         format!("assert!(!{}.is_null())", cond)
@@ -5036,7 +5036,7 @@ impl<'a> RustCodegen<'a> {
                     format!("assert!({}, \"{}\")", cond_str, msg)
                 } else {
                     let cond = self.expr_to_rust_inline(condition);
-                    if is_boolean_expr(condition) {
+                    if is_boolean_expr(condition) || self.is_bool_expr_with_dict(condition) {
                         format!("assert!({})", cond)
                     } else if self.is_pointer_expr_inline(condition) {
                         format!("assert!(!{}.is_null())", cond)
@@ -5198,6 +5198,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // マクロの生成可能性を事前計算（inline→macro カスケード検出用）
         self.precompute_macro_generability(result, &known_symbols);
 
+        // Phase 2 の解析結果を収集（inline/macro 両方で使用）
+        for (&name, info) in &result.infer_ctx.macros {
+            if info.is_bool_return {
+                self.bool_return_macros.insert(name);
+            }
+        }
+
         // inline 関数セクション
         if self.config.emit_inline_fns {
             self.generate_inline_fns(result, &known_symbols)?;
@@ -5357,7 +5364,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
 
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
-                .with_dump_ast_for(self.config.dump_ast_for.clone());
+                .with_dump_ast_for(self.config.dump_ast_for.clone())
+                .with_bool_return(false, self.bool_return_macros.clone());
             let generated = codegen.generate_inline_fn(**name, func_def);
 
             if generated.has_unresolved_names() {
@@ -5518,57 +5526,20 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // 依存順にソート（葉マクロ先頭）
         let sorted_names = self.topological_sort_macros(&macros);
 
-        // ── const/mut ポインタ解析パス ──
-        // 依存順（リーフ先頭）で各マクロのポインタパラメータが *const で済むか判定
-        // callee_const_params: マクロ名 → const であるパラメータの引数位置集合
+        // ── Phase 2 の解析結果を参照 ──
+        // const/mut, bool 戻り値は Phase 2 (resolve_param_and_return_types) で確定済み
+        // MacroInferInfo.const_pointer_positions, is_bool_return を参照する
         let mut callee_const_params: HashMap<InternedStr, HashSet<usize>> = HashMap::new();
-
-        // bindings.rs/inline関数 の引数 const 情報を事前収集
-        self.seed_callee_const_from_externals(result, &mut callee_const_params);
-
-        for &name in &sorted_names {
-            if let Some(info) = result.infer_ctx.macros.get(&name) {
-                if !info.is_parseable() || info.calls_unavailable { continue; }
-                let must_mut = collect_must_mut_pointer_params(
-                    &info.parse_result,
-                    &info.params,
-                    &callee_const_params,
-                );
-                // ポインタ型パラメータで must-mut でないものを const として記録
-                let mut const_positions = HashSet::new();
-                for (i, param) in info.params.iter().enumerate() {
-                    if !must_mut.contains(&param.name) {
-                        // このパラメータの型がポインタ型か確認
-                        if self.param_has_pointer_type(param, info) {
-                            const_positions.insert(i);
-                        }
-                    }
-                }
-                if !const_positions.is_empty() {
-                    callee_const_params.insert(name, const_positions);
-                }
-            }
-        }
-
-        // const_params を self に保存（generate_macro_function で参照）
-        self.const_pointer_params = callee_const_params;
-
-        // ── bool 戻り値型解析パス ──
-        // 依存順（リーフ先頭）で各マクロの戻り値が bool かを判定
-        let bool_return_externals = self.seed_bool_return_externals(result);
         let mut bool_return_macros: HashSet<InternedStr> = HashSet::new();
-
-        for &name in &sorted_names {
-            if let Some(info) = result.infer_ctx.macros.get(&name) {
-                if !info.is_parseable() || info.calls_unavailable { continue; }
-                if let ParseResult::Expression(expr) = &info.parse_result {
-                    if is_boolean_expr_with_context(expr, &bool_return_macros, &bool_return_externals) {
-                        bool_return_macros.insert(name);
-                    }
-                }
+        for (&name, info) in &result.infer_ctx.macros {
+            if !info.const_pointer_positions.is_empty() {
+                callee_const_params.insert(name, info.const_pointer_positions.clone());
+            }
+            if info.is_bool_return {
+                bool_return_macros.insert(name);
             }
         }
-
+        self.const_pointer_params = callee_const_params;
         self.bool_return_macros = bool_return_macros;
 
         // 正常生成されたマクロを追跡
@@ -5681,104 +5652,6 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     /// マクロを依存順にソート（葉マクロ先頭、循環はアルファベット順で末尾）
     ///
     /// Kahn's algorithm を使用。`info.uses` の関係から DAG を構築し、
-    /// 入次数 0 のノードから順に処理する。
-    /// bindings.rs/inline関数 の引数 const 情報を事前収集
-    fn seed_callee_const_from_externals(
-        &self,
-        result: &InferResult,
-        callee_const: &mut HashMap<InternedStr, HashSet<usize>>,
-    ) {
-        // bindings.rs の関数パラメータから const 情報を収集
-        if let Some(ref dict) = result.rust_decl_dict {
-            for (name, func) in &dict.fns {
-                if let Some(name_id) = self.interner.lookup(name) {
-                    let mut const_positions = HashSet::new();
-                    for (i, param) in func.params.iter().enumerate() {
-                        if param.ty.contains("*const") {
-                            const_positions.insert(i);
-                        }
-                    }
-                    if !const_positions.is_empty() {
-                        callee_const.insert(name_id, const_positions);
-                    }
-                }
-            }
-        }
-        // inline 関数のパラメータから const 情報を収集
-        for (name_id, fn_info) in result.inline_fn_dict.iter() {
-            let mut const_positions = HashSet::new();
-            // declarator から関数パラメータリストを取得
-            for dd in &fn_info.declarator.derived {
-                if let crate::ast::DerivedDecl::Function(param_list) = dd {
-                    for (i, param) in param_list.params.iter().enumerate() {
-                        if let Some(ref decl) = param.declarator {
-                            let has_const_ptr = decl.derived.iter().any(|d| {
-                                matches!(d, crate::ast::DerivedDecl::Pointer(q) if q.is_const)
-                            });
-                            if has_const_ptr {
-                                const_positions.insert(i);
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-            if !const_positions.is_empty() {
-                callee_const.insert(*name_id, const_positions);
-            }
-        }
-    }
-
-    /// パラメータがポインタ型を持つかどうか
-    fn param_has_pointer_type(&self, param: &MacroParam, info: &MacroInferInfo) -> bool {
-        // param_to_exprs 経由で型制約を確認
-        if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param.name) {
-            for expr_id in expr_ids {
-                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    for c in constraints {
-                        if c.ty.has_outer_pointer() {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        // フォールバック
-        let expr_id = param.expr_id();
-        if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
-            for c in constraints {
-                if c.ty.has_outer_pointer() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// bindings.rs/inline関数 から bool を返す関数名を収集
-    fn seed_bool_return_externals(&self, result: &InferResult) -> HashSet<InternedStr> {
-        let mut externals = HashSet::new();
-        // bindings.rs の関数で戻り値が bool のもの
-        if let Some(ref dict) = result.rust_decl_dict {
-            for (name, func) in &dict.fns {
-                if func.ret_ty.as_deref() == Some("bool") {
-                    if let Some(name_id) = self.interner.lookup(name) {
-                        externals.insert(name_id);
-                    }
-                }
-            }
-        }
-        // inline 関数で戻り値が Bool のもの
-        for (name_id, fn_info) in result.inline_fn_dict.iter() {
-            let has_bool_return = fn_info.specs.type_specs.iter()
-                .any(|ts| matches!(ts, TypeSpec::Bool));
-            if has_bool_return {
-                externals.insert(*name_id);
-            }
-        }
-        externals
-    }
-
     fn topological_sort_macros(
         &self,
         macros: &[(&InternedStr, &MacroInferInfo)],

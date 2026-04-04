@@ -308,6 +308,20 @@ pub struct MacroInferInfo {
     pub called_functions: HashSet<InternedStr>,
     /// 利用不可関数の呼び出しを含む（直接または推移的）
     pub calls_unavailable: bool,
+
+    // ── Phase 2 確定型（resolve_param_and_return_types で設定）──
+
+    /// パラメータの確定型（Rust 型文字列）
+    pub resolved_param_types: Vec<String>,
+
+    /// 戻り値の確定型（Rust 型文字列）
+    pub resolved_return_type: Option<String>,
+
+    /// ポインタパラメータの const 位置集合
+    pub const_pointer_positions: HashSet<usize>,
+
+    /// bool を返すマクロか（依存順解析で確定）
+    pub is_bool_return: bool,
 }
 
 impl MacroInferInfo {
@@ -333,6 +347,10 @@ impl MacroInferInfo {
             deref_count: 0,
             called_functions: HashSet::new(),
             calls_unavailable: false,
+            resolved_param_types: Vec::new(),
+            resolved_return_type: None,
+            const_pointer_positions: HashSet::new(),
+            is_bool_return: false,
         }
     }
 
@@ -1869,6 +1887,218 @@ impl MacroInferContext {
                 Self::collect_function_calls_from_stmt(stmt, calls);
             }
             _ => {}
+        }
+    }
+
+    // ========================================================================
+    // Phase 2: パラメータ/戻り値型の確定
+    // ========================================================================
+
+    /// 全マクロのパラメータ型・戻り値型・const/mut・bool を確定する。
+    /// `infer_types_in_dependency_order()` の後に呼ぶ。
+    pub fn resolve_param_and_return_types(
+        &mut self,
+        interner: &StringInterner,
+        rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
+        inline_fn_dict: &crate::inline_fn::InlineFnDict,
+    ) {
+        // 依存順にソート（リーフマクロ先頭）
+        let sorted = self.topological_sort_for_resolve();
+
+        // 外部関数の const パラメータ情報を収集
+        let mut callee_const_params: HashMap<InternedStr, HashSet<usize>> = HashMap::new();
+        Self::seed_callee_const(interner, rust_decl_dict, inline_fn_dict, &mut callee_const_params);
+
+        // 外部関数の bool 戻り値情報を収集
+        let mut bool_return_set: HashSet<InternedStr> = HashSet::new();
+        Self::seed_bool_returns(interner, rust_decl_dict, inline_fn_dict, &mut bool_return_set);
+
+        // 依存順で解析
+        for name in &sorted {
+            let info = match self.macros.get(name) {
+                Some(info) => info,
+                None => continue,
+            };
+            if !info.is_parseable() || info.calls_unavailable || !info.is_function {
+                continue;
+            }
+
+            // ── const/mut 推論 ──
+            let must_mut = crate::rust_codegen::collect_must_mut_pointer_params(
+                &info.parse_result,
+                &info.params,
+                &callee_const_params,
+            );
+            let mut const_positions = HashSet::new();
+            for (i, param) in info.params.iter().enumerate() {
+                if !must_mut.contains(&param.name) {
+                    // param_to_exprs 経由で型がポインタか確認
+                    if Self::param_has_pointer_type_static(&info.type_env, param) {
+                        const_positions.insert(i);
+                    }
+                }
+            }
+            if !const_positions.is_empty() {
+                callee_const_params.insert(*name, const_positions.clone());
+            }
+
+            // ── bool 戻り値推論 ──
+            let is_bool = if let ParseResult::Expression(expr) = &info.parse_result {
+                crate::rust_codegen::is_boolean_expr_with_context(
+                    expr, &bool_return_set, &bool_return_set,
+                )
+            } else {
+                false
+            };
+            if is_bool {
+                bool_return_set.insert(*name);
+            }
+
+            // 結果を格納（可変参照を取り直す）
+            let info_mut = self.macros.get_mut(name).unwrap();
+            info_mut.const_pointer_positions = const_positions;
+            info_mut.is_bool_return = is_bool;
+        }
+    }
+
+    /// 解析用のトポロジカルソート（リーフ先頭）
+    fn topological_sort_for_resolve(&self) -> Vec<InternedStr> {
+        use std::collections::VecDeque;
+        let target_macros: HashSet<InternedStr> = self.macros.iter()
+            .filter(|(_, info)| info.is_target && info.has_body && info.is_function)
+            .map(|(n, _)| *n)
+            .collect();
+
+        let mut in_degree: HashMap<InternedStr, usize> = HashMap::new();
+        for &name in &target_macros {
+            in_degree.entry(name).or_insert(0);
+            if let Some(info) = self.macros.get(&name) {
+                for used in &info.uses {
+                    if target_macros.contains(used) {
+                        *in_degree.entry(name).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let mut queue: VecDeque<InternedStr> = in_degree.iter()
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(&name, _)| name)
+            .collect();
+        let mut result = Vec::new();
+        while let Some(name) = queue.pop_front() {
+            result.push(name);
+            if let Some(info) = self.macros.get(&name) {
+                for user in &info.used_by {
+                    if let Some(deg) = in_degree.get_mut(user) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            queue.push_back(*user);
+                        }
+                    }
+                }
+            }
+        }
+        // 残り（循環）を追加
+        for &name in &target_macros {
+            if !result.contains(&name) {
+                result.push(name);
+            }
+        }
+        result
+    }
+
+    /// パラメータがポインタ型を持つか（static 版、&self 不要）
+    fn param_has_pointer_type_static(type_env: &crate::type_env::TypeEnv, param: &MacroParam) -> bool {
+        if let Some(expr_ids) = type_env.param_to_exprs.get(&param.name) {
+            for expr_id in expr_ids {
+                if let Some(constraints) = type_env.expr_constraints.get(expr_id) {
+                    for c in constraints {
+                        if c.ty.has_outer_pointer() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        let expr_id = param.expr_id();
+        if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
+            for c in constraints {
+                if c.ty.has_outer_pointer() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// bindings.rs/inline 関数の const パラメータ情報を収集
+    fn seed_callee_const(
+        interner: &StringInterner,
+        rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
+        inline_fn_dict: &crate::inline_fn::InlineFnDict,
+        callee_const: &mut HashMap<InternedStr, HashSet<usize>>,
+    ) {
+        if let Some(dict) = rust_decl_dict {
+            for (name, func) in &dict.fns {
+                if let Some(name_id) = interner.lookup(name) {
+                    let mut positions = HashSet::new();
+                    for (i, param) in func.params.iter().enumerate() {
+                        if param.ty.contains("*const") {
+                            positions.insert(i);
+                        }
+                    }
+                    if !positions.is_empty() {
+                        callee_const.insert(name_id, positions);
+                    }
+                }
+            }
+        }
+        for (name_id, fn_info) in inline_fn_dict.iter() {
+            let mut positions = HashSet::new();
+            for dd in &fn_info.declarator.derived {
+                if let crate::ast::DerivedDecl::Function(param_list) = dd {
+                    for (i, param) in param_list.params.iter().enumerate() {
+                        if let Some(ref decl) = param.declarator {
+                            let has_const = decl.derived.iter().any(|d| {
+                                matches!(d, crate::ast::DerivedDecl::Pointer(q) if q.is_const)
+                            });
+                            if has_const {
+                                positions.insert(i);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            if !positions.is_empty() {
+                callee_const.insert(*name_id, positions);
+            }
+        }
+    }
+
+    /// bindings.rs/inline 関数の bool 戻り値情報を収集
+    fn seed_bool_returns(
+        interner: &StringInterner,
+        rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
+        inline_fn_dict: &crate::inline_fn::InlineFnDict,
+        bool_returns: &mut HashSet<InternedStr>,
+    ) {
+        if let Some(dict) = rust_decl_dict {
+            for (name, func) in &dict.fns {
+                if func.ret_ty.as_deref() == Some("bool") {
+                    if let Some(name_id) = interner.lookup(name) {
+                        bool_returns.insert(name_id);
+                    }
+                }
+            }
+        }
+        for (name_id, fn_info) in inline_fn_dict.iter() {
+            let has_bool = fn_info.specs.type_specs.iter()
+                .any(|ts| matches!(ts, crate::ast::TypeSpec::Bool));
+            if has_bool {
+                bool_returns.insert(*name_id);
+            }
         }
     }
 }
