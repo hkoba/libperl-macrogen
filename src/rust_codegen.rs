@@ -2615,10 +2615,25 @@ impl<'a> RustCodegen<'a> {
             return "bool".to_string();
         }
 
+        let macro_name = self.interner.get(info.name);
         match &info.parse_result {
-            ParseResult::Expression(_) => {
+            ParseResult::Expression(expr) => {
                 if let Some(ty) = info.get_return_type() {
-                    return self.type_repr_to_rust(ty);
+                    let ty_str = self.type_repr_to_rust(ty);
+                    if ty_str != "()" {
+                        return ty_str;
+                    }
+                    // "()" が返された場合: 式の実際の型を確認
+                    // 式が本当に void を返す(void 関数呼び出し等)なら "()" で正しい
+                    // そうでなければ型推論の誤りなのでフォールバック
+                    if let Some(ut) = self.infer_expr_type(expr, info) {
+                        let s = ut.to_rust_string();
+                        if s != "()" {
+                            return s;
+                        }
+                    }
+                    // 式型推論でも "()" → void で正しい
+                    return ty_str;
                 }
                 self.unknown_marker().to_string()
             }
