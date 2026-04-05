@@ -1524,7 +1524,7 @@ impl<'a> RustCodegen<'a> {
             || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
             return format!("!{}.is_null()", expr_str);
         }
-        format!("(({}) != 0)", expr_str)
+        format!("({} != 0)", strip_outer_parens(expr_str))
     }
 
     /// ポインタ式をbool条件に変換するラッパー（inline関数用）
@@ -1564,7 +1564,7 @@ impl<'a> RustCodegen<'a> {
             || self.infer_expr_type_inline(expr).is_some_and(|ut| ut.is_pointer()) {
             return format!("!{}.is_null()", expr_str);
         }
-        format!("(({}) != 0)", expr_str)
+        format!("({} != 0)", strip_outer_parens(expr_str))
     }
 
     /// 式がポインタ型かどうかを current_param_types から推定（inline関数用）
@@ -2534,7 +2534,7 @@ impl<'a> RustCodegen<'a> {
                         || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
                         self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
                     } else {
-                        self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
+                        self.writeln(&format!("{}{} != 0", body_indent, strip_outer_parens(&rust_expr)));
                     }
                 } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
                     self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&casted)));
@@ -3180,7 +3180,7 @@ impl<'a> RustCodegen<'a> {
                         // ポインタ → bool: !ptr.is_null()
                         format!("!{}.is_null()", e)
                     } else {
-                        format!("(({}) != 0)", e)
+                        format!("({} != 0)", strip_outer_parens(&e))
                     }
                 } else if self.is_enum_cast_target(type_name) {
                     // enum へのキャストは transmute を使用
@@ -3308,7 +3308,7 @@ impl<'a> RustCodegen<'a> {
                         if tut.is_pointer() {
                             let t = self.expr_with_type_hint(then_expr, info, type_hint.as_deref());
                             let e = null_ptr_expr(tut);
-                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                            return format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e);
                         }
                     }
                 }
@@ -3317,7 +3317,7 @@ impl<'a> RustCodegen<'a> {
                         if eut.is_pointer() {
                             let t = null_ptr_expr(eut);
                             let e = self.expr_with_type_hint(else_expr, info, type_hint.as_deref());
-                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                            return format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e);
                         }
                     }
                 }
@@ -3334,15 +3334,15 @@ impl<'a> RustCodegen<'a> {
                             if let Some(wider) = wider_integer_type(&ts, &es) {
                                 let norm_t = normalize_integer_type(&ts);
                                 if norm_t != Some(wider) {
-                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", cond_str, t, wider, e);
+                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
                                 } else {
-                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", cond_str, t, e, wider);
+                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", strip_outer_parens(&cond_str), t, e, wider);
                                 }
                             }
                         }
                     }
                 }
-                format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
+                format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.expr_to_rust(lhs, info);
@@ -3369,13 +3369,13 @@ impl<'a> RustCodegen<'a> {
                     self.expr_to_rust(rhs, info)
                 };
                 match op {
-                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, strip_outer_parens(&r), l),
                     AssignOp::AddAssign | AssignOp::SubAssign => {
                         if self.infer_type_hint(lhs, info) == TypeHint::Pointer {
                             let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
                             format!("{{ {} = {}.{}({} as usize); {} }}", l, l, method, r, l)
                         } else {
-                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
                         }
                     }
                     AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
@@ -3398,9 +3398,9 @@ impl<'a> RustCodegen<'a> {
                                 return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
-                        format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                        format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
                     }
-                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l),
                 }
             }
             ExprKind::Assert { kind, condition } => {
@@ -3577,7 +3577,7 @@ impl<'a> RustCodegen<'a> {
                             _ => {
                                 let e = self.expr_to_rust(expr, info);
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("return (({}) != 0);", e);
+                                    return format!("return {} != 0;", strip_outer_parens(&e));
                                 }
                                 return format!("return {};", strip_outer_parens(&e));
                             }
@@ -4131,13 +4131,13 @@ impl<'a> RustCodegen<'a> {
                         self.expr_to_rust_inline(rhs)
                     };
                     match op {
-                        AssignOp::Assign => format!("{}{} = {};", indent, l, r),
+                        AssignOp::Assign => format!("{}{} = {};", indent, l, strip_outer_parens(&r)),
                         AssignOp::AddAssign | AssignOp::SubAssign => {
                             if self.is_pointer_expr_inline(lhs) {
                                 let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
                                 format!("{}{} = {}.{}({} as usize);", indent, l, l, method, r)
                             } else {
-                                format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+                                format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r))
                             }
                         }
                         AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
@@ -4160,9 +4160,9 @@ impl<'a> RustCodegen<'a> {
                                     return format!("{}{} {} ({} as {});", indent, l, assign_op_to_rust(*op), r, nl);
                                 }
                             }
-                            format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+                            format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r))
                         }
-                        _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
+                        _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r)),
                     }
                 } else {
                     format!("{}{};", indent, self.expr_to_rust_inline(expr))
@@ -4181,7 +4181,7 @@ impl<'a> RustCodegen<'a> {
                             _ => {
                                 let e = self.expr_to_rust_inline(expr);
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("{}return (({}) != 0);", indent, e);
+                                    return format!("{}return {} != 0;", indent, strip_outer_parens(&e));
                                 }
                                 return format!("{}return {};", indent, strip_outer_parens(&e));
                             }
@@ -4913,7 +4913,7 @@ impl<'a> RustCodegen<'a> {
                         // ポインタ → bool: !ptr.is_null()
                         format!("!{}.is_null()", e)
                     } else {
-                        format!("(({}) != 0)", e)
+                        format!("({} != 0)", strip_outer_parens(&e))
                     }
                 } else if self.is_enum_cast_target(type_name) {
                     // enum へのキャストは transmute を使用
@@ -5029,7 +5029,7 @@ impl<'a> RustCodegen<'a> {
                         if tut.is_pointer() {
                             let t = self.expr_with_type_hint_inline(then_expr, type_hint.as_deref());
                             let e = null_ptr_expr(tut);
-                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                            return format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e);
                         }
                     }
                 }
@@ -5038,7 +5038,7 @@ impl<'a> RustCodegen<'a> {
                         if eut.is_pointer() {
                             let t = null_ptr_expr(eut);
                             let e = self.expr_with_type_hint_inline(else_expr, type_hint.as_deref());
-                            return format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e);
+                            return format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e);
                         }
                     }
                 }
@@ -5055,15 +5055,15 @@ impl<'a> RustCodegen<'a> {
                             if let Some(wider) = wider_integer_type(&ts, &es) {
                                 let norm_t = normalize_integer_type(&ts);
                                 if norm_t != Some(wider) {
-                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", cond_str, t, wider, e);
+                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
                                 } else {
-                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", cond_str, t, e, wider);
+                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", strip_outer_parens(&cond_str), t, e, wider);
                                 }
                             }
                         }
                     }
                 }
-                format!("(if {} {{ {} }} else {{ {} }})", cond_str, t, e)
+                format!("(if {} {{ {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, e)
             }
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.expr_to_rust_inline(lhs);
@@ -5090,13 +5090,13 @@ impl<'a> RustCodegen<'a> {
                     self.expr_to_rust_inline(rhs)
                 };
                 match op {
-                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, r, l),
+                    AssignOp::Assign => format!("{{ {} = {}; {} }}", l, strip_outer_parens(&r), l),
                     AssignOp::AddAssign | AssignOp::SubAssign => {
                         if self.is_pointer_expr_inline(lhs) {
                             let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
                             format!("{{ {} = {}.{}({} as usize); {} }}", l, l, method, r, l)
                         } else {
-                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                            format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
                         }
                     }
                     AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
@@ -5119,9 +5119,9 @@ impl<'a> RustCodegen<'a> {
                                 return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
-                        format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l)
+                        format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
                     }
-                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), r, l),
+                    _ => format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l),
                 }
             }
             ExprKind::Assert { kind, condition } => {

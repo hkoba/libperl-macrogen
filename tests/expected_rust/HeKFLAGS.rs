@@ -1,5 +1,7 @@
 /// HeKFLAGS - macro function
 #[inline]
-pub unsafe fn HeKFLAGS(he: *mut HE) -> c_int {
-    unsafe { (*(((HEK_KEY(HeKEY_hek(he)) as *mut c_uchar) + HEK_LEN(HeKEY_hek(he))) + 1)) }
+pub unsafe fn HeKFLAGS(he: *const HE) -> c_uchar {
+    unsafe {
+        *(HEK_KEY(HeKEY_hek(he)) as *mut c_uchar).offset(HEK_LEN(HeKEY_hek(he)) as isize).offset(1 as isize)
+    }
 }

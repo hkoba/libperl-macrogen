@@ -7,4 +7,3 @@ pub unsafe fn Perl_CvDEPTH(sv: *const CV) -> *mut I32 {
         return &mut (*((*sv).sv_any as *mut XPVCV)).xcv_depth;
     }
 }
-
