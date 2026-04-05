@@ -2111,6 +2111,25 @@ impl<'a> RustCodegen<'a> {
         if is_boolean_expr_recursive(expr, self.interner) {
             return true;
         }
+        // 配列インデックス: 配列要素型が bool なら bool
+        if let ExprKind::Index { expr: base, .. } = &expr.kind {
+            if let ExprKind::Ident(name) = &base.kind {
+                if let Some(dict) = self.rust_decl_dict {
+                    let name_str = self.interner.get(*name);
+                    if let Some(c) = dict.consts.get(name_str) {
+                        if let Some(inner) = c.uty.inner_type() {
+                            if inner.is_bool() {
+                                return true;
+                            }
+                        }
+                    }
+                    // static 配列: 名前が PL_valid_types_* なら bool 配列
+                    if dict.statics.contains(name_str) && name_str.starts_with("PL_valid_types_") {
+                        return true;
+                    }
+                }
+            }
+        }
         // パラメータが bool 型
         if let ExprKind::Ident(name) = &expr.kind {
             if let Some(ut) = self.current_param_types.get(name) {
