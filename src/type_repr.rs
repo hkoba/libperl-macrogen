@@ -739,6 +739,26 @@ impl TypeRepr {
     }
 
     /// 最外ポインタの is_const を true に変更する
+    /// 最外ポインタの is_const を false に変更する（must-mut 用）
+    pub fn make_outer_pointer_mut(&mut self) {
+        match self {
+            TypeRepr::CType { derived, .. } => {
+                for d in derived.iter_mut().rev() {
+                    if let CDerivedType::Pointer { is_const, .. } = d {
+                        *is_const = false;
+                        return;
+                    }
+                }
+            }
+            TypeRepr::RustType { repr, .. } => {
+                if let RustTypeRepr::Pointer { is_const, .. } = repr {
+                    *is_const = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn make_outer_pointer_const(&mut self) {
         match self {
             TypeRepr::CType { derived, .. } => {

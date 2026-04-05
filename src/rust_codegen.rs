@@ -2574,6 +2574,9 @@ impl<'a> RustCodegen<'a> {
             let mut ty = ty.clone();
             if should_be_const {
                 ty.make_outer_pointer_const();
+            } else if ty.has_outer_pointer() {
+                // must-mut: Phase 2 で *mut と確定 → *const になっていたら *mut に戻す
+                ty.make_outer_pointer_mut();
             }
             return self.type_repr_to_rust(&ty);
         }
