@@ -2604,8 +2604,16 @@ impl<'a> RustCodegen<'a> {
         match &info.parse_result {
             ParseResult::Expression(expr) => {
                 if let Some(ty) = info.get_return_type() {
-                    let ty_str = self.type_repr_to_rust(ty);
+                    let mut ty_str = self.type_repr_to_rust(ty);
                     if ty_str != "()" {
+                        // 式の推論型がポインタで const なら戻り値も const に
+                        if ty_str.contains("*mut") {
+                            if let Some(expr_ut) = self.infer_expr_type(expr, info) {
+                                if expr_ut.is_const_pointer() {
+                                    ty_str = ty_str.replace("*mut", "*const");
+                                }
+                            }
+                        }
                         return ty_str;
                     }
                     // "()" が返された場合: 式の実際の型を確認
