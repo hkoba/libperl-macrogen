@@ -1898,7 +1898,7 @@ impl MacroInferContext {
     /// `infer_types_in_dependency_order()` の後に呼ぶ。
     pub fn resolve_param_and_return_types(
         &mut self,
-        interner: &StringInterner,
+        interner: &mut StringInterner,
         rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
         inline_fn_dict: &crate::inline_fn::InlineFnDict,
     ) {
@@ -2034,23 +2034,24 @@ impl MacroInferContext {
 
     /// bindings.rs/inline 関数の const パラメータ情報を収集
     fn seed_callee_const(
-        interner: &StringInterner,
+        interner: &mut StringInterner,
         rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
         inline_fn_dict: &crate::inline_fn::InlineFnDict,
         callee_const: &mut HashMap<InternedStr, HashSet<usize>>,
     ) {
         if let Some(dict) = rust_decl_dict {
             for (name, func) in &dict.fns {
-                if let Some(name_id) = interner.lookup(name) {
-                    let mut positions = HashSet::new();
-                    for (i, param) in func.params.iter().enumerate() {
-                        if param.ty.contains("*const") {
-                            positions.insert(i);
-                        }
+                let name_id = interner.intern(name);
+                let mut positions = HashSet::new();
+                for (i, param) in func.params.iter().enumerate() {
+                    // syn の出力は "* const" (スペースあり) の場合がある
+                    let normalized = param.ty.replace(" ", "");
+                    if normalized.contains("*const") {
+                        positions.insert(i);
                     }
-                    if !positions.is_empty() {
-                        callee_const.insert(name_id, positions);
-                    }
+                }
+                if !positions.is_empty() {
+                    callee_const.insert(name_id, positions);
                 }
             }
         }
@@ -2079,7 +2080,7 @@ impl MacroInferContext {
 
     /// bindings.rs/inline 関数の bool 戻り値情報を収集
     fn seed_bool_returns(
-        interner: &StringInterner,
+        interner: &mut StringInterner,
         rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
         inline_fn_dict: &crate::inline_fn::InlineFnDict,
         bool_returns: &mut HashSet<InternedStr>,
@@ -2087,9 +2088,8 @@ impl MacroInferContext {
         if let Some(dict) = rust_decl_dict {
             for (name, func) in &dict.fns {
                 if func.ret_ty.as_deref() == Some("bool") {
-                    if let Some(name_id) = interner.lookup(name) {
-                        bool_returns.insert(name_id);
-                    }
+                    let name_id = interner.intern(name);
+                    bool_returns.insert(name_id);
                 }
             }
         }

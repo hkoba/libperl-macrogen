@@ -423,7 +423,7 @@ pub fn run_inference_with_preprocessor(
 
     // Phase 2 最終パス: パラメータ/戻り値型の確定（const/mut, bool）
     infer_ctx.resolve_param_and_return_types(
-        pp.interner(),
+        pp.interner_mut(),
         rust_decl_dict.as_ref(),
         &inline_fn_dict,
     );
