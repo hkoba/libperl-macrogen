@@ -3907,6 +3907,11 @@ impl<'a> RustCodegen<'a> {
             ty
         };
 
+        // current_param_types に登録（型推論で使用）
+        if let Some(n) = param_name_interned {
+            self.current_param_types.insert(n, UnifiedType::from_rust_str(&ty));
+        }
+
         let mut_prefix = if param_name_interned.is_some_and(|n| mut_params.contains(&n)) {
             "mut "
         } else {
@@ -3956,7 +3961,6 @@ impl<'a> RustCodegen<'a> {
                             init_expr
                         };
                         // ポインタの const/mut 不一致: 変数型を *const に変更
-                        // let a: *mut U8 = (s1 as *const U8) → let a: *const U8 = (s1 as *const U8)
                         let ty = if ty.contains("*mut") && !ty.contains("*const") {
                             if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
                                 if expr_ut.is_const_pointer() {
