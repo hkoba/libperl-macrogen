@@ -395,6 +395,36 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
 }
 
 
+/// 式文字列の最外レベルの不要な括弧を除去する。
+/// "(expr)" → "expr" （先頭の '(' と末尾の ')' が対応する場合のみ）
+fn strip_outer_parens(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() < 2 || !s.starts_with('(') || !s.ends_with(')') {
+        return s;
+    }
+    // 先頭の '(' と末尾の ')' が対応するかチェック
+    let inner = &s[1..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    // 内部で閉じ括弧が余る → 先頭と末尾は非対応
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        inner
+    } else {
+        s
+    }
+}
+
 /// 式が NULL リテラル（整数 0 または (void*)0 のような Cast）かどうか判定
 /// assert(expr || !"message") パターンの RHS からメッセージ文字列を抽出
 fn extract_assert_message(expr: &Expr) -> Option<String> {
@@ -2253,10 +2283,11 @@ impl<'a> RustCodegen<'a> {
                 let actual_ut = self.infer_expr_type(expr, info);
                 let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                 let expected_ty_str = expected_ut.to_rust_string();
-                return self.cast_integer_arg_if_needed(&result, actual_ty_str.as_deref(), &expected_ty_str);
+                let casted = self.cast_integer_arg_if_needed(&result, actual_ty_str.as_deref(), &expected_ty_str);
+                return strip_outer_parens(&casted).to_string();
             }
         }
-        result
+        strip_outer_parens(&result).to_string()
     }
 
     /// 整数型の幅が不一致の場合、またはポインタ型のサブタイプ変換が必要な場合に `as` キャストを挿入する
@@ -2506,9 +2537,9 @@ impl<'a> RustCodegen<'a> {
                         self.writeln(&format!("{}(({}) != 0)", body_indent, rust_expr));
                     }
                 } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
-                    self.writeln(&format!("{}{}", body_indent, casted));
+                    self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&casted)));
                 } else {
-                    self.writeln(&format!("{}{}", body_indent, rust_expr));
+                    self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&rust_expr)));
                 }
             }
             ParseResult::Statement(block_items) => {
@@ -3377,15 +3408,15 @@ impl<'a> RustCodegen<'a> {
                 let assert_expr = if let Some((real_cond, msg)) = decompose_assert_with_message(condition) {
                     let c = self.expr_to_rust(real_cond, info);
                     let cond_str = self.wrap_as_bool_condition_macro(real_cond, &c, info);
-                    format!("assert!({}, \"{}\")", cond_str, msg)
+                    format!("assert!({}, \"{}\")", strip_outer_parens(&cond_str), msg)
                 } else {
                     let cond = self.expr_to_rust(condition, info);
                     if is_boolean_expr(condition) || self.is_bool_expr_with_dict(condition) {
-                        format!("assert!({})", cond)
+                        format!("assert!({})", strip_outer_parens(&cond))
                     } else if self.infer_type_hint(condition, info) == TypeHint::Pointer {
                         format!("assert!(!{}.is_null())", cond)
                     } else {
-                        format!("assert!(({}) != 0)", cond)
+                        format!("assert!({} != 0)", strip_outer_parens(&cond))
                     }
                 };
                 match kind {
@@ -3548,16 +3579,16 @@ impl<'a> RustCodegen<'a> {
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
                                     return format!("return (({}) != 0);", e);
                                 }
-                                return format!("return {};", e);
+                                return format!("return {};", strip_outer_parens(&e));
                             }
                         }
                     }
                 }
                 let e = self.expr_to_rust(expr, info);
                 if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &e) {
-                    return format!("return {};", casted);
+                    return format!("return {};", strip_outer_parens(&casted));
                 }
-                format!("return {};", e)
+                format!("return {};", strip_outer_parens(&e))
             }
             Stmt::Return(None, _) => "return;".to_string(),
             _ => self.todo_marker("stmt")
@@ -4037,7 +4068,7 @@ impl<'a> RustCodegen<'a> {
                             init_expr
                         };
                         let mut_kw = if init_decl.declarator.name.is_some_and(|n| self.mut_local_names.contains(&n)) { "mut " } else { "" };
-                        result.push_str(&format!("{}let {}{}: {} = {};\n", indent, mut_kw, name, ty, init_expr));
+                        result.push_str(&format!("{}let {}{}: {} = {};\n", indent, mut_kw, name, ty, strip_outer_parens(&init_expr)));
                     }
                     Initializer::List(_) => {
                         // 初期化リストは複雑なので TODO
@@ -4152,23 +4183,23 @@ impl<'a> RustCodegen<'a> {
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
                                     return format!("{}return (({}) != 0);", indent, e);
                                 }
-                                return format!("{}return {};", indent, e);
+                                return format!("{}return {};", indent, strip_outer_parens(&e));
                             }
                         }
                     }
                 }
                 let e = self.expr_to_rust_inline(expr);
                 if let Some(casted) = self.cast_return_expr_if_needed_inline(expr, &e) {
-                    return format!("{}return {};", indent, casted);
+                    return format!("{}return {};", indent, strip_outer_parens(&casted));
                 }
-                format!("{}return {};", indent, e)
+                format!("{}return {};", indent, strip_outer_parens(&e))
             }
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_bool = self.wrap_as_bool_condition_inline(cond, &cond_str);
-                let mut result = format!("{}if {} {{\n", indent, cond_bool);
+                let mut result = format!("{}if {} {{\n", indent, strip_outer_parens(&cond_bool));
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(then_stmt, &nested_indent));
                 result.push_str("\n");
@@ -5098,15 +5129,15 @@ impl<'a> RustCodegen<'a> {
                 let assert_expr = if let Some((real_cond, msg)) = decompose_assert_with_message(condition) {
                     let c = self.expr_to_rust_inline(real_cond);
                     let cond_str = self.wrap_as_bool_condition_inline(real_cond, &c);
-                    format!("assert!({}, \"{}\")", cond_str, msg)
+                    format!("assert!({}, \"{}\")", strip_outer_parens(&cond_str), msg)
                 } else {
                     let cond = self.expr_to_rust_inline(condition);
                     if is_boolean_expr(condition) || self.is_bool_expr_with_dict(condition) {
-                        format!("assert!({})", cond)
+                        format!("assert!({})", strip_outer_parens(&cond))
                     } else if self.is_pointer_expr_inline(condition) {
                         format!("assert!(!{}.is_null())", cond)
                     } else {
-                        format!("assert!(({}) != 0)", cond)
+                        format!("assert!({} != 0)", strip_outer_parens(&cond))
                     }
                 };
                 match kind {

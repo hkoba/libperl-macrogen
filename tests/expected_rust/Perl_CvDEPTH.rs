@@ -3,7 +3,8 @@
 pub unsafe fn Perl_CvDEPTH(sv: *const CV) -> *mut I32 {
     unsafe {
         assert!(!sv.is_null());
-        assert!(((SvTYPE((sv as *mut SV)) == SVt_PVCV) || (SvTYPE((sv as *mut SV)) == SVt_PVFM)));
-        return (&mut (*((*sv).sv_any as *mut XPVCV)).xcv_depth);
+        assert!((SvTYPE((sv as *mut SV)) == SVt_PVCV) || (SvTYPE((sv as *mut SV)) == SVt_PVFM));
+        return &mut (*((*sv).sv_any as *mut XPVCV)).xcv_depth;
     }
 }
+
