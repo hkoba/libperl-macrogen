@@ -1133,6 +1133,8 @@ pub struct RustCodegen<'a> {
     dump_ast_for: Option<String>,
     /// const ポインタに変換可能なパラメータの引数位置集合
     const_pointer_positions: HashSet<usize>,
+    /// 再代入されるローカル変数名の集合（let mut 判定用）
+    mut_local_names: HashSet<InternedStr>,
     /// このマクロが bool を返すと判定されたか
     is_bool_return: bool,
     /// codegen で bool を返すと判定されたマクロの集合（呼び出し先の bool 判定用）
@@ -1200,6 +1202,7 @@ impl<'a> RustCodegen<'a> {
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
             bool_return_macros: HashSet::new(),
+            mut_local_names: HashSet::new(),
         }
     }
 
@@ -3755,16 +3758,27 @@ impl<'a> RustCodegen<'a> {
     pub fn generate_inline_fn(mut self, name: crate::InternedStr, func_def: &FunctionDef) -> GeneratedCode {
         let name_str = self.interner.get(name);
 
-        // mutable パラメータを検出
+        // mutable パラメータ/ローカル変数を検出
         let mut_params = {
-            let mut param_names = HashSet::new();
+            let mut all_names = HashSet::new();
+            // パラメータ名を収集
             for d in &func_def.declarator.derived {
                 if let DerivedDecl::Function(param_list) = d {
                     for p in &param_list.params {
                         if let Some(ref declarator) = p.declarator {
                             if let Some(param_name) = declarator.name {
-                                param_names.insert(param_name);
+                                all_names.insert(param_name);
                             }
+                        }
+                    }
+                }
+            }
+            // ローカル変数名も収集
+            for item in &func_def.body.items {
+                if let BlockItem::Decl(decl) = item {
+                    for init_decl in &decl.declarators {
+                        if let Some(var_name) = init_decl.declarator.name {
+                            all_names.insert(var_name);
                         }
                     }
                 }
@@ -3772,11 +3786,14 @@ impl<'a> RustCodegen<'a> {
             let mut result = HashSet::new();
             for item in &func_def.body.items {
                 if let BlockItem::Stmt(stmt) = item {
-                    collect_mut_params_from_stmt(stmt, &param_names, &mut result);
+                    collect_mut_params_from_stmt(stmt, &all_names, &mut result);
                 }
             }
             result
         };
+
+        // mut ローカル変数名を保存（decl_to_rust_let で使用）
+        self.mut_local_names = mut_params.clone();
 
         // パラメータリストを取得
         let params_str = self.build_fn_param_list(&func_def.declarator.derived, &mut_params);
@@ -3984,7 +4001,8 @@ impl<'a> RustCodegen<'a> {
                         } else {
                             init_expr
                         };
-                        result.push_str(&format!("{}let {}: {} = {};\n", indent, name, ty, init_expr));
+                        let mut_kw = if init_decl.declarator.name.is_some_and(|n| self.mut_local_names.contains(&n)) { "mut " } else { "" };
+                        result.push_str(&format!("{}let {}{}: {} = {};\n", indent, mut_kw, name, ty, init_expr));
                     }
                     Initializer::List(_) => {
                         // 初期化リストは複雑なので TODO
@@ -3993,7 +4011,8 @@ impl<'a> RustCodegen<'a> {
                 }
             } else {
                 // 初期化子なし（未初期化変数 - Rust では unsafe かデフォルト値が必要）
-                result.push_str(&format!("{}let {}: {}; // uninitialized\n", indent, name, ty));
+                let mut_kw = if init_decl.declarator.name.is_some_and(|n| self.mut_local_names.contains(&n)) { "mut " } else { "" };
+                result.push_str(&format!("{}let {}{}: {}; // uninitialized\n", indent, mut_kw, name, ty));
             }
         }
 
