@@ -1713,18 +1713,12 @@ impl<'a> RustCodegen<'a> {
         let pointer_count = type_name.declarator.as_ref()
             .map(|d| d.derived.iter().filter(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer(_))).count())
             .unwrap_or(0);
-        // const チェック: ポインタ修飾子 または specs の const 修飾子
-        let ptr_is_const = type_name.declarator.as_ref()
-            .and_then(|d| d.derived.iter().rev().find_map(|dd| {
-                if let crate::ast::DerivedDecl::Pointer(qualifiers) = dd {
-                    Some(qualifiers.is_const)
-                } else {
-                    None
-                }
-            }))
-            .unwrap_or(false);
-        // C の "const T *" では const が specs 側にある
-        let is_const_ptr = ptr_is_const || (pointer_count == 1 && type_name.specs.qualifiers.is_const);
+        // const チェック:
+        // C の "const T *p" → pointee は const → Rust: *const T
+        //   この場合 const は specs.qualifiers.is_const にある
+        // C の "T * const p" → ポインタ自体が const (再代入不可) → Rust: *mut T
+        //   こ���場合 const は Pointer(qualifiers.is_const) にある → Rust の *const ではない
+        let is_const_ptr = pointer_count == 1 && type_name.specs.qualifiers.is_const;
         // 基本型を取得
         let base = self.base_type_str_readonly(&type_name.specs.type_specs);
         // ポインタをラップ
@@ -3683,7 +3677,13 @@ impl<'a> RustCodegen<'a> {
 
     /// 単純な派生型の適用（Pointer と Array のみ）
     fn apply_simple_derived(&self, base: &str, derived: &[DerivedDecl]) -> String {
+        self.apply_simple_derived_with_specs_const(base, derived, false)
+    }
+
+    /// 派生型を適用（specs の const 情報を考慮）
+    fn apply_simple_derived_with_specs_const(&self, base: &str, derived: &[DerivedDecl], specs_is_const: bool) -> String {
         let mut result = base.to_string();
+        let mut is_first_pointer = true;
         for d in derived.iter().rev() {
             match d {
                 DerivedDecl::Pointer(quals) => {
@@ -3691,11 +3691,20 @@ impl<'a> RustCodegen<'a> {
                     if result == "()" {
                         result = "c_void".to_string();
                     }
-                    if quals.is_const {
+                    // C の "const T *p": specs.is_const が pointee const を表す
+                    // C の "T * const p": quals.is_const はポインタ自体の const (Rust では *mut)
+                    // ただし "const T * const p" は両方 const → *const
+                    let pointee_const = if is_first_pointer {
+                        specs_is_const
+                    } else {
+                        quals.is_const
+                    };
+                    if pointee_const {
                         result = format!("*const {}", result);
                     } else {
                         result = format!("*mut {}", result);
                     }
+                    is_first_pointer = false;
                 }
                 DerivedDecl::Array(arr) => {
                     // void 配列の場合は c_void を使用
@@ -3771,7 +3780,7 @@ impl<'a> RustCodegen<'a> {
             .filter(|d| !matches!(d, DerivedDecl::Function(_)))
             .cloned()
             .collect();
-        let return_type = self.apply_derived_to_type(&return_type, &return_derived);
+        let return_type = self.apply_simple_derived_with_specs_const(&return_type, &return_derived, func_def.specs.qualifiers.is_const);
         self.current_return_type = Some(UnifiedType::from_rust_str(&return_type));
 
         // パラメータの型情報を収集 + ローカルスコープに登録
@@ -3880,9 +3889,9 @@ impl<'a> RustCodegen<'a> {
 
         let ty = self.decl_specs_to_rust(&param.specs);
 
-        // ポインタ派生型を適用
+        // ポインタ派生型を適用（specs の const を考慮）
         let ty = if let Some(ref declarator) = param.declarator {
-            self.apply_derived_to_type(&ty, &declarator.derived)
+            self.apply_simple_derived_with_specs_const(&ty, &declarator.derived, param.specs.qualifiers.is_const)
         } else {
             ty
         };
