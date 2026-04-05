@@ -2269,6 +2269,22 @@ impl<'a> RustCodegen<'a> {
                 }
             }
         }
+        // フォールバック: actual 不明でも expected が SV ポインタ型なら
+        // SV subtype のキャストを試行（safe direction: *mut GV → *const SV 等）
+        let expected_ut = UnifiedType::from_rust_str(expected_ty);
+        if expected_ut.is_pointer() {
+            if let Some(inner) = expected_ut.inner_type() {
+                if let UnifiedType::Named(name) = inner {
+                    let n = name.as_str();
+                    if n == "SV" || n == "GV" || n == "HV" || n == "AV" || n == "CV" || n == "IO" {
+                        // 引数の文字列が関数呼び出しなら as キャスト
+                        if arg_str.contains('(') && !arg_str.starts_with('(') {
+                            return format!("({} as {})", arg_str, expected_ty);
+                        }
+                    }
+                }
+            }
+        }
         arg_str.to_string()
     }
 
