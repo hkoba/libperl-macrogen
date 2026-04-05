@@ -692,6 +692,32 @@ impl TypeRepr {
         matches!(self, TypeRepr::RustType { source: RustTypeSource::FnParam { .. }, .. })
     }
 
+    /// 型情報の確度 Tier を返す
+    ///
+    /// - Tier 1: bindings.rs (bindgen生成、変更不可)
+    /// - Tier 2: C ヘッダー宣言 / inline 関数パラメータ (変更不可)
+    /// - Tier 3: apidoc (embed.fnc 等、参考情報)
+    /// - Tier 4: 推論結果 (変更可能)
+    pub fn confidence_tier(&self) -> u8 {
+        match self {
+            TypeRepr::RustType { source, .. } => match source {
+                RustTypeSource::FnParam { .. }
+                | RustTypeSource::FnReturn { .. }
+                | RustTypeSource::Const { .. } => 1,
+                RustTypeSource::Parsed { .. } => 3,
+            },
+            TypeRepr::CType { source, .. } => match source {
+                CTypeSource::InlineFn { .. } | CTypeSource::Header => 2,
+                CTypeSource::Apidoc { .. } => 3,
+                CTypeSource::Cast
+                | CTypeSource::SvFamilyCast
+                | CTypeSource::FieldInference { .. }
+                | CTypeSource::Parser => 4,
+            },
+            TypeRepr::Inferred(_) => 4,
+        }
+    }
+
     pub fn is_void(&self) -> bool {
         match self {
             TypeRepr::CType { specs, derived, .. } => {

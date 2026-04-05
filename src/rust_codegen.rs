@@ -2571,52 +2571,37 @@ impl<'a> RustCodegen<'a> {
         let param_name = param.name;
         let should_be_const = self.const_pointer_positions.contains(&param_index);
 
-        // 方法1: パラメータを参照する式の型制約から取得（逆引き辞書を使用）
-        // void 以外の型を優先的に選択する
-        if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param_name) {
-            // 優先パス: bindings.rs の FnParam 制約を最優先
-            for expr_id in expr_ids {
-                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    for c in constraints {
-                        if c.ty.is_fn_param_source() && !c.ty.is_void() {
-                            if should_be_const {
-                                let mut ty = c.ty.clone();
-                                ty.make_outer_pointer_const();
-                                return self.type_repr_to_rust(&ty);
-                            }
-                            return self.type_repr_to_rust(&c.ty);
-                        }
-                    }
-                }
-            }
-            // フォールバック: void 以外の任意の型制約
-            for expr_id in expr_ids {
-                if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                    for c in constraints {
-                        if !c.ty.is_void() {
-                            if should_be_const {
-                                let mut ty = c.ty.clone();
-                                ty.make_outer_pointer_const();
-                                return self.type_repr_to_rust(&ty);
-                            }
-                            return self.type_repr_to_rust(&c.ty);
-                        }
+        // 全制約を Tier 順（高い方優先）で収集し、最高 Tier の型を採用
+        let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
+
+        let expr_ids_from_param_to_exprs: Vec<_> = info.type_env.param_to_exprs
+            .get(&param_name)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default();
+        let all_expr_ids = {
+            let mut ids = expr_ids_from_param_to_exprs;
+            ids.push(param.expr_id());
+            ids
+        };
+
+        for expr_id in &all_expr_ids {
+            if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                for c in constraints {
+                    if c.ty.is_void() { continue; }
+                    let tier = c.ty.confidence_tier();
+                    if best.is_none() || tier < best.unwrap().1 {
+                        best = Some((&c.ty, tier));
                     }
                 }
             }
         }
 
-        // 方法2: 従来の方法（MacroParam の ExprId）- フォールバック
-        let expr_id = param.expr_id();
-        if let Some(constraints) = info.type_env.expr_constraints.get(&expr_id) {
-            if let Some(first) = constraints.first() {
-                if should_be_const {
-                    let mut ty = first.ty.clone();
-                    ty.make_outer_pointer_const();
-                    return self.type_repr_to_rust(&ty);
-                }
-                return self.type_repr_to_rust(&first.ty);
+        if let Some((ty, _tier)) = best {
+            let mut ty = ty.clone();
+            if should_be_const {
+                ty.make_outer_pointer_const();
             }
+            return self.type_repr_to_rust(&ty);
         }
 
         self.unknown_marker().to_string()
