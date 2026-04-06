@@ -1,5 +1,7 @@
 /// SvTYPE - macro function
 #[inline]
-pub unsafe fn SvTYPE(sv: *mut SV) -> svtype {
-    unsafe { (((*sv).sv_flags & SVTYPEMASK) as svtype) }
+pub unsafe fn SvTYPE(sv: *const SV) -> svtype {
+    unsafe {
+        std::mem::transmute::<_, svtype>(((*sv).sv_flags & SVTYPEMASK))
+    }
 }
