@@ -6,6 +6,15 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
+
+/// 式が生成されるコンテキスト（括弧制御用）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExprContext {
+    /// デフォルト: 括弧が必要な可能性がある位置（Binary のオペランド等）
+    Default,
+    /// 括弧不要のトップレベル位置（関数引数、let RHS、return 値、代入 RHS）
+    Top,
+}
 use crate::intern::InternedStr;
 use crate::enum_dict::EnumDict;
 use crate::infer_api::InferResult;
@@ -2275,7 +2284,7 @@ impl<'a> RustCodegen<'a> {
                 }
             }
         }
-        let result = self.expr_to_rust(expr, info);
+        let result = self.expr_to_rust_ctx(expr, info, ExprContext::Top);
         // 整数型の幅不一致キャスト挿入 (bindings.rs + inline 関数)
         if let Some(callee_name) = callee {
             let func_name = self.interner.get(callee_name).to_string();
@@ -2778,6 +2787,10 @@ impl<'a> RustCodegen<'a> {
 
     /// 式を Rust コードに変換
     fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
+        self.expr_to_rust_ctx(expr, info, ExprContext::Default)
+    }
+
+    fn expr_to_rust_ctx(&mut self, expr: &Expr, info: &MacroInferInfo, ctx: ExprContext) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 // lvalue展開時のパラメータ置換
@@ -3185,6 +3198,8 @@ impl<'a> RustCodegen<'a> {
                 } else if self.is_enum_cast_target(type_name) {
                     // enum へのキャストは transmute を使用
                     format!("std::mem::transmute::<_, {}>({})", t, e)
+                } else if ctx == ExprContext::Top {
+                    format!("{} as {}", e, t)
                 } else {
                     format!("({} as {})", e, t)
                 }
@@ -3537,7 +3552,7 @@ impl<'a> RustCodegen<'a> {
                 }
             }
         }
-        self.expr_to_rust(expr, info)
+        self.expr_to_rust_ctx(expr, info, ExprContext::Top)
     }
 
     /// 式を Rust コードに変換（型ヒント付き、inline 関数用）
@@ -3555,7 +3570,7 @@ impl<'a> RustCodegen<'a> {
                 }
             }
         }
-        self.expr_to_rust_inline(expr)
+        self.expr_to_rust_inline_ctx(expr, ExprContext::Top)
     }
 
     /// 文を Rust コードに変換
@@ -4512,6 +4527,10 @@ impl<'a> RustCodegen<'a> {
 
     /// 式を Rust コードに変換（インライン関数用）
     fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
+        self.expr_to_rust_inline_ctx(expr, ExprContext::Default)
+    }
+
+    fn expr_to_rust_inline_ctx(&mut self, expr: &Expr, ctx: ExprContext) -> String {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 // lvalue展開時のパラメータ置換
@@ -4829,7 +4848,7 @@ impl<'a> RustCodegen<'a> {
                         if generics.contains_key(&(i as i32)) {
                             type_args.push(self.expr_to_rust_inline(arg));
                         } else {
-                            value_args.push(self.expr_to_rust_inline(arg));
+                            value_args.push(self.expr_to_rust_inline_ctx(arg, ExprContext::Top));
                         }
                     }
                     return format!("{}::<{}>({})", f, type_args.join(", "), value_args.join(", "));
@@ -4858,7 +4877,7 @@ impl<'a> RustCodegen<'a> {
                             _ => {}
                         }
                     }
-                    let result = self.expr_to_rust_inline(arg);
+                    let result = self.expr_to_rust_inline_ctx(arg, ExprContext::Top);
                     // 整数型の幅不一致キャスト挿入 (bindings.rs + inline 関数)
                     if let Some(expected_ut) = self.get_callee_param_type_extended(&f, param_idx) {
                         let actual_ut = self.infer_expr_type_inline(arg);
@@ -4918,6 +4937,8 @@ impl<'a> RustCodegen<'a> {
                 } else if self.is_enum_cast_target(type_name) {
                     // enum へのキャストは transmute を使用
                     format!("std::mem::transmute::<_, {}>({})", t, e)
+                } else if ctx == ExprContext::Top {
+                    format!("{} as {}", e, t)
                 } else {
                     format!("({} as {})", e, t)
                 }
