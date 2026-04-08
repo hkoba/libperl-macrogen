@@ -3349,9 +3349,9 @@ impl<'a> RustCodegen<'a> {
                             if let Some(wider) = wider_integer_type(&ts, &es) {
                                 let norm_t = normalize_integer_type(&ts);
                                 if norm_t != Some(wider) {
-                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
+                                    return format!("(if {} {{ {} as {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
                                 } else {
-                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", strip_outer_parens(&cond_str), t, e, wider);
+                                    return format!("(if {} {{ {} }} else {{ {} as {} }})", strip_outer_parens(&cond_str), t, e, wider);
                                 }
                             }
                         }
@@ -5076,9 +5076,9 @@ impl<'a> RustCodegen<'a> {
                             if let Some(wider) = wider_integer_type(&ts, &es) {
                                 let norm_t = normalize_integer_type(&ts);
                                 if norm_t != Some(wider) {
-                                    return format!("(if {} {{ ({} as {}) }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
+                                    return format!("(if {} {{ {} as {} }} else {{ {} }})", strip_outer_parens(&cond_str), t, wider, e);
                                 } else {
-                                    return format!("(if {} {{ {} }} else {{ ({} as {}) }})", strip_outer_parens(&cond_str), t, e, wider);
+                                    return format!("(if {} {{ {} }} else {{ {} as {} }})", strip_outer_parens(&cond_str), t, e, wider);
                                 }
                             }
                         }
