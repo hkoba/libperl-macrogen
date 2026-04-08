@@ -2306,7 +2306,7 @@ impl<'a> RustCodegen<'a> {
             let ne = normalize_integer_type(expected_ty);
             if let (Some(a), Some(e)) = (na, ne) {
                 if !integer_types_compatible(a, e) {
-                    return format!("({} as {})", arg_str, e);
+                    return format!("{} as {}", arg_str, e);
                 }
             }
             // ポインタ型のサブタイプ変換 (e.g., *mut GV → *mut SV)
@@ -2321,7 +2321,7 @@ impl<'a> RustCodegen<'a> {
                         } else {
                             expected_ty.to_string()
                         };
-                        return format!("({} as {})", arg_str, cast_ty);
+                        return format!("{} as {}", arg_str, cast_ty);
                     }
                     // const→mut 変換は安全でないため行わない
                     // Phase 2 の Tier ベース推論で解決すべき
@@ -2338,7 +2338,7 @@ impl<'a> RustCodegen<'a> {
                     if n == "SV" || n == "GV" || n == "HV" || n == "AV" || n == "CV" || n == "IO" {
                         // 引数の文字列が関数呼び出しなら as キャスト
                         if arg_str.contains('(') && !arg_str.starts_with('(') {
-                            return format!("({} as {})", arg_str, expected_ty);
+                            return format!("{} as {}", arg_str, expected_ty);
                         }
                     }
                 }
