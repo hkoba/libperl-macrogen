@@ -1032,6 +1032,8 @@ pub enum GenerateStatus {
     CallsUnavailable,
     /// goto を含む（生成対象から除外）
     ContainsGoto,
+    /// ジェネリクス型パラメータを含む（Rust の as T キャスト不可）
+    GenericUnsupported,
     /// スキップ（対象外）
     Skip,
 }
@@ -1076,6 +1078,8 @@ pub struct CodegenStats {
     pub macros_calls_unavailable: usize,
     /// カスケード依存でコメントアウトされたマクロ数
     pub macros_cascade_unavailable: usize,
+    /// ジェネリクス未対応マクロ数
+    pub macros_generic_unsupported: usize,
     /// 未解決シンボルを含むマクロ数
     pub macros_unresolved_names: usize,
     /// 正常生成された inline 関数数
@@ -5757,6 +5761,24 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
                     writeln!(self.writer)?;
                 }
+                GenerateStatus::GenericUnsupported => {
+                    let name_str = self.interner.get(info.name);
+                    let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+                    writeln!(self.writer, "// [GENERIC_UNSUPPORTED] {}{} - Rust cannot cast to generic type T", name_str, thx_info)?;
+                    // コメントアウトしたコードを出力
+                    let const_positions = self.const_pointer_params.get(&name)
+                        .cloned().unwrap_or_default();
+                    let is_bool = self.bool_return_macros.contains(&name);
+                    let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                        .with_const_pointer_positions(const_positions)
+                        .with_bool_return(is_bool, self.bool_return_macros.clone());
+                    let generated = codegen.generate_macro(info);
+                    for line in generated.code.lines() {
+                        writeln!(self.writer, "// {}", line)?;
+                    }
+                    writeln!(self.writer)?;
+                    self.stats.macros_generic_unsupported += 1;
+                }
                 GenerateStatus::Skip => {
                     // 何もしない
                 }
@@ -5878,6 +5900,12 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // 利用不可関数を呼び出すマクロは CallsUnavailable
         if info.calls_unavailable {
             return GenerateStatus::CallsUnavailable;
+        }
+
+        // ジェネリクス型パラメータを含むマクロは生成不可
+        // Rust の as T キャストや T + u32 演算が不可
+        if !info.generic_type_params.is_empty() {
+            return GenerateStatus::GenericUnsupported;
         }
 
         match &info.parse_result {
