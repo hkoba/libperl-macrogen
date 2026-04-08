@@ -3292,6 +3292,13 @@ impl<'a> RustCodegen<'a> {
                 if is_unsigned_cast_expr(&e) {
                     format!("({}).wrapping_neg()", e.trim_start_matches('-'))
                 } else {
+                    // usize/u64 等の unsigned 型に単項マイナスは不可
+                    if let Some(ut) = self.infer_expr_type(inner, info) {
+                        let ts = ut.to_rust_string();
+                        if matches!(normalize_integer_type(&ts), Some("usize" | "u8" | "u16" | "u32" | "u64")) {
+                            self.codegen_errors.push(format!("cannot negate unsigned type: -({}: {})", e, ts));
+                        }
+                    }
                     format!("(-{})", e)
                 }
             }
@@ -5039,6 +5046,12 @@ impl<'a> RustCodegen<'a> {
                 if is_unsigned_cast_expr(&e) {
                     format!("({}).wrapping_neg()", e.trim_start_matches('-'))
                 } else {
+                    if let Some(ut) = self.infer_expr_type_inline(inner) {
+                        let ts = ut.to_rust_string();
+                        if matches!(normalize_integer_type(&ts), Some("usize" | "u8" | "u16" | "u32" | "u64")) {
+                            self.codegen_errors.push(format!("cannot negate unsigned type: -({}: {})", e, ts));
+                        }
+                    }
                     format!("(-{})", e)
                 }
             }
