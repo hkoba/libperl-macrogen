@@ -3665,7 +3665,12 @@ impl<'a> RustCodegen<'a> {
                 if let Some(generic_name) = self.current_type_param_map.get(name) {
                     return generic_name.clone();
                 }
-                return self.interner.get(*name).to_string();
+                let name_str = self.interner.get(*name).to_string();
+                // 未定義型名の検出
+                if !self.known_symbols.contains(&name_str) {
+                    self.codegen_errors.push(format!("undefined type: {}", name_str));
+                }
+                return name_str;
             }
         }
 
