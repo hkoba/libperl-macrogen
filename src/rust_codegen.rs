@@ -3403,14 +3403,14 @@ impl<'a> RustCodegen<'a> {
                             let nr = normalize_integer_type(&rs);
                             if nl.is_some() && nr.is_some() && nl != nr {
                                 let target = nl.unwrap();
-                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, target, l);
+                                return format!("{{ {} {} {} as {}; {} }}", l, assign_op_to_rust(*op), r, target, l);
                             }
                         }
                         // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
                         if let (Some(lut), None) = (&lt, &rt) {
                             let ls = lut.to_rust_string();
                             if let Some(nl) = normalize_integer_type(&ls) {
-                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
+                                return format!("{{ {} {} {} as {}; {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
                         format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
@@ -4143,7 +4143,7 @@ impl<'a> RustCodegen<'a> {
                             "std::ptr::null_mut()".to_string()
                         }
                     } else {
-                        self.expr_to_rust_inline(rhs)
+                        self.expr_to_rust_inline_ctx(rhs, ExprContext::Top)
                     };
                     match op {
                         AssignOp::Assign => format!("{}{} = {};", indent, l, strip_outer_parens(&r)),
@@ -4165,14 +4165,14 @@ impl<'a> RustCodegen<'a> {
                                 let nr = normalize_integer_type(&rs);
                                 if nl.is_some() && nr.is_some() && nl != nr {
                                     let target = nl.unwrap();
-                                    return format!("{}{} {} ({} as {});", indent, l, assign_op_to_rust(*op), r, target);
+                                    return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, target);
                                 }
                             }
                             // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
                             if let (Some(lut), None) = (&lt, &rt) {
                                 let ls = lut.to_rust_string();
                                 if let Some(nl) = normalize_integer_type(&ls) {
-                                    return format!("{}{} {} ({} as {});", indent, l, assign_op_to_rust(*op), r, nl);
+                                    return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl);
                                 }
                             }
                             format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r))
@@ -5130,14 +5130,14 @@ impl<'a> RustCodegen<'a> {
                             let nr = normalize_integer_type(&rs);
                             if nl.is_some() && nr.is_some() && nl != nr {
                                 let target = nl.unwrap();
-                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, target, l);
+                                return format!("{{ {} {} {} as {}; {} }}", l, assign_op_to_rust(*op), r, target, l);
                             }
                         }
                         // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
                         if let (Some(lut), None) = (&lt, &rt) {
                             let ls = lut.to_rust_string();
                             if let Some(nl) = normalize_integer_type(&ls) {
-                                return format!("{{ {} {} ({} as {}); {} }}", l, assign_op_to_rust(*op), r, nl, l);
+                                return format!("{{ {} {} {} as {}; {} }}", l, assign_op_to_rust(*op), r, nl, l);
                             }
                         }
                         format!("{{ {} {} {}; {} }}", l, assign_op_to_rust(*op), strip_outer_parens(&r), l)
