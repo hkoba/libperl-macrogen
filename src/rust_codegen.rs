@@ -1105,6 +1105,8 @@ pub struct GeneratedCode {
     pub unresolved_names: Vec<String>,
     /// 使用された libc 関数名
     pub used_libc_fns: HashSet<String>,
+    /// codegen で検出されたエラー（コメントアウトの理由）
+    pub codegen_errors: Vec<String>,
 }
 
 impl GeneratedCode {
@@ -1178,6 +1180,8 @@ pub struct RustCodegen<'a> {
     const_pointer_positions: HashSet<usize>,
     /// 再代入されるローカル変数名の集合（let mut 判定用）
     mut_local_names: HashSet<InternedStr>,
+    /// codegen で検出されたエラー
+    codegen_errors: Vec<String>,
     /// このマクロが bool を返すと判定されたか
     is_bool_return: bool,
     /// codegen で bool を返すと判定されたマクロの集合（呼び出し先の bool 判定用）
@@ -1246,6 +1250,7 @@ impl<'a> RustCodegen<'a> {
             is_bool_return: false,
             bool_return_macros: HashSet::new(),
             mut_local_names: HashSet::new(),
+            codegen_errors: Vec::new(),
         }
     }
 
@@ -2454,6 +2459,7 @@ impl<'a> RustCodegen<'a> {
             incomplete_count: self.incomplete_count,
             unresolved_names: self.unresolved_names,
             used_libc_fns: self.used_libc_fns,
+            codegen_errors: self.codegen_errors,
         }
     }
 
@@ -3373,8 +3379,14 @@ impl<'a> RustCodegen<'a> {
                 let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
                     self.expr_to_rust(expanded, info)
                 } else if let ExprKind::Call { func, args } = &lhs.kind {
-                    self.try_expand_call_as_lvalue(func, args, info)
-                        .unwrap_or_else(|| self.expr_to_rust(lhs, info))
+                    match self.try_expand_call_as_lvalue(func, args, info) {
+                        Some(expanded) => expanded,
+                        None => {
+                            let lhs_str = self.expr_to_rust(lhs, info);
+                            self.codegen_errors.push(format!("invalid lvalue: {} cannot be assigned to", lhs_str));
+                            lhs_str
+                        }
+                    }
                 } else {
                     self.expr_to_rust(lhs, info)
                 };
@@ -4133,8 +4145,14 @@ impl<'a> RustCodegen<'a> {
                     let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
                         self.expr_to_rust_inline(expanded)
                     } else if let ExprKind::Call { func, args } = &lhs.kind {
-                        self.try_expand_call_as_lvalue_inline(func, args)
-                            .unwrap_or_else(|| self.expr_to_rust_inline(lhs))
+                        match self.try_expand_call_as_lvalue_inline(func, args) {
+                            Some(expanded) => expanded,
+                            None => {
+                                let lhs_str = self.expr_to_rust_inline(lhs);
+                                self.codegen_errors.push(format!("invalid lvalue: {} cannot be assigned to", lhs_str));
+                                lhs_str
+                            }
+                        }
                     } else {
                         self.expr_to_rust_inline(lhs)
                     };
@@ -5466,6 +5484,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             CallsUnavailable,
             ContainsGoto,
             UnresolvedNames { code: String, unresolved: Vec<String> },
+            CodegenError { code: String, errors: Vec<String> },
             Incomplete { code: String },
             Success { code: String, used_libc: HashSet<String> },
         }
@@ -5493,6 +5512,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 gen_results.push((**name, InlineGenResult::UnresolvedNames {
                     code: generated.code,
                     unresolved: generated.unresolved_names,
+                }));
+            } else if !generated.codegen_errors.is_empty() {
+                gen_results.push((**name, InlineGenResult::CodegenError {
+                    code: generated.code,
+                    errors: generated.codegen_errors,
                 }));
             } else if generated.is_complete() {
                 gen_results.push((**name, InlineGenResult::Success {
@@ -5590,6 +5614,17 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     }
                     writeln!(self.writer)?;
                     self.stats.inline_fns_unresolved_names += 1;
+                }
+                InlineGenResult::CodegenError { code, errors } => {
+                    let name_str = self.interner.get(name);
+                    writeln!(self.writer, "// [CODEGEN_ERROR] {} - inline function", name_str)?;
+                    for err in &errors {
+                        writeln!(self.writer, "//   {}", err)?;
+                    }
+                    for line in code.lines() {
+                        writeln!(self.writer, "// {}", line)?;
+                    }
+                    writeln!(self.writer)?;
                 }
                 InlineGenResult::Incomplete { code } => {
                     let name_str = self.interner.get(name);
@@ -5726,6 +5761,18 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         }
                         writeln!(self.writer)?;
                         self.stats.macros_unresolved_names += 1;
+                    } else if !generated.codegen_errors.is_empty() {
+                        // codegen エラー検出：コメントアウトして問題点列挙
+                        let name_str = self.interner.get(info.name);
+                        let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+                        writeln!(self.writer, "// [CODEGEN_ERROR] {}{} - macro function", name_str, thx_info)?;
+                        for err in &generated.codegen_errors {
+                            writeln!(self.writer, "//   {}", err)?;
+                        }
+                        for line in generated.code.lines() {
+                            writeln!(self.writer, "// {}", line)?;
+                        }
+                        writeln!(self.writer)?;
                     } else if generated.is_complete() {
                         // 完全な生成：そのまま出力
                         write!(self.writer, "{}", generated.code)?;
