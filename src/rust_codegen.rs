@@ -4183,7 +4183,7 @@ impl<'a> RustCodegen<'a> {
                     format!("{}{};", indent, self.expr_to_rust_inline(expr))
                 }
             }
-            Stmt::Expr(None, _) => format!("{};", indent),
+            Stmt::Expr(None, _) => String::new(),  // 空文は出力しない
             Stmt::Return(Some(expr), _) => {
                 if let Some(ref rt) = self.current_return_type {
                     if rt.is_pointer() && is_null_literal(expr) {
