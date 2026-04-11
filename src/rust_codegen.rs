@@ -2955,7 +2955,12 @@ impl<'a> RustCodegen<'a> {
                         self.unresolved_names.push(s);
                     }
                 }
-                escape_rust_keyword(name_str)
+                let escaped = escape_rust_keyword(name_str);
+                // extern static 配列はポインタとして使われるため .as_ptr() を付加
+                if self.bindings_info.static_arrays.contains(name_str) {
+                    return format!("{}.as_ptr()", escaped);
+                }
+                escaped
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -3310,11 +3315,17 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             ExprKind::Index { expr: base, index } => {
-                let b = self.expr_to_rust(base, info);
                 let i = self.expr_to_rust(index, info);
                 if self.is_static_array_expr(base) {
+                    // static 配列: 名前を直接使用（.as_ptr() は Ident で自動付加されるが Index では不要）
+                    let b = if let ExprKind::Ident(n) = &base.kind {
+                        escape_rust_keyword(self.interner.get(*n))
+                    } else {
+                        self.expr_to_rust(base, info)
+                    };
                     format!("(*{}.as_ptr().offset({} as isize))", b, i)
                 } else {
+                    let b = self.expr_to_rust(base, info);
                     format!("(*{}.offset({} as isize))", b, i)
                 }
             }
@@ -4778,7 +4789,12 @@ impl<'a> RustCodegen<'a> {
                         self.unresolved_names.push(s);
                     }
                 }
-                escape_rust_keyword(name_str)
+                let escaped = escape_rust_keyword(name_str);
+                // extern static 配列はポインタとして使われるため .as_ptr() を付加
+                if self.bindings_info.static_arrays.contains(name_str) {
+                    return format!("{}.as_ptr()", escaped);
+                }
+                escaped
             }
             ExprKind::IntLit(n) => {
                 format!("{}", n)
@@ -5132,11 +5148,16 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             ExprKind::Index { expr: base, index } => {
-                let b = self.expr_to_rust_inline(base);
                 let i = self.expr_to_rust_inline(index);
                 if self.is_static_array_expr(base) {
+                    let b = if let ExprKind::Ident(n) = &base.kind {
+                        escape_rust_keyword(self.interner.get(*n))
+                    } else {
+                        self.expr_to_rust_inline(base)
+                    };
                     format!("(*{}.as_ptr().offset({} as isize))", b, i)
                 } else {
+                    let b = self.expr_to_rust_inline(base);
                     format!("(*{}.offset({} as isize))", b, i)
                 }
             }
