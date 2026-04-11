@@ -1928,25 +1928,41 @@ impl<'a> RustCodegen<'a> {
     fn infer_expr_type(&self, expr: &Expr, info: &MacroInferInfo) -> Option<UnifiedType> {
         match &expr.kind {
             ExprKind::Ident(name) => {
-                // パラメータの型制約から取得
-                if let Some(constraints) = info.type_env.param_constraints.get(name) {
-                    if let Some(c) = constraints.first() {
-                        return Some(UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)));
-                    }
+                // current_param_types を最優先（Tier ベースで決定済み）
+                if let Some(ut) = self.current_param_types.get(name) {
+                    return Some(ut.clone());
                 }
-                // param_to_exprs 経由の expr_constraints
+                // param_to_exprs 経由の expr_constraints（Tier ベースで選択）
                 if let Some(expr_ids) = info.type_env.param_to_exprs.get(name) {
+                    let mut best: Option<(UnifiedType, u8)> = None;
                     for expr_id in expr_ids {
                         if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                            if let Some(c) = constraints.first() {
-                                return Some(UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)));
+                            for c in constraints {
+                                if c.ty.is_void() { continue; }
+                                let tier = c.ty.confidence_tier();
+                                if best.is_none() || tier < best.as_ref().unwrap().1 {
+                                    best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                                }
                             }
                         }
                     }
+                    if let Some((ut, _)) = best {
+                        return Some(ut);
+                    }
                 }
-                // current_param_types（ローカル変数含む）
-                if let Some(ut) = self.current_param_types.get(name) {
-                    return Some(ut.clone());
+                // param_constraints（フォールバック、Tier ベース）
+                if let Some(constraints) = info.type_env.param_constraints.get(name) {
+                    let mut best: Option<(UnifiedType, u8)> = None;
+                    for c in constraints {
+                        if c.ty.is_void() { continue; }
+                        let tier = c.ty.confidence_tier();
+                        if best.is_none() || tier < best.as_ref().unwrap().1 {
+                            best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                        }
+                    }
+                    if let Some((ut, _)) = best {
+                        return Some(ut);
+                    }
                 }
                 // 定数の型
                 if let Some(dict) = self.rust_decl_dict {
