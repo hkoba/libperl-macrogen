@@ -93,6 +93,10 @@ pub struct MacroInferInfo {
     pub deref_count: usize,             // ポインタデリファレンスの数
     pub called_functions: HashSet<InternedStr>,    // 呼び出す関数
     pub calls_unavailable: bool,        // 利用不可関数の呼び出しを含む（推移的）
+
+    // Phase 2b で確定されるフィールド (resolve_param_and_return_types)
+    pub const_pointer_positions: HashSet<usize>,   // *const に確定したパラメータ位置
+    pub is_bool_return: bool,                      // bool を返すマクロか
 }
 ```
 

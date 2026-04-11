@@ -45,6 +45,8 @@
 │  ・不完全マーカー管理  │               │  ・CALLS_UNAVAILABLE  │
 │  ・未解決シンボル検出  │               │  ・CASCADE_UNAVAILABLE│
 │  ・libc 使用追跡       │               │  ・UNRESOLVED_NAMES   │
+│  ・codegen エラー検出   │               │  ・GENERIC_UNSUPPORTED│
+│                       │               │  ・CODEGEN_ERROR      │
 └───────────────────────┘               └───────────────────────┘
           │
           ▼
@@ -54,7 +56,10 @@
 │  ・incomplete_count: usize (不完全マーカー数)                        │
 │  ・unresolved_names: Vec<String> (未解決シンボル名)                  │
 │  ・used_libc_fns: HashSet<String> (使用した libc 関数名)            │
+│  ・codegen_errors: Vec<String> (検出されたエラー)                    │
 └─────────────────────────────────────────────────────────────────────┘
+
+型推論とキャスト生成の詳細は `architecture-type-inference-and-cast.md` を参照。
 ```
 
 ## 主要コンポーネント
@@ -157,7 +162,9 @@ generate()
     │       ├─ get_macro_status() で分類
     │       ├─ Success → RustCodegen::generate_macro()
     │       │   └─ 未解決シンボルあり → UNRESOLVED_NAMES としてコメントアウト
+    │       │   └─ codegen エラーあり → CODEGEN_ERROR としてコメントアウト
     │       │   └─ 依存先 inline が失敗 → CASCADE_UNAVAILABLE
+    │       ├─ GenericUnsupported → GENERIC_UNSUPPORTED としてコメントアウト
     │       ├─ ParseFailed → generate_macro_parse_failed()
     │       ├─ TypeIncomplete → generate_macro_type_incomplete()
     │       └─ CallsUnavailable → generate_macro_calls_unavailable()
