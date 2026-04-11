@@ -724,19 +724,6 @@ pub const PERL_deBruijnMagic32_: u32 = 125613361;
 pub const PERL_deBruijnShift32_: u32 = 27;
 pub const PERL_deBruijnMagic64_: u64 = 571347909858961602;
 pub const PERL_deBruijnShift64_: u32 = 58;
-pub const NUM_CLASSES: u32 = 18;
-pub const N0: u32 = 0;
-pub const N1: u32 = 18;
-pub const N2: u32 = 36;
-pub const N3: u32 = 54;
-pub const N4: u32 = 72;
-pub const N5: u32 = 90;
-pub const N6: u32 = 108;
-pub const N7: u32 = 126;
-pub const N8: u32 = 144;
-pub const N9: u32 = 162;
-pub const N10: u32 = 180;
-pub const N11: u32 = 209;
 pub const AMGfallNEVER: u32 = 1;
 pub const AMGfallNO: u32 = 2;
 pub const AMGfallYES: u32 = 3;
@@ -2007,7 +1994,7 @@ pub type U64 = ::std::os::raw::c_ulong;
 pub type PERL_INT_FAST8_T = int_fast8_t;
 pub type PERL_UINT_FAST8_T = uint_fast8_t;
 unsafe extern "C" {
-    pub static PL_charclass: [U32; 256usize];
+    pub static PL_charclass: [U32; 0usize];
 }
 pub type line_t = U32;
 #[repr(i32)]
@@ -4190,7 +4177,7 @@ pub enum utf8ness_t {
     UTF8NESS_UNKNOWN = -1,
 }
 unsafe extern "C" {
-    pub static PL_utf8skip: [::std::os::raw::c_uchar; 256usize];
+    pub static PL_utf8skip: [::std::os::raw::c_uchar; 0usize];
 }
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -15057,38 +15044,102 @@ pub type despatch_signals_proc_t = ::std::option::Option<
 unsafe extern "C" {
     pub static mut environ: *mut *mut ::std::os::raw::c_char;
 }
-pub const PL_warn_uninit: &[u8; 33] = b"Use of uninitialized value%s%s%s\0";
-pub const PL_warn_uninit_sv: &[u8; 34] = b"Use of uninitialized value%-p%s%s\0";
-pub const PL_warn_nosemi: &[u8; 30] = b"Semicolon seems to be missing\0";
-pub const PL_warn_reserved: &[u8; 57] = b"Unquoted string \"%s\" may clash with future reserved word\0";
-pub const PL_warn_nl: &[u8; 47] = b"Unsuccessful %s on filename containing newline\0";
-pub const PL_no_wrongref: &[u8; 27] = b"Can't use %s ref as %s ref\0";
-pub const PL_no_symref: &[u8; 64] = b"Can't use string (\"%.32s\") as %s ref while \"strict refs\" in use\0";
-pub const PL_no_symref_sv: &[u8; 66] = b"Can't use string (\"%-32p\"%s) as %s ref while \"strict refs\" in use\0";
-pub const PL_no_usym: &[u8; 45] = b"Can't use an undefined value as %s reference\0";
-pub const PL_no_aelem: &[u8; 66] = b"Modification of non-creatable array value attempted, subscript %d\0";
-pub const PL_no_helem_sv: &[u8; 68] = b"Modification of non-creatable hash value attempted, subscript \"%-p\"\0";
-pub const PL_no_modify: &[u8; 44] = b"Modification of a read-only value attempted\0";
-pub const PL_no_security: &[u8; 28] = b"Insecure dependency in %s%s\0";
-pub const PL_no_sock_func: &[u8; 40] = b"Unsupported socket function \"%s\" called\0";
-pub const PL_no_dir_func: &[u8; 43] = b"Unsupported directory function \"%s\" called\0";
-pub const PL_no_func: &[u8; 33] = b"The %s function is unimplemented\0";
-pub const PL_no_myglob: &[u8; 33] = b"\"%s\" %s %s can't be in a package\0";
-pub const PL_no_localize_ref: &[u8; 35] = b"Can't localize through a reference\0";
-pub const PL_memory_wrap: &[u8; 19] = b"panic: memory wrap\0";
-pub const PL_extended_cp_format: &[u8; 83] = b"Code point 0x%lX is not Unicode, requires a Perl extension, and so is not portable\0";
-pub const PL_Yes: &[u8; 2] = b"1\0";
-pub const PL_No: &[u8; 1] = b"\0";
-pub const PL_Zero: &[u8; 2] = b"0\0";
-pub const PL_hexdigit: &[u8; 33] = b"0123456789abcdef0123456789ABCDEF\0";
-pub const PL_WARN_ALL: ::std::os::raw::c_char = 0;
-pub const PL_WARN_NONE: ::std::os::raw::c_char = 0;
-pub const PL_sh_path: &[u8; 8] = b"/bin/sh\0";
-pub const PL_revision: U8 = 5;
-pub const PL_version: U8 = 40;
-pub const PL_subversion: U8 = 3;
-pub const PL_uuemap: &[u8; 65] = b"`!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\0";
-pub const PL_isa_DOES: &[u8; 4] = b"isa\0";
+unsafe extern "C" {
+    pub static PL_warn_uninit: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_warn_uninit_sv: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_warn_nosemi: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_warn_reserved: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_warn_nl: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_wrongref: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_symref: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_symref_sv: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_usym: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_aelem: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_helem_sv: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_modify: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_security: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_sock_func: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_dir_func: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_func: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_myglob: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_no_localize_ref: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_memory_wrap: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_extended_cp_format: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_Yes: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_No: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_Zero: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_hexdigit: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static mut PL_WARN_ALL: ::std::os::raw::c_char;
+}
+unsafe extern "C" {
+    pub static mut PL_WARN_NONE: ::std::os::raw::c_char;
+}
+unsafe extern "C" {
+    pub static PL_sh_path: [::std::os::raw::c_char; 0usize];
+}
+unsafe extern "C" {
+    pub static PL_revision: U8;
+}
+unsafe extern "C" {
+    pub static PL_version: U8;
+}
+unsafe extern "C" {
+    pub static PL_subversion: U8;
+}
+unsafe extern "C" {
+    pub static PL_uuemap: [::std::os::raw::c_char; 65usize];
+}
+unsafe extern "C" {
+    pub static PL_isa_DOES: [::std::os::raw::c_char; 0usize];
+}
 unsafe extern "C" {
     pub static PL_uudmap: [::std::os::raw::c_char; 256usize];
 }
@@ -15096,27 +15147,29 @@ unsafe extern "C" {
     pub static PL_bitcount: [::std::os::raw::c_char; 256usize];
 }
 unsafe extern "C" {
-    pub static PL_sig_name: [*const ::std::os::raw::c_char; 69usize];
+    pub static PL_sig_name: [*const ::std::os::raw::c_char; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_sig_num: [::std::os::raw::c_int; 69usize];
+    pub static PL_sig_num: [::std::os::raw::c_int; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_fold: [::std::os::raw::c_uchar; 256usize];
+    pub static PL_fold: [::std::os::raw::c_uchar; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_fold_latin1: [::std::os::raw::c_uchar; 256usize];
+    pub static PL_fold_latin1: [::std::os::raw::c_uchar; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_latin1_lc: [::std::os::raw::c_uchar; 256usize];
+    pub static PL_mod_latin1_uc: [::std::os::raw::c_uchar; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_mod_latin1_uc: [::std::os::raw::c_uchar; 256usize];
+    pub static PL_latin1_lc: [::std::os::raw::c_uchar; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_block_type: [*const ::std::os::raw::c_char; 14usize];
+    pub static mut PL_block_type: [*const ::std::os::raw::c_char; 0usize];
 }
-pub const PL_bincompat_options: &[u8; 226] = b" HAS_TIMES MULTIPLICITY PERLIO_LAYERS PERL_HASH_FUNC_SIPHASH13 PERL_HASH_USE_SBOX32 USE_64_BIT_ALL USE_64_BIT_INT USE_ITHREADS USE_LARGE_FILES USE_LOCALE_COLLATE USE_LOCALE_NUMERIC USE_LOCALE_TIME USE_PERLIO USE_REENTRANT_API\0";
+unsafe extern "C" {
+    pub static PL_bincompat_options: [::std::os::raw::c_char; 0usize];
+}
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
 pub enum perl_phase {
@@ -15129,7 +15182,7 @@ pub enum perl_phase {
     PERL_PHASE_DESTRUCT = 6,
 }
 unsafe extern "C" {
-    pub static PL_phase_names: [*const ::std::os::raw::c_char; 7usize];
+    pub static PL_phase_names: [*const ::std::os::raw::c_char; 0usize];
 }
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
@@ -16956,8 +17009,12 @@ impl ::std::fmt::Debug for interpreter {
         )
     }
 }
-pub const PL_interp_size: U16 = 3768;
-pub const PL_interp_size_5_18_0: U16 = 2624;
+unsafe extern "C" {
+    pub static PL_interp_size: U16;
+}
+unsafe extern "C" {
+    pub static PL_interp_size_5_18_0: U16;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct tempsym {
@@ -22618,34 +22675,34 @@ unsafe extern "C" {
     pub fn Perl_thread_locale_term(my_perl: *mut PerlInterpreter);
 }
 unsafe extern "C" {
-    pub static PL_op_name: [*const ::std::os::raw::c_char; 423usize];
+    pub static PL_op_name: [*const ::std::os::raw::c_char; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_desc: [*const ::std::os::raw::c_char; 423usize];
+    pub static PL_op_desc: [*const ::std::os::raw::c_char; 0usize];
 }
 unsafe extern "C" {
-    pub static mut PL_ppaddr: [Perl_ppaddr_t; 422usize];
+    pub static mut PL_ppaddr: [Perl_ppaddr_t; 0usize];
 }
 unsafe extern "C" {
-    pub static mut PL_check: [Perl_check_t; 422usize];
+    pub static mut PL_check: [Perl_check_t; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_opargs: [U32; 422usize];
+    pub static PL_opargs: [U32; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_private_labels: [::std::os::raw::c_char; 727usize];
+    pub static PL_op_private_bitdef_ix: [I16; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_private_bitfields: [I16; 59usize];
+    pub static PL_op_private_bitdefs: [U16; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_private_bitdef_ix: [I16; 422usize];
+    pub static PL_op_private_labels: [::std::os::raw::c_char; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_private_bitdefs: [U16; 270usize];
+    pub static PL_op_private_bitfields: [I16; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_op_private_valid: [U8; 422usize];
+    pub static PL_op_private_valid: [U8; 0usize];
 }
 unsafe extern "C" {
     pub static mut PL_op_mutex: perl_mutex;
@@ -22656,7 +22713,9 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub static mut PL_thr_key: perl_key;
 }
-pub const PL_do_undump: bool = false;
+unsafe extern "C" {
+    pub static mut PL_do_undump: bool;
+}
 unsafe extern "C" {
     pub static mut PL_sigfpe_saved: Sighandler_t;
 }
@@ -22675,9 +22734,15 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub static mut PL_perlio_fd_refcnt: *mut ::std::os::raw::c_int;
 }
-pub const PL_perlio_fd_refcnt_size: ::std::os::raw::c_int = 0;
-pub const PL_perlio_debug_fd: ::std::os::raw::c_int = 0;
-pub const PL_mmap_page_size: IV = 0;
+unsafe extern "C" {
+    pub static mut PL_perlio_fd_refcnt_size: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_perlio_debug_fd: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_mmap_page_size: IV;
+}
 unsafe extern "C" {
     pub static mut PL_hints_mutex: perl_mutex;
 }
@@ -22699,9 +22764,15 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub static mut PL_my_ctx_mutex: perl_mutex;
 }
-pub const PL_veto_switch_non_tTHX_context: ::std::os::raw::c_int = 0;
-pub const PL_my_cxt_index: ::std::os::raw::c_int = 0;
-pub const PL_veto_cleanup: ::std::os::raw::c_int = 0;
+unsafe extern "C" {
+    pub static mut PL_veto_switch_non_tTHX_context: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_my_cxt_index: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_veto_cleanup: ::std::os::raw::c_int;
+}
 unsafe extern "C" {
     pub static mut PL_keyword_plugin_mutex: perl_mutex;
 }
@@ -22714,14 +22785,18 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub static mut PL_op_sequence: *mut HV;
 }
-pub const PL_op_seq: UV = 0;
+unsafe extern "C" {
+    pub static mut PL_op_seq: UV;
+}
 unsafe extern "C" {
     pub static mut PL_dollarzero_mutex: perl_mutex;
 }
 unsafe extern "C" {
     pub static mut PL_sv_placeholder: SV;
 }
-pub const PL_hash_seed_set: bool = false;
+unsafe extern "C" {
+    pub static mut PL_hash_seed_set: bool;
+}
 unsafe extern "C" {
     pub static mut PL_hash_seed_w: [U64; 4usize];
 }
@@ -22737,15 +22812,33 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub static mut PL_user_prop_mutex: perl_mutex;
 }
-pub const PL_strategy_dup: ::std::os::raw::c_int = 0;
-pub const PL_strategy_dup2: ::std::os::raw::c_int = 0;
-pub const PL_strategy_open: ::std::os::raw::c_int = 0;
-pub const PL_strategy_open3: ::std::os::raw::c_int = 0;
-pub const PL_strategy_mkstemp: ::std::os::raw::c_int = 0;
-pub const PL_strategy_socket: ::std::os::raw::c_int = 0;
-pub const PL_strategy_accept: ::std::os::raw::c_int = 0;
-pub const PL_strategy_pipe: ::std::os::raw::c_int = 0;
-pub const PL_strategy_socketpair: ::std::os::raw::c_int = 0;
+unsafe extern "C" {
+    pub static mut PL_strategy_dup: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_dup2: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_open: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_open3: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_mkstemp: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_socket: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_accept: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_pipe: ::std::os::raw::c_int;
+}
+unsafe extern "C" {
+    pub static mut PL_strategy_socketpair: ::std::os::raw::c_int;
+}
 unsafe extern "C" {
     pub static mut PL_my_environ: *mut *mut ::std::os::raw::c_char;
 }
@@ -22768,37 +22861,37 @@ unsafe extern "C" {
     pub static PL_magic_data: [U8; 256usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_IVX: [bool; 17usize];
+    pub static PL_valid_types_IVX: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_NVX: [bool; 17usize];
+    pub static PL_valid_types_NVX: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_PVX: [bool; 17usize];
+    pub static PL_valid_types_PVX: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_RV: [bool; 17usize];
+    pub static PL_valid_types_RV: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_IV_set: [bool; 17usize];
+    pub static PL_valid_types_IV_set: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_valid_types_NV_set: [bool; 17usize];
+    pub static PL_valid_types_NV_set: [bool; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_deBruijn_bitpos_tab32: [U8; 32usize];
+    pub static PL_deBruijn_bitpos_tab32: [U8; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_deBruijn_bitpos_tab64: [U8; 64usize];
+    pub static PL_deBruijn_bitpos_tab64: [U8; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_extended_utf8_dfa_tab: [U8; 454usize];
+    pub static PL_extended_utf8_dfa_tab: [U8; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_strict_utf8_dfa_tab: [U8; 484usize];
+    pub static PL_strict_utf8_dfa_tab: [U8; 0usize];
 }
 unsafe extern "C" {
-    pub static PL_c9_utf8_dfa_tab: [U8; 352usize];
+    pub static PL_c9_utf8_dfa_tab: [U8; 0usize];
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
