@@ -479,6 +479,21 @@ impl UnifiedType {
         matches!(self, Self::Pointer { .. })
     }
 
+    /// void ポインタ (*mut c_void / *const c_void) かどうか
+    pub fn is_void_pointer(&self) -> bool {
+        match self {
+            Self::Pointer { inner, .. } => {
+                matches!(**inner, Self::Void) || matches!(**inner, Self::Named(ref n) if n == "c_void")
+            }
+            _ => false,
+        }
+    }
+
+    /// 具体的なポインタ（ポインタだが void ではない）かどうか
+    pub fn is_concrete_pointer(&self) -> bool {
+        self.is_pointer() && !self.is_void_pointer()
+    }
+
     /// const ポインタ型かどうか
     pub fn is_const_pointer(&self) -> bool {
         matches!(self, Self::Pointer { is_const: true, .. })

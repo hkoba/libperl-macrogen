@@ -69,8 +69,31 @@ collect_call_constraints() が Perl_sv_dup_inc の bindings を参照:
 | 3 | apidoc (embed.fnc), Parsed | 参考情報 |
 | 4 | 推論 (Cast, SvFamilyCast, FieldInference) | 変更可能 |
 
-`get_param_type()` (rust_codegen.rs) は全制約を走査し、
+`get_param_type()` と `get_return_type()` は全制約を走査し、
 最小の Tier (最高の確度) を持つ制約を採用する。
+
+### 型の具体性 (Specificity)
+
+Tier に加えて、型の**内容の精度**も選択に影響する。
+同 Tier の制約が複数ある場合、より具体的な型を優先する。
+
+```
+具体性: 高 ← *mut CV, *mut SV, *mut c_char (具体的なポインタ)
+具体性: 低 ← *mut c_void              (汎用ポインタ)
+具体性: 無 ← ()                        (void)
+```
+
+**適用箇所**: 条件式 (`cond ? A : B`) の型推論。
+一方が `NULL` (= `void*`) なら、他方の具体的な型を結果型とする。
+
+```
+C:    gp_cvgen ? NULL : gp_cv
+then: *mut c_void (NULL)
+else: *mut CV     (gp_cv フィールド)
+結果: *mut CV     (具体的な方を優先)
+```
+
+`UnifiedType::is_void_pointer()` / `is_concrete_pointer()` で判定。
 
 ## Phase 2b: const/mut と bool の確定
 

@@ -1141,6 +1141,15 @@ impl<'a> SemanticAnalyzer<'a> {
     fn compute_conditional_type_str(&self, then_id: ExprId, else_id: ExprId, type_env: &TypeEnv) -> String {
         let then_ty = self.get_expr_type_str(then_id, type_env);
         let else_ty = self.get_expr_type_str(else_id, type_env);
+        // void * vs 具体的ポインタ → 具体的な方を優先
+        let is_void_ptr = |s: &str| s.contains("void") && s.contains('*');
+        let is_concrete_ptr = |s: &str| !s.contains("void") && s.contains('*');
+        if is_void_ptr(&then_ty) && is_concrete_ptr(&else_ty) {
+            return else_ty;
+        }
+        if is_void_ptr(&else_ty) && is_concrete_ptr(&then_ty) {
+            return then_ty;
+        }
         self.usual_arithmetic_conversion_str(&then_ty, &else_ty)
     }
 

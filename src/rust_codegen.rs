@@ -1824,8 +1824,21 @@ impl<'a> RustCodegen<'a> {
                 // expanded にフォールバック
                 self.infer_expr_type_inline(expanded)
             }
-            ExprKind::Conditional { then_expr, .. } => {
-                self.infer_expr_type_inline(then_expr)
+            ExprKind::Conditional { then_expr, else_expr, .. } => {
+                if is_null_literal(then_expr) {
+                    return self.infer_expr_type_inline(else_expr);
+                }
+                if is_null_literal(else_expr) {
+                    return self.infer_expr_type_inline(then_expr);
+                }
+                let tt = self.infer_expr_type_inline(then_expr);
+                let et = self.infer_expr_type_inline(else_expr);
+                match (&tt, &et) {
+                    (Some(t), Some(e)) if t.is_void_pointer() && e.is_concrete_pointer() => et,
+                    (Some(t), Some(e)) if e.is_void_pointer() && t.is_concrete_pointer() => tt,
+                    (Some(_), _) => tt,
+                    (None, _) => et,
+                }
             }
             _ => None,
         }
@@ -2023,8 +2036,21 @@ impl<'a> RustCodegen<'a> {
                 // 展開済みの式から推定
                 self.infer_expr_type(expanded, info)
             }
-            ExprKind::Conditional { then_expr, .. } => {
-                self.infer_expr_type(then_expr, info)
+            ExprKind::Conditional { then_expr, else_expr, .. } => {
+                if is_null_literal(then_expr) {
+                    return self.infer_expr_type(else_expr, info);
+                }
+                if is_null_literal(else_expr) {
+                    return self.infer_expr_type(then_expr, info);
+                }
+                let tt = self.infer_expr_type(then_expr, info);
+                let et = self.infer_expr_type(else_expr, info);
+                match (&tt, &et) {
+                    (Some(t), Some(e)) if t.is_void_pointer() && e.is_concrete_pointer() => et,
+                    (Some(t), Some(e)) if e.is_void_pointer() && t.is_concrete_pointer() => tt,
+                    (Some(_), _) => tt,
+                    (None, _) => et,
+                }
             }
             _ => None,
         }
