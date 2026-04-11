@@ -1324,6 +1324,13 @@ impl<'a> RustCodegen<'a> {
         if let Some(ty) = info.get_return_type() {
             eprintln!("  return TypeRepr: tier={} rust={}", ty.confidence_tier(), ty.to_rust_string(self.interner));
         }
+        // return_constraints (apidoc 由来)
+        if !info.type_env.return_constraints.is_empty() {
+            eprintln!("  return_constraints:");
+            for c in &info.type_env.return_constraints {
+                eprintln!("    tier={} rust={} context={}", c.ty.confidence_tier(), c.ty.to_rust_string(self.interner), c.context);
+            }
+        }
         // ルート式の全制約
         if let ParseResult::Expression(ref expr) = info.parse_result {
             if let Some(constraints) = info.type_env.expr_constraints.get(&expr.id) {

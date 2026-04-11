@@ -5,3 +5,4 @@ pub unsafe fn SvIOK_only_UV(sv: *mut SV) -> () {
         { { assert!(!isGV_with_GP(sv)); }; { SvOK_off_exc_UV(sv); { (*sv).sv_flags |= SVf_IOK | SVp_IOK; (*sv).sv_flags } } };
     }
 }
+

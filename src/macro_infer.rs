@@ -402,22 +402,31 @@ impl MacroInferInfo {
     /// 1. return_constraints があればそれを使用
     /// 2. 式マクロの場合、ルート式の型制約を使用
     pub fn get_return_type(&self) -> Option<&crate::type_repr::TypeRepr> {
-        // まず return_constraints を確認
-        if let Some(ty) = self.type_env.get_return_type() {
-            return Some(ty);
+        // return_constraints とルート式制約の両方から、
+        // Tier ベースで最高確度の制約を選択
+        let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
+
+        // return_constraints (apidoc 由来等)
+        for c in &self.type_env.return_constraints {
+            let tier = c.ty.confidence_tier();
+            if best.is_none() || tier < best.unwrap().1 {
+                best = Some((&c.ty, tier));
+            }
         }
 
-        // 式マクロの場合、ルート式の型を取得
+        // 式マクロの場合、ルート式の制約も候補に
         if let ParseResult::Expression(ref expr) = self.parse_result {
             if let Some(constraints) = self.type_env.get_expr_constraints(expr.id) {
-                // 最初の制約の型を返す
-                if let Some(constraint) = constraints.first() {
-                    return Some(&constraint.ty);
+                for c in constraints {
+                    let tier = c.ty.confidence_tier();
+                    if best.is_none() || tier < best.unwrap().1 {
+                        best = Some((&c.ty, tier));
+                    }
                 }
             }
         }
 
-        None
+        best.map(|(ty, _)| ty)
     }
 }
 
