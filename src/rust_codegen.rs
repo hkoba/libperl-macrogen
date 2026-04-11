@@ -3397,14 +3397,43 @@ impl<'a> RustCodegen<'a> {
                 } else {
                     self.expr_to_rust(lhs, info)
                 };
+                let lhs_ut = self.infer_expr_type(lhs, info);
                 let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
-                    if self.infer_expr_type(lhs, info).is_some_and(|ut| ut.is_const_pointer()) {
-                        "std::ptr::null()".to_string()
+                    if let Some(ref lut) = lhs_ut {
+                        if lut.is_pointer() {
+                            if lut.is_const_pointer() {
+                                "std::ptr::null()".to_string()
+                            } else {
+                                "std::ptr::null_mut()".to_string()
+                            }
+                        } else {
+                            "0".to_string()
+                        }
                     } else {
                         "std::ptr::null_mut()".to_string()
                     }
                 } else {
-                    self.expr_to_rust(rhs, info)
+                    let r_str = self.expr_to_rust(rhs, info);
+                    if *op == AssignOp::Assign {
+                        if let Some(ref lut) = lhs_ut {
+                            if let Some(rut) = self.infer_expr_type(rhs, info) {
+                                let ls = lut.to_rust_string();
+                                let rs = rut.to_rust_string();
+                                if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
+                                    if !integer_types_compatible(nl, nr) {
+                                        let r_stripped = strip_outer_parens(&r_str);
+                                        let r_cast = if r_stripped.contains(' ') {
+                                            format!("({}) as {}", r_stripped, nl)
+                                        } else {
+                                            format!("{} as {}", r_stripped, nl)
+                                        };
+                                        return format!("{{ {} = {}; {} }}", l, r_cast, l);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    r_str
                 };
                 match op {
                     AssignOp::Assign => format!("{{ {} = {}; {} }}", l, strip_outer_parens(&r), l),
@@ -4168,16 +4197,46 @@ impl<'a> RustCodegen<'a> {
                     } else {
                         self.expr_to_rust_inline(lhs)
                     };
+                    let lhs_ut = self.infer_expr_type_inline(lhs);
                     let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
-                        // null リテラルは代入先の型に合わせて null_mut()/null() を生成
-                        // Rust は代入先から型推論できるので型注釈不要
-                        if self.infer_expr_type_inline(lhs).is_some_and(|ut| ut.is_const_pointer()) {
-                            "std::ptr::null()".to_string()
+                        // null リテラル: LHS がポインタなら null_mut/null, 整数なら 0
+                        if let Some(ref lut) = lhs_ut {
+                            if lut.is_pointer() {
+                                if lut.is_const_pointer() {
+                                    "std::ptr::null()".to_string()
+                                } else {
+                                    "std::ptr::null_mut()".to_string()
+                                }
+                            } else {
+                                "0".to_string()
+                            }
                         } else {
                             "std::ptr::null_mut()".to_string()
                         }
                     } else {
-                        self.expr_to_rust_inline_ctx(rhs, ExprContext::Top)
+                        let r_str = self.expr_to_rust_inline_ctx(rhs, ExprContext::Top);
+                        // 整数型の幅不一致キャスト
+                        if *op == AssignOp::Assign {
+                            if let Some(ref lut) = lhs_ut {
+                                if let Some(rut) = self.infer_expr_type_inline(rhs) {
+                                    let ls = lut.to_rust_string();
+                                    let rs = rut.to_rust_string();
+                                    if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
+                                        if !integer_types_compatible(nl, nr) {
+                                            // Binary 式等の場合は括弧が必要（as の優先順位が高い）
+                                            let r_stripped = strip_outer_parens(&r_str);
+                                            let r_cast = if r_stripped.contains(' ') {
+                                                format!("({}) as {}", r_stripped, nl)
+                                            } else {
+                                                format!("{} as {}", r_stripped, nl)
+                                            };
+                                            return format!("{}{} = {};", indent, l, r_cast);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        r_str
                     };
                     match op {
                         AssignOp::Assign => format!("{}{} = {};", indent, l, strip_outer_parens(&r)),
