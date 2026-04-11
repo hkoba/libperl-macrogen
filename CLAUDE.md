@@ -76,9 +76,25 @@ When making changes to `src/macrogen.rs` (especially `generate()` function):
 2. **Key architecture files**:
    - `doc/architecture-semantic-type-inference.md` - Type inference, SemanticAnalyzer, TypeRepr
    - `doc/architecture-rust-codegen.md` - Code generation, RustCodegen, CodegenDriver
+   - `doc/architecture-type-inference-and-cast.md` - Type inference and cast generation details
    - `doc/architecture-macro-expansion-control.md` - Macro expansion rules
    - `doc/architecture-inline-function-processing.md` - Inline function handling
    - `doc/architecture-thx-dependency.md` - THX (my_perl) dependency detection
+
+### Debugging Type Inference
+
+To dump type inference details for a specific function during code generation:
+
+```bash
+cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.rs \
+  --dump-types-for CxLABEL 2>&1 | grep -A30 '=== Type dump'
+```
+
+This outputs to stderr:
+- Parameter constraints with confidence tiers and sources
+- Return type TypeRepr and its tier
+- Root expression constraints (for Expression-type macros)
+- `const_pointer_positions` and `is_bool_return` flags
 
 ### File Locations
 

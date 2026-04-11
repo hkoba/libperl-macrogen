@@ -197,6 +197,8 @@ pub struct CodegenConfig {
     pub use_statements: Vec<String>,
     /// AST ダンプ対象関数名（デバッグ用）
     pub dump_ast_for: Option<String>,
+    /// 型推論ダンプ対象関数名（デバッグ用）
+    pub dump_types_for: Option<String>,
 }
 
 impl Default for CodegenConfig {
@@ -209,6 +211,7 @@ impl Default for CodegenConfig {
             emit_macros: true,
             use_statements: Vec::new(),
             dump_ast_for: None,
+            dump_types_for: None,
         }
     }
 }
@@ -222,6 +225,7 @@ impl CodegenConfig {
             include_source_location: self.macro_comments,
             use_statements: self.use_statements.clone(),
             dump_ast_for: self.dump_ast_for.clone(),
+            dump_types_for: self.dump_types_for.clone(),
         }
     }
 }
@@ -359,6 +363,12 @@ impl PipelineBuilder {
     /// AST ダンプ対象関数名を指定（デバッグ用）
     pub fn with_dump_ast_for(mut self, name: impl Into<String>) -> Self {
         self.codegen.dump_ast_for = Some(name.into());
+        self
+    }
+
+    /// 型推論ダンプ対象関数名を指定（デバッグ用）
+    pub fn with_dump_types_for(mut self, name: impl Into<String>) -> Self {
+        self.codegen.dump_types_for = Some(name.into());
         self
     }
 
@@ -616,6 +626,12 @@ impl InferredPipeline {
     /// AST ダンプ対象関数名を指定（デバッグ用）
     pub fn with_dump_ast_for(mut self, name: impl Into<String>) -> Self {
         self.codegen_config.dump_ast_for = Some(name.into());
+        self
+    }
+
+    /// 型推論ダンプ対象関数名を指定（デバッグ用）
+    pub fn with_dump_types_for(mut self, name: impl Into<String>) -> Self {
+        self.codegen_config.dump_types_for = Some(name.into());
         self
     }
 

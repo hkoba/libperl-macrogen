@@ -145,6 +145,10 @@ struct Cli {
     /// 指定した関数のコード生成時に入力 AST をコメントとしてダンプ（デバッグ用）
     #[arg(long = "dump-ast-for", value_name = "FUNC")]
     dump_ast_for: Option<String>,
+
+    /// 指定した関数のコード生成時に型推論結果を stderr にダンプ（デバッグ用）
+    #[arg(long = "dump-types-for", value_name = "FUNC")]
+    dump_types_for: Option<String>,
 }
 
 fn main() {
@@ -248,6 +252,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ref name) = cli.dump_ast_for {
         builder = builder.with_dump_ast_for(name);
+    }
+    if let Some(ref name) = cli.dump_types_for {
+        builder = builder.with_dump_types_for(name);
     }
 
     // Pipeline を構築してプリプロセスを実行

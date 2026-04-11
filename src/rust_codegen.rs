@@ -978,6 +978,8 @@ pub struct CodegenConfig {
     pub use_statements: Vec<String>,
     /// AST ダンプ対象関数名（デバッグ用）
     pub dump_ast_for: Option<String>,
+    /// 型推論ダンプ対象関数名（デバッグ用）
+    pub dump_types_for: Option<String>,
 }
 
 impl Default for CodegenConfig {
@@ -988,6 +990,7 @@ impl Default for CodegenConfig {
             include_source_location: true,
             use_statements: Vec::new(),
             dump_ast_for: None,
+            dump_types_for: None,
         }
     }
 }
@@ -1176,6 +1179,8 @@ pub struct RustCodegen<'a> {
     field_type_map: HashMap<String, UnifiedType>,
     /// AST ダンプ対象関数名（デバッグ用）
     dump_ast_for: Option<String>,
+    /// 型推論ダンプ対象関数名（デバッグ用）
+    dump_types_for: Option<String>,
     /// const ポインタに変換可能なパラメータの引数位置集合
     const_pointer_positions: HashSet<usize>,
     /// 再代入されるローカル変数名の集合（let mut 判定用）
@@ -1246,6 +1251,7 @@ impl<'a> RustCodegen<'a> {
             inline_fn_dict,
             field_type_map: build_field_type_map(rust_decl_dict),
             dump_ast_for: None,
+            dump_types_for: None,
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
             bool_return_macros: HashSet::new(),
@@ -1257,6 +1263,11 @@ impl<'a> RustCodegen<'a> {
     /// AST ダンプ対象関数名を設定（デバッグ用）
     pub fn with_dump_ast_for(mut self, name: Option<String>) -> Self {
         self.dump_ast_for = name;
+        self
+    }
+
+    pub fn with_dump_types_for(mut self, name: Option<String>) -> Self {
+        self.dump_types_for = name;
         self
     }
 
@@ -1274,6 +1285,61 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// 指定された関数名が AST ダンプ対象かどうかを判定し、対象なら AST をコメントとして出力
+    /// 型推論結果を stderr にダンプ（デバッグ用）
+    fn dump_type_info(&self, name_str: &str, info: &MacroInferInfo, params_str: &str, return_type: &str) {
+        eprintln!("=== Type dump for {} ===", name_str);
+        // パラメータ型
+        for (i, p) in info.params.iter().enumerate() {
+            let pname = self.interner.get(p.name);
+            let is_const = info.const_pointer_positions.contains(&i);
+            // 全制約を表示
+            let expr_ids: Vec<_> = info.type_env.param_to_exprs
+                .get(&p.name)
+                .map(|ids| ids.iter().cloned().collect())
+                .unwrap_or_default();
+            let mut all_ids = expr_ids;
+            all_ids.push(p.expr_id());
+            eprintln!("  param[{}] {} (const_position={})", i, pname, is_const);
+            for eid in &all_ids {
+                if let Some(constraints) = info.type_env.expr_constraints.get(eid) {
+                    for c in constraints {
+                        eprintln!("    constraint: tier={} rust={} context={} source={:?}",
+                            c.ty.confidence_tier(),
+                            c.ty.to_rust_string(self.interner),
+                            c.context,
+                            match &c.ty {
+                                crate::type_repr::TypeRepr::CType { source, .. } => format!("{:?}", source),
+                                crate::type_repr::TypeRepr::RustType { source, .. } => format!("{:?}", source),
+                                crate::type_repr::TypeRepr::Inferred(i) => format!("Inferred({:?})", std::mem::discriminant(i)),
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!("  params_str: {}", params_str);
+        // 戻り値型
+        eprintln!("  return_type: {}", return_type);
+        eprintln!("  is_bool_return: {}", info.is_bool_return);
+        if let Some(ty) = info.get_return_type() {
+            eprintln!("  return TypeRepr: tier={} rust={}", ty.confidence_tier(), ty.to_rust_string(self.interner));
+        }
+        // ルート式の全制約
+        if let ParseResult::Expression(ref expr) = info.parse_result {
+            if let Some(constraints) = info.type_env.expr_constraints.get(&expr.id) {
+                eprintln!("  root expr constraints:");
+                for c in constraints {
+                    eprintln!("    tier={} rust={} context={}",
+                        c.ty.confidence_tier(),
+                        c.ty.to_rust_string(self.interner),
+                        c.context,
+                    );
+                }
+            }
+        }
+        eprintln!("=== End type dump ===");
+    }
+
     fn dump_ast_comment_for_expr(&mut self, name_str: &str, parse_result: &ParseResult) {
         if self.dump_ast_for.as_deref() != Some(name_str) {
             return;
@@ -2501,6 +2567,11 @@ impl<'a> RustCodegen<'a> {
         // 戻り値の型を取得（current_return_type にもセット）
         let return_type = self.get_return_type(info);
         self.current_return_type = Some(UnifiedType::from_rust_str(&return_type));
+
+        // 型推論ダンプ
+        if self.dump_types_for.as_deref() == Some(name_str) {
+            self.dump_type_info(name_str, info, &params_with_types, &return_type);
+        }
 
         // THX 依存の場合は my_perl パラメータを追加
         let thx_param = if info.is_thx_dependent {
@@ -5582,6 +5653,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                 .with_dump_ast_for(self.config.dump_ast_for.clone())
+                        .with_dump_types_for(self.config.dump_types_for.clone())
                 .with_bool_return(false, self.bool_return_macros.clone());
             let generated = codegen.generate_inline_fn(**name, func_def);
 
@@ -5823,6 +5895,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let is_bool = self.bool_return_macros.contains(&name);
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
+                        .with_dump_types_for(self.config.dump_types_for.clone())
                         .with_const_pointer_positions(const_positions)
                         .with_bool_return(is_bool, self.bool_return_macros.clone());
                     let generated = codegen.generate_macro(info);
