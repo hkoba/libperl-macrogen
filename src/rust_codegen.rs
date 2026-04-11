@@ -406,6 +406,7 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
 
 /// 式文字列の最外レベルの不要な括弧を除去する。
 /// "(expr)" → "expr" （先頭の '(' と末尾の ')' が対応する場合のみ）
+/// ただしブロック式 "({...})" は除去しない（ `{...} op expr` が構文エラーになるため）
 fn strip_outer_parens(s: &str) -> &str {
     let s = s.trim();
     if s.len() < 2 || !s.starts_with('(') || !s.ends_with(')') {
@@ -413,6 +414,10 @@ fn strip_outer_parens(s: &str) -> &str {
     }
     // 先頭の '(' と末尾の ')' が対応するかチェック
     let inner = &s[1..s.len() - 1];
+    // ブロック式 ({...}) は strip しない
+    if inner.trim_start().starts_with('{') {
+        return s;
+    }
     let mut depth = 0i32;
     for ch in inner.chars() {
         match ch {
@@ -2673,7 +2678,13 @@ impl<'a> RustCodegen<'a> {
                         || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
                         self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
                     } else {
-                        self.writeln(&format!("{}{} != 0", body_indent, strip_outer_parens(&rust_expr)));
+                        let stripped = strip_outer_parens(&rust_expr);
+                        // ブロック式 { ... } は ({ ... }) != 0 にする必要がある
+                        if stripped.starts_with('{') {
+                            self.writeln(&format!("{}({}) != 0", body_indent, stripped));
+                        } else {
+                            self.writeln(&format!("{}{} != 0", body_indent, stripped));
+                        }
                     }
                 } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
                     self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&casted)));
