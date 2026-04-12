@@ -527,11 +527,113 @@ pub unsafe fn SvPVX(sv: *mut SV) -> *mut c_char {
 | `wrap_as_bool_condition()` | 必要に応じて `!= 0` を追加 |
 | `is_null_literal()` | NULL リテラル判定（`null_mut()` / `null()` 変換用） |
 
+## syn::Expr ベースの括弧正規化 (syn_codegen モジュール)
+
+### 背景
+
+文字列ベースの式生成では、`ExprContext` (Top/Default) で括弧を制御しているが、
+限界がある。例えば `(*a).field` の括弧は構文上必須だが、
+`(*a)` 単体がブロック末尾値として使われる場合は不要。
+文字列レベルでは使用文脈を判定できないため、安全側で常に括弧を付ける結果、
+`unnecessary parentheses around block return value` 警告が発生する。
+
+### アーキテクチャ
+
+`src/syn_codegen.rs` モジュールは `syn` crate の AST を活用して
+正確な括弧制御を実現する。
+
+```
+expr_to_rust_ctx() → String (文字列ベースの式生成、既存)
+         │
+         ▼
+normalize_parens(s: &str) → String
+         │
+         ├─ syn::parse_str()        文字列 → syn::Expr
+         ├─ strip_all_parens()      全 Paren ノードを除去
+         ├─ parenthesize()          優先順位に基づく括弧再挿入
+         └─ pretty_expr()           prettyplease で整形
+```
+
+### 主要コンポーネント
+
+#### parenthesize(expr) → syn::Expr
+
+syn::Expr 木を走査し、親子の演算子優先順位に基づいて
+`Expr::Paren` ノードを挿入する。
+
+| 式タイプ | 優先順位 | 括弧が必要になる例 |
+|----------|---------|-------------------|
+| Lit, Path, Paren | 100 | なし（最高優先） |
+| MethodCall, Field, Call | 90 | Cast(75) の子 → 不要 |
+| Unary (!, -, *, &) | 80 | Field(90) の子 → 必要: `(*a).field` |
+| Cast (as) | 75 | Binary の子 → 不要（as > 全 binop） |
+| Binary (*) | 70 | Cast(75) の子 → 必要: `(a * b) as T` |
+| If, Match | 1 | Cast の子 → 必要: `(if ... else ...) as T` |
+| Block, Unsafe | 100 | なし（`{}` で自己完結） |
+
+If/Match に優先順位 1 を割り当てるのは、`if ... else { } as T` が
+Rust で `if ... else { (... as T) }` と誤解析されるため。
+
+#### strip_all_parens(expr) → syn::Expr
+
+syn::Expr 木のすべての `Expr::Paren` ラッパーノードを再帰的に除去する。
+木構造（Binary, Unary, Cast 等）は保持される。
+
+#### normalize_parens(s: &str) → String
+
+式文字列の括弧を正規化する統合関数。
+
+1. `syn::parse_str` でパース
+2. `strip_all_parens` で全括弧除去
+3. `parenthesize` で必要な括弧のみ再挿入
+4. `prettyplease` で整形して文字列に戻す
+
+結果が多行（if-else 等）やパース失敗の場合は、
+`strip_outer_parens` 相当のフォールバックを使用。
+
+#### 適用箇所
+
+`normalize_parens` は以下の出力ポイントで適用される:
+
+| 箇所 | 対象の警告 |
+|------|-----------|
+| `generate_macro`: Expression 結果 | block return value |
+| `generate_macro`: 返り値キャスト後 | block return value |
+| `stmt_to_rust`: return 文 | block return value |
+| `stmt_to_rust_inline`: return 文 | block return value |
+| `expr_to_rust_arg`: 関数引数 | function argument |
+| `stmt_to_rust_inline`: if 条件 | if condition |
+
+#### AST 変換ヘルパー (Phase 3)
+
+将来の完全移行に向けた syn::Expr 構築ヘルパー:
+
+| 関数 | 役割 |
+|------|------|
+| `wrap_as_bool(expr)` | int→`expr != 0`, ptr→`!expr.is_null()` |
+| `insert_cast(expr, ty)` | `expr as T` ノード構築 |
+| `null_for_type(ty_str)` | `null()` / `null_mut()` / `0` |
+| `deref(expr)` | `*expr` |
+| `field_access(expr, name)` | `expr.field` |
+| `call(name, args)` | `func(args...)` |
+| `if_else(cond, then, else)` | if-else 式 |
+
+### 今後の移行計画
+
+現在は `expr_to_rust_ctx()` (文字列生成) → `normalize_parens()` (後処理) だが、
+最終的には C AST → syn::Expr 直接構築 → parenthesize → 整形に移行する計画。
+
+段階的移行:
+- Phase 1-3: ✅ 基盤モジュール、括弧挿入パス、AST 変換ヘルパー
+- Phase 4: ✅ normalize_parens の codegen 統合（53→46 警告）
+- Phase 5: （未実施）C AST → syn::Expr 直接変換、expr_to_rust_ctx 廃止
+
 ## 関連ファイル
 
 | ファイル | 役割 |
 |----------|------|
 | `src/rust_codegen.rs` | コード生成モジュール本体 |
+| `src/syn_codegen.rs` | syn::Expr ベースの括弧正規化・AST 変換ヘルパー |
 | `src/infer_api.rs` | InferResult の定義 |
 | `src/macro_infer.rs` | MacroInferInfo の定義 |
 | `src/type_repr.rs` | TypeRepr の定義 |

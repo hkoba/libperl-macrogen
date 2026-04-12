@@ -9,7 +9,7 @@
 |-------------|------|-------------|
 | [意味解析と型推論](./architecture-semantic-type-inference.md) | マクロの型推論パイプライン | `macro_infer.rs`, `semantic.rs`, `type_env.rs`, `type_repr.rs` |
 | [マクロ展開制御](./architecture-macro-expansion-control.md) | マクロ展開の制御点と判定フロー | `preprocessor.rs`, `macro_infer.rs`, `parser.rs` |
-| [Rust コード生成](./architecture-rust-codegen.md) | CodegenDriver/RustCodegen の構造 | `rust_codegen.rs` |
+| [Rust コード生成](./architecture-rust-codegen.md) | CodegenDriver/RustCodegen の構造、syn::Expr 括弧正規化 | `rust_codegen.rs`, `syn_codegen.rs` |
 | [Inline 関数処理](./architecture-inline-function-processing.md) | Inline 関数の収集・変換・カスケード検出 | `inline_fn.rs`, `rust_codegen.rs` |
 | [THX 依存性検出](./architecture-thx-dependency.md) | THX（Thread Context）の検出と伝播 | `macro_infer.rs`, `rust_codegen.rs` |
 | [FieldsDict](./architecture-fields-dict.md) | 構造体フィールド辞書と型推論での活用 | `fields_dict.rs`, `semantic.rs` |
@@ -139,6 +139,11 @@ assert の処理フローは複数のドキュメントにまたがる:
 
 → [Rust コード生成](./architecture-rust-codegen.md) の C → Rust 変換パターンを参照
 
+### 括弧制御を改善したい
+
+→ [Rust コード生成](./architecture-rust-codegen.md) の「syn::Expr ベースの括弧正規化」と
+  [型推論とキャスト生成](./architecture-type-inference-and-cast.md) の「括弧制御」を参照
+
 ### inline 関数の処理を変更したい
 
 → [Inline 関数処理](./architecture-inline-function-processing.md) のユースケース別ガイドを参照
@@ -174,5 +179,8 @@ CodegenDriver
 ├─ bindings_info: BindingsInfo       KnownSymbols
 ├─ successfully_generated_inlines    └─ names: HashSet<String>
 ├─ generatable_macros
-└─ stats: CodegenStats
+└─ stats: CodegenStats               syn_codegen
+                                     ├─ parenthesize()
+                                     ├─ normalize_parens()
+                                     └─ strip_all_parens()
 ```

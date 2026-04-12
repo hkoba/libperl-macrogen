@@ -215,25 +215,42 @@ pointee の const ではない。pointee の const は `specs.qualifiers.is_cons
 
 ## 括弧制御
 
-### ExprContext enum
+### 2 層構造
+
+括弧制御は文字列ベースとAST ベースの 2 層で行われる:
+
+**層 1: ExprContext（文字列ベース、既存）**
 
 ```rust
 enum ExprContext {
     Top,        // 括弧不要 (関数引数、let RHS、return 値、代入 RHS)
-    Nested,     // 括弧が必要な可能性がある位置
-    BinaryInner { parent_prec: u8 },  // (将来の拡張用、現在未使用)
-    CastInner,  // (将来の拡張用、現在未使用)
+    Default,    // 括弧が必要な可能性がある位置
 }
 ```
 
-現在の実装では `Top` と `Nested` の 2 値のみ使用。
-Cast 式は `Top` で括弧なし、`Nested` で括弧あり。
+`expr_to_rust_ctx()` 内で式を文字列生成する際に使用。
+Cast 式は `Top` で括弧なし、`Default` で括弧あり。
 Binary 式は常に括弧あり（演算子優先順位の安全側）。
+
+**層 2: normalize_parens（syn::Expr ベース、Phase 4 で追加）**
+
+出力ポイント（ブロック末尾値、return 文、関数引数）で、
+`normalize_parens()` が文字列ベースの過剰な括弧を正規化する:
+
+```
+expr_to_rust_ctx() → "((*sv).sv_flags as u32)"   [ExprContext::Default]
+normalize_parens() → "(*sv).sv_flags as u32"      [syn ベースで最適化]
+```
+
+`normalize_parens` は syn::parse_str でパースし、全 Paren ノードを除去した後、
+`parenthesize()` で優先順位に基づく括弧のみを再挿入する。
+詳細は `architecture-rust-codegen.md` の「syn::Expr ベースの括弧正規化」を参照。
 
 ### strip_outer_parens
 
 文字列レベルで最外の括弧を除去するヘルパー。
-代入 RHS、return 値、関数引数などの文脈で適用。
+代入 RHS、`assert!` 引数、`if` 条件などの**式内部**の文脈で適用。
+出力ポイントでは `normalize_parens` に置き換えられつつある。
 
 ## エラー検出とコメントアウト
 
