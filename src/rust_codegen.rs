@@ -3411,6 +3411,160 @@ impl<'a> RustCodegen<'a> {
                     right: Box::new(r),
                 })
             }
+            ExprKind::Call { func, args } => {
+                // builtin 関数の特殊処理
+                if let ExprKind::Ident(name) = &func.kind {
+                    let func_name = self.interner.get(*name);
+                    // __builtin_expect → 引数を透過
+                    if func_name == "__builtin_expect" && !args.is_empty() {
+                        return self.build_syn_expr(&args[0], info);
+                    }
+                    // __builtin_unreachable → unreachable_unchecked
+                    if func_name == "__builtin_unreachable" {
+                        return syn::parse_str("std::hint::unreachable_unchecked()").unwrap();
+                    }
+                    // __builtin_ctz/clz → trailing_zeros/leading_zeros
+                    if (func_name == "__builtin_ctz" || func_name == "__builtin_ctzl") && args.len() == 1 {
+                        let arg = self.build_syn_expr(&args[0], info);
+                        return syn::Expr::MethodCall(syn::ExprMethodCall {
+                            attrs: vec![], receiver: Box::new(arg), dot_token: Default::default(),
+                            method: ident("trailing_zeros"), turbofish: None,
+                            paren_token: Default::default(), args: syn::punctuated::Punctuated::new(),
+                        });
+                    }
+                    if (func_name == "__builtin_clz" || func_name == "__builtin_clzl") && args.len() == 1 {
+                        let arg = self.build_syn_expr(&args[0], info);
+                        return syn::Expr::MethodCall(syn::ExprMethodCall {
+                            attrs: vec![], receiver: Box::new(arg), dot_token: Default::default(),
+                            method: ident("leading_zeros"), turbofish: None,
+                            paren_token: Default::default(), args: syn::punctuated::Punctuated::new(),
+                        });
+                    }
+                    // ASSERT_IS_LITERAL 等 → 引数を透過
+                    if matches!(func_name, "ASSERT_IS_LITERAL" | "ASSERT_IS_PTR" | "ASSERT_NOT_PTR")
+                        && args.len() == 1
+                    {
+                        return self.build_syn_expr(&args[0], info);
+                    }
+                    // offsetof → std::mem::offset_of!
+                    if matches!(func_name, "offsetof" | "__builtin_offsetof") && args.len() == 2 {
+                        let type_name_str = match info {
+                            Some(info) => self.expr_to_rust(&args[0], info),
+                            None => self.expr_to_rust_inline(&args[0]),
+                        };
+                        if let Some(field_path) = self.expr_to_field_path(&args[1]) {
+                            return syn::parse_str(&format!("std::mem::offset_of!({}, {})", type_name_str, field_path))
+                                .unwrap_or_else(|_| int_lit(0));
+                        }
+                    }
+                }
+
+                // 関数名を構築
+                let f_syn = self.build_syn_expr(func, info);
+                let f_str = expr_to_string(&f_syn);
+
+                let callee_name = if let ExprKind::Ident(name) = &func.kind { Some(*name) } else { None };
+                let needs_my_perl = callee_name
+                    .map(|name| self.needs_my_perl_for_call(name, args.len()))
+                    .unwrap_or(false);
+
+                // ジェネリック型パラメータのチェック
+                let callee_generics = callee_name
+                    .and_then(|name| self.get_callee_generic_params(name).cloned());
+
+                if let Some(ref generics) = callee_generics {
+                    // turbofish 構文 — 文字列ベースで構築（型引数のため）
+                    let mut type_args = Vec::new();
+                    let mut value_args: Vec<String> = if needs_my_perl {
+                        vec!["my_perl".to_string()]
+                    } else { vec![] };
+                    let mut value_idx = if needs_my_perl { 1usize } else { 0 };
+                    for (i, arg) in args.iter().enumerate() {
+                        if generics.contains_key(&(i as i32)) {
+                            type_args.push(match info {
+                                Some(info) => self.expr_to_rust(arg, info),
+                                None => self.expr_to_rust_inline(arg),
+                            });
+                        } else {
+                            value_args.push(match info {
+                                Some(info) => self.expr_to_rust_arg(arg, info, callee_name, value_idx),
+                                None => self.expr_to_rust_inline(arg),
+                            });
+                            value_idx += 1;
+                        }
+                    }
+                    return syn::parse_str(&format!("{}::<{}>({})", f_str, type_args.join(", "), value_args.join(", ")))
+                        .unwrap_or_else(|_| int_lit(0));
+                }
+
+                // 通常の関数呼び出し — 引数を処理
+                let mut arg_strs: Vec<String> = if needs_my_perl {
+                    vec!["my_perl".to_string()]
+                } else { vec![] };
+                let arg_offset = if needs_my_perl { 1usize } else { 0 };
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_str = match info {
+                        Some(info) => self.expr_to_rust_arg(arg, info, callee_name, i + arg_offset),
+                        None => {
+                            // inline 用: 簡易引数処理
+                            let s = expr_to_string(&self.build_syn_expr(arg, None));
+                            normalize_parens(&s)
+                        }
+                    };
+                    arg_strs.push(arg_str);
+                }
+                syn::parse_str(&format!("{}({})", f_str, arg_strs.join(", ")))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
+            ExprKind::MacroCall { name, args, expanded, .. } => {
+                if self.should_emit_as_macro_call(*name) {
+                    let name_str = escape_rust_keyword(self.interner.get(*name));
+                    let needs_my_perl = self.needs_my_perl_for_call(*name, args.len());
+                    let mut a: Vec<String> = if needs_my_perl {
+                        vec!["my_perl".to_string()]
+                    } else { vec![] };
+                    for arg in args {
+                        let arg_str = expr_to_string(&self.build_syn_expr(arg, info));
+                        a.push(normalize_parens(&arg_str));
+                    }
+                    syn::parse_str(&format!("{}({})", name_str, a.join(", ")))
+                        .unwrap_or_else(|_| int_lit(0))
+                } else {
+                    self.build_syn_expr(expanded, info)
+                }
+            }
+            ExprKind::BuiltinCall { name, args } => {
+                let func_name = self.interner.get(*name);
+                if matches!(func_name, "offsetof" | "__builtin_offsetof" | "STRUCT_OFFSET")
+                    && args.len() == 2
+                {
+                    let type_str = match &args[0] {
+                        crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                        crate::ast::BuiltinArg::Expr(e) => {
+                            let s = self.build_syn_expr(e, info);
+                            expr_to_string(&s)
+                        }
+                    };
+                    let field_expr = match &args[1] {
+                        crate::ast::BuiltinArg::Expr(e) => self.expr_to_field_path(e),
+                        _ => None,
+                    };
+                    if let Some(fp) = field_expr {
+                        return syn::parse_str(&format!("std::mem::offset_of!({}, {})", type_str, fp))
+                            .unwrap_or_else(|_| int_lit(0));
+                    }
+                }
+                // フォールバック: 通常の関数呼び出し
+                let a: Vec<String> = args.iter().map(|arg| match arg {
+                    crate::ast::BuiltinArg::Expr(e) => {
+                        let s = self.build_syn_expr(e, info);
+                        expr_to_string(&s)
+                    }
+                    crate::ast::BuiltinArg::TypeName(tn) => self.type_name_to_rust(tn),
+                }).collect();
+                syn::parse_str(&format!("{}({})", func_name, a.join(", ")))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
             // 未対応 variant: 旧 expr_to_rust_ctx の文字列出力を syn::parse_str でフォールバック
             _ => {
                 let fallback_str = match info {
