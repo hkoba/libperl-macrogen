@@ -1584,270 +1584,24 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// ポインタ式をbool条件に変換するラッパー（マクロ用、infer_type_hint使用）
+    /// ポインタ式をbool条件に変換するラッパー（マクロ用）— 統一版に委譲
     fn wrap_as_bool_condition_macro(&self, expr: &Expr, expr_str: &str, info: &MacroInferInfo) -> String {
-        if self.is_bool_expr_with_dict(expr) {
-            return expr_str.to_string();
-        }
-        // パラメータが bool 型なら != 0 不要
-        if let ExprKind::Ident(name) = &expr.kind {
-            if let Some(ut) = self.current_param_types.get(name) {
-                if ut.is_bool() {
-                    return expr_str.to_string();
-                }
-            }
-        }
-        // フィールドが bool 型なら != 0 不要
-        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
-            let member_str = self.interner.get(*member);
-            if let Some(ut) = self.field_type_map.get(member_str) {
-                if ut.is_bool() {
-                    return expr_str.to_string();
-                }
-            }
-        }
-        // __builtin_expect(cond, val) → cond の型をチェック
-        if let ExprKind::Call { func, args, .. } = &expr.kind {
-            if let ExprKind::Ident(name) = &func.kind {
-                if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
-                    return self.wrap_as_bool_condition_macro(&args[0], expr_str, info);
-                }
-            }
-        }
-        if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
-            return expr_str.to_string();
-        }
-        if self.infer_type_hint(expr, info) == TypeHint::Pointer
-            || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
-            return format!("!{}.is_null()", expr_str);
-        }
-        format!("({} != 0)", strip_outer_parens(expr_str))
+        self.wrap_as_bool_condition(expr, expr_str, Some(info))
     }
 
-    /// ポインタ式をbool条件に変換するラッパー（inline関数用）
+    /// ポインタ式をbool条件に変換するラッパー（inline関数用）— 統一版に委譲
     fn wrap_as_bool_condition_inline(&self, expr: &Expr, expr_str: &str) -> String {
-        if self.is_bool_expr_with_dict(expr) {
-            return expr_str.to_string();
-        }
-        // __builtin_expect(cond, val) → cond の型をチェック
-        if let ExprKind::Call { func, args, .. } = &expr.kind {
-            if let ExprKind::Ident(name) = &func.kind {
-                if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
-                    return self.wrap_as_bool_condition_inline(&args[0], expr_str);
-                }
-            }
-        }
-        // bool 型変数の検出
-        if let ExprKind::Ident(name) = &expr.kind {
-            if let Some(ut) = self.current_param_types.get(name) {
-                if ut.is_bool() {
-                    return expr_str.to_string();
-                }
-            }
-        }
-        // フィールドが bool 型なら != 0 不要
-        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
-            let member_str = self.interner.get(*member);
-            if let Some(ut) = self.field_type_map.get(member_str) {
-                if ut.is_bool() {
-                    return expr_str.to_string();
-                }
-            }
-        }
-        if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
-            return expr_str.to_string();
-        }
-        if self.is_pointer_expr_inline(expr)
-            || self.infer_expr_type_inline(expr).is_some_and(|ut| ut.is_pointer()) {
-            return format!("!{}.is_null()", expr_str);
-        }
-        format!("({} != 0)", strip_outer_parens(expr_str))
+        self.wrap_as_bool_condition(expr, expr_str, None)
     }
 
-    /// 式がポインタ型かどうかを current_param_types から推定（inline関数用）
+    /// 式がポインタ型かどうかを推定（inline関数用）— 統一版に委譲
     fn is_pointer_expr_inline(&self, expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::Ident(name) => {
-                if let Some(ut) = self.current_param_types.get(name) {
-                    return ut.is_pointer();
-                }
-                false
-            }
-            ExprKind::Cast { type_name, .. } => {
-                let has_pointer = type_name.declarator.as_ref()
-                    .map(|d| d.derived.iter().any(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer { .. })))
-                    .unwrap_or(false);
-                has_pointer
-            }
-            ExprKind::AddrOf(_) => true,
-            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
-                let member_str = self.interner.get(*member);
-                self.field_type_map.get(member_str).is_some_and(|ut| ut.is_pointer())
-            }
-            ExprKind::Deref(inner) => {
-                // ポインタ to ポインタの deref
-                if let Some(ut) = self.infer_expr_type_inline(inner) {
-                    if let Some(derefed) = ut.inner_type() {
-                        return derefed.is_pointer();
-                    }
-                }
-                false
-            }
-            ExprKind::Call { func, .. } => {
-                // マクロの戻り値型を参照
-                if let ExprKind::Ident(name) = &func.kind {
-                    if let Some(callee) = self.macro_ctx.macros.get(name) {
-                        for c in &callee.type_env.return_constraints {
-                            if is_type_repr_pointer(&c.ty) {
-                                return true;
-                            }
-                        }
-                    }
-                    // rust_decl_dict の関数戻り値型を参照
-                    if let Some(ret_ut) = self.get_callee_return_type(self.interner.get(*name)) {
-                        return ret_ut.is_pointer();
-                    }
-                }
-                false
-            }
-            ExprKind::MacroCall { name, expanded, .. } => {
-                // マクロの戻り値型を参照
-                if let Some(callee) = self.macro_ctx.macros.get(name) {
-                    for c in &callee.type_env.return_constraints {
-                        if is_type_repr_pointer(&c.ty) {
-                            return true;
-                        }
-                    }
-                }
-                // expanded にフォールバック
-                self.is_pointer_expr_inline(expanded)
-            }
-            ExprKind::Binary { op, lhs, rhs } => {
-                match op {
-                    BinOp::Add => {
-                        // ポインタ + 整数 → ポインタ
-                        self.is_pointer_expr_inline(lhs) || self.is_pointer_expr_inline(rhs)
-                    }
-                    BinOp::Sub => {
-                        // ポインタ - 整数 → ポインタ（ポインタ - ポインタ → 整数）
-                        self.is_pointer_expr_inline(lhs) && !self.is_pointer_expr_inline(rhs)
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
+        self.is_pointer_expr_unified(expr, None)
     }
 
-    /// 式の型を推定（inline 関数用）
-    /// 型が判明しない場合は None を返す
+    /// 式の型を推定（inline 関数用）— 統一版に委譲
     fn infer_expr_type_inline(&self, expr: &Expr) -> Option<UnifiedType> {
-        match &expr.kind {
-            ExprKind::Ident(name) => {
-                // パラメータ/ローカル変数の型
-                if let Some(ut) = self.current_param_types.get(name) {
-                    return Some(ut.clone());
-                }
-                // 定数の型
-                if let Some(dict) = self.rust_decl_dict {
-                    let name_str = self.interner.get(*name);
-                    if let Some(c) = dict.consts.get(name_str) {
-                        return Some(c.uty.clone());
-                    }
-                }
-                None
-            }
-            ExprKind::Cast { type_name, .. } => {
-                Some(UnifiedType::from_rust_str(&self.type_name_to_type_str_readonly(type_name)))
-            }
-            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
-                let member_str = self.interner.get(*member);
-                self.field_type_map.get(member_str).cloned()
-            }
-            ExprKind::Deref(inner) => {
-                let inner_ut = self.infer_expr_type_inline(inner)?;
-                inner_ut.inner_type().cloned()
-            }
-            ExprKind::Binary { op, lhs, rhs } => {
-                match op {
-                    BinOp::Shl | BinOp::Shr => self.infer_expr_type_inline(lhs),
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                        let lt = self.infer_expr_type_inline(lhs);
-                        let rt = self.infer_expr_type_inline(rhs);
-                        match (&lt, &rt) {
-                            (Some(l), Some(r)) => {
-                                let ls = l.to_rust_string();
-                                let rs = r.to_rust_string();
-                                wider_integer_type(&ls, &rs)
-                                    .map(|w| UnifiedType::from_rust_str(w))
-                                    .or(lt)
-                            }
-                            (Some(_), None) => lt,
-                            (None, Some(_)) => rt,
-                            _ => None,
-                        }
-                    }
-                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt
-                    | BinOp::Le | BinOp::Ge | BinOp::LogAnd | BinOp::LogOr => {
-                        Some(UnifiedType::Bool)
-                    }
-                    // 算術演算: LHS の型を返す（Add, Sub, Mul, Div, Mod）
-                    _ => {
-                        let lt = self.infer_expr_type_inline(lhs);
-                        if lt.is_some() { return lt; }
-                        self.infer_expr_type_inline(rhs)
-                    }
-                }
-            }
-            ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type_inline(inner),
-            ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
-            ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
-            ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
-            ExprKind::Call { func, .. } => {
-                // メソッド呼び出し: receiver.method(arg)
-                // offset/wrapping_add/wrapping_sub はレシーバと同じ型を返す
-                if let ExprKind::Member { expr: receiver, member, .. } = &func.kind {
-                    let method_name = self.interner.get(*member);
-                    if matches!(method_name, "offset" | "wrapping_add" | "wrapping_sub" | "wrapping_offset") {
-                        return self.infer_expr_type_inline(receiver);
-                    }
-                }
-                if let ExprKind::Ident(name) = &func.kind {
-                    let func_name = self.interner.get(*name);
-                    if let Some(ret_ut) = self.get_callee_return_type(func_name) {
-                        return Some(ret_ut.clone());
-                    }
-                }
-                None
-            }
-            ExprKind::MacroCall { name, expanded, .. } => {
-                // マクロの戻り値型を参照
-                if let Some(macro_info) = self.macro_ctx.macros.get(name) {
-                    if let Some(ty) = macro_info.get_return_type() {
-                        return Some(UnifiedType::from_rust_str(&ty.to_rust_string(self.interner)));
-                    }
-                }
-                // expanded にフォールバック
-                self.infer_expr_type_inline(expanded)
-            }
-            ExprKind::Conditional { then_expr, else_expr, .. } => {
-                if is_null_literal(then_expr) {
-                    return self.infer_expr_type_inline(else_expr);
-                }
-                if is_null_literal(else_expr) {
-                    return self.infer_expr_type_inline(then_expr);
-                }
-                let tt = self.infer_expr_type_inline(then_expr);
-                let et = self.infer_expr_type_inline(else_expr);
-                match (&tt, &et) {
-                    (Some(t), Some(e)) if t.is_void_pointer() && e.is_concrete_pointer() => et,
-                    (Some(t), Some(e)) if e.is_void_pointer() && t.is_concrete_pointer() => tt,
-                    (Some(_), _) => tt,
-                    (None, _) => et,
-                }
-            }
-            _ => None,
-        }
+        self.infer_expr_type_unified(expr, None)
     }
 
     /// TypeName から型文字列を取得（読み取り専用、整数型を正しく解決する版）
@@ -1930,44 +1684,59 @@ impl<'a> RustCodegen<'a> {
         self.type_name_to_type_str_readonly(type_name)
     }
 
-    /// 式の型を推定（macro 関数用）
+    /// 式の型を推定（macro 関数用）— 統一版に委譲
     fn infer_expr_type(&self, expr: &Expr, info: &MacroInferInfo) -> Option<UnifiedType> {
+        self.infer_expr_type_unified(expr, Some(info))
+    }
+
+    // ================================================================
+    // 統一型推論 (macro/inline 共通)
+    // ================================================================
+
+    /// 式の型を推定（macro/inline 統一版）
+    ///
+    /// `info` が Some の場合は TypeEnv (Tier ベース) も参照する（マクロ用）。
+    /// None の場合は current_param_types のみ参照する（inline 用）。
+    fn infer_expr_type_unified(&self, expr: &Expr, info: Option<&MacroInferInfo>) -> Option<UnifiedType> {
         match &expr.kind {
             ExprKind::Ident(name) => {
                 // current_param_types を最優先（Tier ベースで決定済み）
                 if let Some(ut) = self.current_param_types.get(name) {
                     return Some(ut.clone());
                 }
-                // param_to_exprs 経由の expr_constraints（Tier ベースで選択）
-                if let Some(expr_ids) = info.type_env.param_to_exprs.get(name) {
-                    let mut best: Option<(UnifiedType, u8)> = None;
-                    for expr_id in expr_ids {
-                        if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                            for c in constraints {
-                                if c.ty.is_void() { continue; }
-                                let tier = c.ty.confidence_tier();
-                                if best.is_none() || tier < best.as_ref().unwrap().1 {
-                                    best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                // TypeEnv 参照（マクロ用: Tier ベースで最良の制約を選択）
+                if let Some(info) = info {
+                    // param_to_exprs 経由の expr_constraints
+                    if let Some(expr_ids) = info.type_env.param_to_exprs.get(name) {
+                        let mut best: Option<(UnifiedType, u8)> = None;
+                        for expr_id in expr_ids {
+                            if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                                for c in constraints {
+                                    if c.ty.is_void() { continue; }
+                                    let tier = c.ty.confidence_tier();
+                                    if best.is_none() || tier < best.as_ref().unwrap().1 {
+                                        best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                                    }
                                 }
                             }
                         }
-                    }
-                    if let Some((ut, _)) = best {
-                        return Some(ut);
-                    }
-                }
-                // param_constraints（フォールバック、Tier ベース）
-                if let Some(constraints) = info.type_env.param_constraints.get(name) {
-                    let mut best: Option<(UnifiedType, u8)> = None;
-                    for c in constraints {
-                        if c.ty.is_void() { continue; }
-                        let tier = c.ty.confidence_tier();
-                        if best.is_none() || tier < best.as_ref().unwrap().1 {
-                            best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                        if let Some((ut, _)) = best {
+                            return Some(ut);
                         }
                     }
-                    if let Some((ut, _)) = best {
-                        return Some(ut);
+                    // param_constraints（フォールバック、Tier ベース）
+                    if let Some(constraints) = info.type_env.param_constraints.get(name) {
+                        let mut best: Option<(UnifiedType, u8)> = None;
+                        for c in constraints {
+                            if c.ty.is_void() { continue; }
+                            let tier = c.ty.confidence_tier();
+                            if best.is_none() || tier < best.as_ref().unwrap().1 {
+                                best = Some((UnifiedType::from_rust_str(&c.ty.to_rust_string(self.interner)), tier));
+                            }
+                        }
+                        if let Some((ut, _)) = best {
+                            return Some(ut);
+                        }
                     }
                 }
                 // 定数の型
@@ -1987,15 +1756,15 @@ impl<'a> RustCodegen<'a> {
                 self.field_type_map.get(member_str).cloned()
             }
             ExprKind::Deref(inner) => {
-                let inner_ut = self.infer_expr_type(inner, info)?;
+                let inner_ut = self.infer_expr_type_unified(inner, info)?;
                 inner_ut.inner_type().cloned()
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 match op {
-                    BinOp::Shl | BinOp::Shr => self.infer_expr_type(lhs, info),
+                    BinOp::Shl | BinOp::Shr => self.infer_expr_type_unified(lhs, info),
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
-                        let lt = self.infer_expr_type(lhs, info);
-                        let rt = self.infer_expr_type(rhs, info);
+                        let lt = self.infer_expr_type_unified(lhs, info);
+                        let rt = self.infer_expr_type_unified(rhs, info);
                         match (&lt, &rt) {
                             (Some(l), Some(r)) => {
                                 let ls = l.to_rust_string();
@@ -2013,25 +1782,23 @@ impl<'a> RustCodegen<'a> {
                     | BinOp::Le | BinOp::Ge | BinOp::LogAnd | BinOp::LogOr => {
                         Some(UnifiedType::Bool)
                     }
-                    // 算術演算: LHS の型を返す（Add, Sub, Mul, Div, Mod）
                     _ => {
-                        let lt = self.infer_expr_type(lhs, info);
+                        let lt = self.infer_expr_type_unified(lhs, info);
                         if lt.is_some() { return lt; }
-                        self.infer_expr_type(rhs, info)
+                        self.infer_expr_type_unified(rhs, info)
                     }
                 }
             }
-            ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type(inner, info),
+            ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type_unified(inner, info),
             ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
             ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
             ExprKind::Call { func, .. } => {
-                // メソッド呼び出し: receiver.method(arg)
-                // offset/wrapping_add/wrapping_sub はレシーバと同じ型を返す
+                // メソッド呼び出し: offset/wrapping_add 等はレシーバと同じ型
                 if let ExprKind::Member { expr: receiver, member, .. } = &func.kind {
                     let method_name = self.interner.get(*member);
                     if matches!(method_name, "offset" | "wrapping_add" | "wrapping_sub" | "wrapping_offset") {
-                        return self.infer_expr_type(receiver, info);
+                        return self.infer_expr_type_unified(receiver, info);
                     }
                 }
                 if let ExprKind::Ident(name) = &func.kind {
@@ -2049,24 +1816,22 @@ impl<'a> RustCodegen<'a> {
                 None
             }
             ExprKind::MacroCall { name, expanded, .. } => {
-                // マクロの戻り値型を参照
                 if let Some(macro_info) = self.macro_ctx.macros.get(name) {
                     if let Some(ty) = macro_info.get_return_type() {
                         return Some(UnifiedType::from_rust_str(&ty.to_rust_string(self.interner)));
                     }
                 }
-                // 展開済みの式から推定
-                self.infer_expr_type(expanded, info)
+                self.infer_expr_type_unified(expanded, info)
             }
             ExprKind::Conditional { then_expr, else_expr, .. } => {
                 if is_null_literal(then_expr) {
-                    return self.infer_expr_type(else_expr, info);
+                    return self.infer_expr_type_unified(else_expr, info);
                 }
                 if is_null_literal(else_expr) {
-                    return self.infer_expr_type(then_expr, info);
+                    return self.infer_expr_type_unified(then_expr, info);
                 }
-                let tt = self.infer_expr_type(then_expr, info);
-                let et = self.infer_expr_type(else_expr, info);
+                let tt = self.infer_expr_type_unified(then_expr, info);
+                let et = self.infer_expr_type_unified(else_expr, info);
                 match (&tt, &et) {
                     (Some(t), Some(e)) if t.is_void_pointer() && e.is_concrete_pointer() => et,
                     (Some(t), Some(e)) if e.is_void_pointer() && t.is_concrete_pointer() => tt,
@@ -2076,6 +1841,128 @@ impl<'a> RustCodegen<'a> {
             }
             _ => None,
         }
+    }
+
+    /// 式がポインタ型かどうかを推定（macro/inline 統一版）
+    fn is_pointer_expr_unified(&self, expr: &Expr, info: Option<&MacroInferInfo>) -> bool {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                if let Some(ut) = self.current_param_types.get(name) {
+                    return ut.is_pointer();
+                }
+                if let Some(info) = info {
+                    if let Some(constraints) = info.type_env.param_constraints.get(name) {
+                        for c in constraints {
+                            if is_type_repr_pointer(&c.ty) {
+                                return true;
+                            }
+                        }
+                    }
+                    if let Some(expr_ids) = info.type_env.param_to_exprs.get(name) {
+                        for expr_id in expr_ids {
+                            if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+                                for c in constraints {
+                                    if is_type_repr_pointer(&c.ty) {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            ExprKind::Cast { type_name, .. } => {
+                type_name.declarator.as_ref()
+                    .map(|d| d.derived.iter().any(|dd| matches!(dd, crate::ast::DerivedDecl::Pointer { .. })))
+                    .unwrap_or(false)
+            }
+            ExprKind::AddrOf(_) => true,
+            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
+                let member_str = self.interner.get(*member);
+                self.field_type_map.get(member_str).is_some_and(|ut| ut.is_pointer())
+            }
+            ExprKind::Deref(inner) => {
+                if let Some(ut) = self.infer_expr_type_unified(inner, info) {
+                    if let Some(derefed) = ut.inner_type() {
+                        return derefed.is_pointer();
+                    }
+                }
+                false
+            }
+            ExprKind::Call { func, .. } | ExprKind::MacroCall { expanded: func, .. } => {
+                let check_func = match &expr.kind {
+                    ExprKind::MacroCall { name, .. } => {
+                        if let Some(callee) = self.macro_ctx.macros.get(name) {
+                            for c in &callee.type_env.return_constraints {
+                                if is_type_repr_pointer(&c.ty) { return true; }
+                            }
+                        }
+                        func
+                    }
+                    _ => func,
+                };
+                if let ExprKind::Ident(name) = &check_func.kind {
+                    if let Some(callee) = self.macro_ctx.macros.get(name) {
+                        for c in &callee.type_env.return_constraints {
+                            if is_type_repr_pointer(&c.ty) { return true; }
+                        }
+                    }
+                    if let Some(ret_ut) = self.get_callee_return_type(self.interner.get(*name)) {
+                        return ret_ut.is_pointer();
+                    }
+                }
+                false
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                match op {
+                    BinOp::Add => self.is_pointer_expr_unified(lhs, info) || self.is_pointer_expr_unified(rhs, info),
+                    BinOp::Sub => self.is_pointer_expr_unified(lhs, info) && !self.is_pointer_expr_unified(rhs, info),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// ポインタ式をbool条件に変換するラッパー（macro/inline 統一版）
+    fn wrap_as_bool_condition(&self, expr: &Expr, expr_str: &str, info: Option<&MacroInferInfo>) -> String {
+        if self.is_bool_expr_with_dict(expr) {
+            return expr_str.to_string();
+        }
+        // パラメータが bool 型なら != 0 不要
+        if let ExprKind::Ident(name) = &expr.kind {
+            if let Some(ut) = self.current_param_types.get(name) {
+                if ut.is_bool() {
+                    return expr_str.to_string();
+                }
+            }
+        }
+        // フィールドが bool 型なら != 0 不要
+        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
+            let member_str = self.interner.get(*member);
+            if let Some(ut) = self.field_type_map.get(member_str) {
+                if ut.is_bool() {
+                    return expr_str.to_string();
+                }
+            }
+        }
+        // __builtin_expect(cond, val) → cond の型をチェック
+        if let ExprKind::Call { func, args, .. } = &expr.kind {
+            if let ExprKind::Ident(name) = &func.kind {
+                if self.interner.get(*name) == "__builtin_expect" && !args.is_empty() {
+                    return self.wrap_as_bool_condition(&args[0], expr_str, info);
+                }
+            }
+        }
+        if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
+            return expr_str.to_string();
+        }
+        if self.is_pointer_expr_unified(expr, info)
+            || self.infer_expr_type_unified(expr, info).is_some_and(|ut| ut.is_pointer()) {
+            return format!("!{}.is_null()", expr_str);
+        }
+        format!("({} != 0)", strip_outer_parens(expr_str))
     }
 
     /// 呼び出し先が THX マクロで、my_perl が不足しているかチェック
