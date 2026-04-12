@@ -21,6 +21,7 @@ use crate::infer_api::InferResult;
 use crate::intern::StringInterner;
 use crate::macro_infer::{MacroInferContext, MacroInferInfo, MacroParam, ParseResult};
 use crate::rust_decl::RustDeclDict;
+use crate::syn_codegen::normalize_parens;
 use crate::unified_type::UnifiedType;
 use crate::sexp::SexpPrinter;
 
@@ -2422,10 +2423,10 @@ impl<'a> RustCodegen<'a> {
                 let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                 let expected_ty_str = expected_ut.to_rust_string();
                 let casted = self.cast_integer_arg_if_needed(&result, actual_ty_str.as_deref(), &expected_ty_str);
-                return strip_outer_parens(&casted).to_string();
+                return normalize_parens(&casted);
             }
         }
-        strip_outer_parens(&result).to_string()
+        normalize_parens(&result)
     }
 
     /// 整数型の幅が不一致の場合、またはポインタ型のサブタイプ変換が必要な場合に `as` キャストを挿入する
@@ -2678,18 +2679,18 @@ impl<'a> RustCodegen<'a> {
                         || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
                         self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
                     } else {
-                        let stripped = strip_outer_parens(&rust_expr);
+                        let normalized = normalize_parens(&rust_expr);
                         // ブロック式 { ... } は ({ ... }) != 0 にする必要がある
-                        if stripped.starts_with('{') {
-                            self.writeln(&format!("{}({}) != 0", body_indent, stripped));
+                        if normalized.starts_with('{') {
+                            self.writeln(&format!("{}({}) != 0", body_indent, normalized));
                         } else {
-                            self.writeln(&format!("{}{} != 0", body_indent, stripped));
+                            self.writeln(&format!("{}{} != 0", body_indent, normalized));
                         }
                     }
                 } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
-                    self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&casted)));
+                    self.writeln(&format!("{}{}", body_indent, normalize_parens(&casted)));
                 } else {
-                    self.writeln(&format!("{}{}", body_indent, strip_outer_parens(&rust_expr)));
+                    self.writeln(&format!("{}{}", body_indent, normalize_parens(&rust_expr)));
                 }
             }
             ParseResult::Statement(block_items) => {
@@ -3786,18 +3787,18 @@ impl<'a> RustCodegen<'a> {
                             _ => {
                                 let e = self.expr_to_rust(expr, info);
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("return {} != 0;", strip_outer_parens(&e));
+                                    return format!("return {} != 0;", normalize_parens(&e));
                                 }
-                                return format!("return {};", strip_outer_parens(&e));
+                                return format!("return {};", normalize_parens(&e));
                             }
                         }
                     }
                 }
                 let e = self.expr_to_rust(expr, info);
                 if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &e) {
-                    return format!("return {};", strip_outer_parens(&casted));
+                    return format!("return {};", normalize_parens(&casted));
                 }
-                format!("return {};", strip_outer_parens(&e))
+                format!("return {};", normalize_parens(&e))
             }
             Stmt::Return(None, _) => "return;".to_string(),
             _ => self.todo_marker("stmt")
@@ -4431,25 +4432,25 @@ impl<'a> RustCodegen<'a> {
                             _ => {
                                 let e = self.expr_to_rust_inline(expr);
                                 if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("{}return {} != 0;", indent, strip_outer_parens(&e));
+                                    return format!("{}return {} != 0;", indent, normalize_parens(&e));
                                 }
-                                return format!("{}return {};", indent, strip_outer_parens(&e));
+                                return format!("{}return {};", indent, normalize_parens(&e));
                             }
                         }
                     }
                 }
                 let e = self.expr_to_rust_inline(expr);
                 if let Some(casted) = self.cast_return_expr_if_needed_inline(expr, &e) {
-                    return format!("{}return {};", indent, strip_outer_parens(&casted));
+                    return format!("{}return {};", indent, normalize_parens(&casted));
                 }
-                format!("{}return {};", indent, strip_outer_parens(&e))
+                format!("{}return {};", indent, normalize_parens(&e))
             }
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_bool = self.wrap_as_bool_condition_inline(cond, &cond_str);
-                let mut result = format!("{}if {} {{\n", indent, strip_outer_parens(&cond_bool));
+                let mut result = format!("{}if {} {{\n", indent, normalize_parens(&cond_bool));
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(then_stmt, &nested_indent));
                 result.push_str("\n");

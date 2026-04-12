@@ -26,9 +26,13 @@ fn expr_precedence(expr: &syn::Expr) -> u8 {
         syn::Expr::Range(_) => 15,
         syn::Expr::Assign(_) => 10,
         syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Closure(_) => 5,
-        syn::Expr::If(_) | syn::Expr::Block(_) | syn::Expr::Unsafe(_) |
-        syn::Expr::Loop(_) | syn::Expr::While(_) | syn::Expr::ForLoop(_) |
-        syn::Expr::Match(_) => 100,  // ブロック式は最高優先（中身が独立）
+        // If/Match は内部が独立だが、演算子の子として使う場合は括弧が必要:
+        //   (if cond { A } else { B }) as u8  — 括弧必須
+        //   if cond { A } else { B } as u8    — else ブランチ内の cast と誤解析
+        syn::Expr::If(_) | syn::Expr::Match(_) => 1,
+        // Block/Unsafe 等の { } で囲まれた式は自己完結するため最高優先
+        syn::Expr::Block(_) | syn::Expr::Unsafe(_) |
+        syn::Expr::Loop(_) | syn::Expr::While(_) | syn::Expr::ForLoop(_) => 100,
         _ => 50,  // デフォルト
     }
 }
@@ -242,6 +246,195 @@ fn is_rust_keyword(name: &str) -> bool {
         "dyn" | "abstract" | "become" | "box" | "do" | "final" | "macro" |
         "override" | "priv" | "typeof" | "unsized" | "virtual" | "yield" | "gen" | "try"
     )
+}
+
+// ============================================================================
+// 括弧正規化 (Phase 4): 文字列 → parse → strip → parenthesize → format
+// ============================================================================
+
+/// 式文字列の括弧を正規化する。
+///
+/// 1. syn::parse_str でパース
+/// 2. すべての syn::Expr::Paren を除去
+/// 3. parenthesize() で必要な括弧のみ再挿入
+/// 4. prettyplease で整形
+///
+/// 結果が多行になる場合やパース失敗時は、
+/// 単純な外側括弧除去（strip_outer_parens 相当）にフォールバックする。
+pub fn normalize_parens(s: &str) -> String {
+    // syn ベースの正規化を試行（単行結果のみ）
+    if let Some(normalized) = try_normalize_parens(s) {
+        if !normalized.contains('\n') {
+            return normalized;
+        }
+    }
+    // フォールバック: 外側の括弧のみ除去（strip_outer_parens と同等）
+    fallback_strip_outer_parens(s)
+}
+
+/// strip_outer_parens と同等のフォールバックロジック
+fn fallback_strip_outer_parens(s: &str) -> String {
+    let s = s.trim();
+    if s.len() < 2 || !s.starts_with('(') || !s.ends_with(')') {
+        return s.to_string();
+    }
+    let inner = &s[1..s.len() - 1];
+    // ブロック式 ({...}) は strip しない
+    if inner.trim_start().starts_with('{') {
+        return s.to_string();
+    }
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => {
+                depth -= 1;
+                if depth < 0 {
+                    return s.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 { inner.to_string() } else { s.to_string() }
+}
+
+fn try_normalize_parens(s: &str) -> Option<String> {
+    let parsed = syn::parse_str::<syn::Expr>(s).ok()?;
+    let stripped = strip_all_parens(parsed);
+    let normalized = parenthesize(stripped);
+    let result = pretty_expr(&normalized);
+    // 結果が空や明らかにおかしい場合はフォールバック
+    if result.is_empty() {
+        return None;
+    }
+    Some(result)
+}
+
+/// syn::Expr ツリーからすべての Paren ラッパーノードを除去する。
+///
+/// ツリー構造（Binary, Unary, Cast 等）は保持される。
+/// 除去後に parenthesize() を適用すると、必要な括弧のみが再挿入される。
+pub fn strip_all_parens(expr: syn::Expr) -> syn::Expr {
+    match expr {
+        syn::Expr::Paren(p) => strip_all_parens(*p.expr),
+        syn::Expr::Binary(mut b) => {
+            *b.left = strip_all_parens(*b.left);
+            *b.right = strip_all_parens(*b.right);
+            syn::Expr::Binary(b)
+        }
+        syn::Expr::Unary(mut u) => {
+            *u.expr = strip_all_parens(*u.expr);
+            syn::Expr::Unary(u)
+        }
+        syn::Expr::Cast(mut c) => {
+            *c.expr = strip_all_parens(*c.expr);
+            syn::Expr::Cast(c)
+        }
+        syn::Expr::Field(mut f) => {
+            *f.base = strip_all_parens(*f.base);
+            syn::Expr::Field(f)
+        }
+        syn::Expr::MethodCall(mut m) => {
+            *m.receiver = strip_all_parens(*m.receiver);
+            for arg in m.args.iter_mut() {
+                *arg = strip_all_parens(arg.clone());
+            }
+            syn::Expr::MethodCall(m)
+        }
+        syn::Expr::Call(mut c) => {
+            *c.func = strip_all_parens(*c.func);
+            for arg in c.args.iter_mut() {
+                *arg = strip_all_parens(arg.clone());
+            }
+            syn::Expr::Call(c)
+        }
+        syn::Expr::If(mut i) => {
+            *i.cond = strip_all_parens(*i.cond);
+            strip_parens_in_block(&mut i.then_branch);
+            if let Some((_, ref mut else_branch)) = i.else_branch {
+                *else_branch = Box::new(strip_all_parens(*else_branch.clone()));
+            }
+            syn::Expr::If(i)
+        }
+        syn::Expr::Index(mut i) => {
+            *i.expr = strip_all_parens(*i.expr);
+            *i.index = strip_all_parens(*i.index);
+            syn::Expr::Index(i)
+        }
+        syn::Expr::Assign(mut a) => {
+            *a.left = strip_all_parens(*a.left);
+            *a.right = strip_all_parens(*a.right);
+            syn::Expr::Assign(a)
+        }
+        syn::Expr::Return(mut r) => {
+            if let Some(ref mut e) = r.expr {
+                *e = Box::new(strip_all_parens(*e.clone()));
+            }
+            syn::Expr::Return(r)
+        }
+        syn::Expr::Block(mut b) => {
+            strip_parens_in_block(&mut b.block);
+            syn::Expr::Block(b)
+        }
+        syn::Expr::Reference(mut r) => {
+            *r.expr = strip_all_parens(*r.expr);
+            syn::Expr::Reference(r)
+        }
+        syn::Expr::Unsafe(mut u) => {
+            strip_parens_in_block(&mut u.block);
+            syn::Expr::Unsafe(u)
+        }
+        other => other,
+    }
+}
+
+fn strip_parens_in_block(block: &mut syn::Block) {
+    for stmt in block.stmts.iter_mut() {
+        match stmt {
+            syn::Stmt::Expr(e, _) => *e = strip_all_parens(e.clone()),
+            syn::Stmt::Local(l) => {
+                if let Some(ref mut init) = l.init {
+                    *init.expr = strip_all_parens(*init.expr.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// syn::Expr を prettyplease で整形して文字列化
+fn pretty_expr(expr: &syn::Expr) -> String {
+    // prettyplease は syn::File 単位で動作するため、
+    // ダミー関数でラップして整形し、本体を抽出する
+    let tokens = quote::quote! {
+        fn __() -> __T {
+            #expr
+        }
+    };
+    let file: syn::File = match syn::parse2(tokens) {
+        Ok(f) => f,
+        Err(_) => {
+            // パース失敗時は ToTokens でフォールバック
+            return expr.to_token_stream().to_string();
+        }
+    };
+    let formatted = prettyplease::unparse(&file);
+    extract_fn_body(&formatted)
+}
+
+/// prettyplease 出力から関数本体の式を抽出
+fn extract_fn_body(formatted: &str) -> String {
+    let lines: Vec<&str> = formatted.lines().collect();
+    if lines.len() < 3 {
+        return formatted.to_string();
+    }
+    // "fn __() -> __T {" と "}" を除去し、4スペースインデントを除去
+    let body_lines: Vec<&str> = lines[1..lines.len() - 1]
+        .iter()
+        .map(|l| l.strip_prefix("    ").unwrap_or(l))
+        .collect();
+    body_lines.join("\n")
 }
 
 // ============================================================================
@@ -544,6 +737,109 @@ mod tests {
     fn test_ident_keyword() {
         let i = ident("type");
         assert_eq!(i.to_string(), "r#type");
+    }
+
+    // ================================================================
+    // Phase 4: normalize_parens のテスト
+    // ================================================================
+
+    #[test]
+    fn test_normalize_cast_removes_outer_parens() {
+        // (x as i32) → x as i32
+        assert_eq!(normalize_parens("(x as i32)"), "x as i32");
+    }
+
+    #[test]
+    fn test_normalize_deref_removes_outer_parens() {
+        // (*ptr) → *ptr
+        assert_eq!(normalize_parens("(*ptr)"), "*ptr");
+    }
+
+    #[test]
+    fn test_normalize_addr_of_removes_outer_parens() {
+        // (&mut x) → &mut x
+        assert_eq!(normalize_parens("(&mut x)"), "&mut x");
+    }
+
+    #[test]
+    fn test_normalize_binary_removes_outer_parens() {
+        // (a + b) → a + b
+        assert_eq!(normalize_parens("(a + b)"), "a + b");
+    }
+
+    #[test]
+    fn test_normalize_deref_field_preserves_needed_parens() {
+        // (*a).field → (*a).field (parens needed!)
+        assert_eq!(normalize_parens("(*a).field"), "(*a).field");
+    }
+
+    #[test]
+    fn test_normalize_cast_in_binary_preserves_needed_parens() {
+        // (a & MASK) as u32 → (a & MASK) as u32 (parens needed!)
+        assert_eq!(normalize_parens("(a & MASK) as u32"), "(a & MASK) as u32");
+    }
+
+    #[test]
+    fn test_normalize_nested_unnecessary_parens() {
+        // ((x as i32)) → x as i32
+        assert_eq!(normalize_parens("((x as i32))"), "x as i32");
+    }
+
+    #[test]
+    fn test_normalize_preserves_precedence() {
+        // (a + b) * c → (a + b) * c (parens needed!)
+        assert_eq!(normalize_parens("(a + b) * c"), "(a + b) * c");
+    }
+
+    #[test]
+    fn test_normalize_no_change_needed() {
+        assert_eq!(normalize_parens("x"), "x");
+        assert_eq!(normalize_parens("42"), "42");
+        assert_eq!(normalize_parens("foo(a, b)"), "foo(a, b)");
+    }
+
+    #[test]
+    fn test_normalize_method_call() {
+        // (ptr).is_null() → ptr.is_null()
+        assert_eq!(normalize_parens("(ptr).is_null()"), "ptr.is_null()");
+    }
+
+    #[test]
+    fn test_normalize_logical_ops() {
+        // (a && b) → a && b
+        assert_eq!(normalize_parens("(a && b)"), "a && b");
+        // (a || b) → a || b
+        assert_eq!(normalize_parens("(a || b)"), "a || b");
+    }
+
+    #[test]
+    fn test_normalize_complex_nested() {
+        // ((*sv).sv_flags as u32) → (*sv).sv_flags as u32
+        assert_eq!(
+            normalize_parens("((*sv).sv_flags as u32)"),
+            "(*sv).sv_flags as u32"
+        );
+    }
+
+    #[test]
+    fn test_normalize_unary_minus() {
+        // (-x) → -x
+        assert_eq!(normalize_parens("(-x)"), "-x");
+    }
+
+    #[test]
+    fn test_normalize_not() {
+        // (!cond) → !cond
+        assert_eq!(normalize_parens("(!cond)"), "!cond");
+    }
+
+    #[test]
+    fn test_normalize_block_expr_passthrough() {
+        // Block expressions should pass through (parse may fail or be multi-line)
+        let s = "{ x += 1; x }";
+        let result = normalize_parens(s);
+        // Should either normalize or return original
+        assert!(result == s || !result.contains('\n'));
     }
 
     // ================================================================
