@@ -2560,7 +2560,6 @@ impl<'a> RustCodegen<'a> {
                         self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
                     } else {
                         let normalized = normalize_parens(&rust_expr);
-                        // ブロック式 { ... } は ({ ... }) != 0 にする必要がある
                         if normalized.starts_with('{') {
                             self.writeln(&format!("{}({}) != 0", body_indent, normalized));
                         } else {

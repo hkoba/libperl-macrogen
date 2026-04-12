@@ -228,6 +228,10 @@ pub fn expr_to_string(expr: &syn::Expr) -> String {
 
 /// syn::Ident を作成するヘルパー
 pub fn ident(name: &str) -> syn::Ident {
+    // 既に r# プレフィックスが付いている場合は除去して raw ident として作成
+    if let Some(raw_name) = name.strip_prefix("r#") {
+        return syn::Ident::new_raw(raw_name, Span::call_site());
+    }
     // Rust のキーワードは r# プレフィックスが必要
     if is_rust_keyword(name) {
         syn::Ident::new_raw(name, Span::call_site())
