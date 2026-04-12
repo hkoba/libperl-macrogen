@@ -2814,6 +2814,164 @@ impl<'a> RustCodegen<'a> {
         None
     }
 
+    // ================================================================
+    // syn::Expr ベースの式構築 (Step 1+)
+    // ================================================================
+
+    /// C AST の式を syn::Expr に変換する（macro/inline 統一）
+    ///
+    /// `info` が Some の場合はマクロ用、None の場合は inline 用。
+    /// 未対応の ExprKind は expr_to_rust_ctx のフォールバック文字列を syn::parse_str で変換する。
+    fn build_syn_expr(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> syn::Expr {
+        use crate::syn_codegen::*;
+
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                // lvalue展開時のパラメータ置換
+                if let Some(subst) = self.param_substitutions.get(name) {
+                    // 置換文字列をパース
+                    return syn::parse_str(subst).unwrap_or_else(|_| int_lit(0));
+                }
+                let name_str = self.interner.get(*name);
+                // libc 関数の使用を記録
+                if LIBC_FUNCTIONS.contains(&name_str) {
+                    self.used_libc_fns.insert(name_str.to_string());
+                }
+                // 未解決シンボルチェック
+                if !self.current_local_names.contains(name)
+                    && !self.enum_dict.is_enum_variant(*name)
+                    && !self.known_symbols.contains(name_str)
+                {
+                    let s = name_str.to_string();
+                    if !self.unresolved_names.contains(&s) {
+                        self.unresolved_names.push(s);
+                    }
+                }
+                let escaped = escape_rust_keyword(name_str);
+                // extern static 配列はポインタとして使われるため .as_ptr() を付加
+                if self.bindings_info.static_arrays.contains(name_str) {
+                    return syn::parse_str(&format!("{}.as_ptr()", escaped))
+                        .unwrap_or_else(|_| int_lit(0));
+                }
+                syn::Expr::Path(syn::ExprPath {
+                    attrs: vec![],
+                    qself: None,
+                    path: ident(&escaped).into(),
+                })
+            }
+            ExprKind::IntLit(n) => int_lit(*n),
+            ExprKind::UIntLit(n) => {
+                let lit = syn::LitInt::new(&format!("{}u64", n), proc_macro2::Span::call_site());
+                syn::Expr::Lit(syn::ExprLit { attrs: vec![], lit: syn::Lit::Int(lit) })
+            }
+            ExprKind::FloatLit(f) => {
+                let lit = syn::LitFloat::new(&format!("{}", f), proc_macro2::Span::call_site());
+                syn::Expr::Lit(syn::ExprLit { attrs: vec![], lit: syn::Lit::Float(lit) })
+            }
+            ExprKind::CharLit(c) => {
+                let s = if c.is_ascii() {
+                    format!("b'{}' as i8", escape_char(*c))
+                } else {
+                    format!("0x{:02x}u8 as i8", c)
+                };
+                syn::parse_str(&s).unwrap_or_else(|_| int_lit(0))
+            }
+            ExprKind::StringLit(s) => {
+                syn::parse_str(&format!("c\"{}\"", escape_string(s)))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
+            ExprKind::Deref(inner) => {
+                let e = self.build_syn_expr(inner, info);
+                deref(e)
+            }
+            ExprKind::AddrOf(inner) => {
+                let e = self.build_syn_expr(inner, info);
+                addr_of_mut(e)
+            }
+            ExprKind::UnaryPlus(inner) => {
+                self.build_syn_expr(inner, info)
+            }
+            ExprKind::BitNot(inner) => {
+                let e = self.build_syn_expr(inner, info);
+                syn::Expr::Unary(syn::ExprUnary {
+                    attrs: vec![],
+                    op: syn::UnOp::Not(Default::default()),
+                    expr: Box::new(e),
+                })
+            }
+            ExprKind::Member { expr: base, member } => {
+                let e = self.build_syn_expr(base, info);
+                let m = self.interner.get(*member);
+                if self.is_bitfield_method(m) {
+                    // bitfield → メソッド呼び出し
+                    syn::Expr::MethodCall(syn::ExprMethodCall {
+                        attrs: vec![],
+                        receiver: Box::new(e),
+                        dot_token: Default::default(),
+                        method: ident(m),
+                        turbofish: None,
+                        paren_token: Default::default(),
+                        args: syn::punctuated::Punctuated::new(),
+                    })
+                } else {
+                    field_access(e, m)
+                }
+            }
+            ExprKind::PtrMember { expr: base, member } => {
+                let e = self.build_syn_expr(base, info);
+                let m = self.interner.get(*member);
+                let derefed = deref(e);
+                if self.is_bitfield_method(m) {
+                    syn::Expr::MethodCall(syn::ExprMethodCall {
+                        attrs: vec![],
+                        receiver: Box::new(derefed),
+                        dot_token: Default::default(),
+                        method: ident(m),
+                        turbofish: None,
+                        paren_token: Default::default(),
+                        args: syn::punctuated::Punctuated::new(),
+                    })
+                } else {
+                    field_access(derefed, m)
+                }
+            }
+            ExprKind::Comma { lhs, rhs } => {
+                let l = self.build_syn_expr(lhs, info);
+                let r = self.build_syn_expr(rhs, info);
+                syn::Expr::Block(syn::ExprBlock {
+                    attrs: vec![],
+                    label: None,
+                    block: syn::Block {
+                        brace_token: Default::default(),
+                        stmts: vec![
+                            syn::Stmt::Expr(l, Some(Default::default())),
+                            syn::Stmt::Expr(r, None),
+                        ],
+                    },
+                })
+            }
+            ExprKind::SizeofType(type_name) => {
+                let t = self.type_name_to_rust(type_name);
+                syn::parse_str(&format!("std::mem::size_of::<{}>()", t))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
+            // 未対応 variant: 旧 expr_to_rust_ctx の文字列出力を syn::parse_str でフォールバック
+            _ => {
+                let fallback_str = match info {
+                    Some(info) => self.expr_to_rust_ctx(expr, info, ExprContext::Top),
+                    None => self.expr_to_rust_inline_ctx(expr, ExprContext::Top),
+                };
+                syn::parse_str(&fallback_str).unwrap_or_else(|_| int_lit(0))
+            }
+        }
+    }
+
+    /// build_syn_expr の結果を文字列に変換
+    fn expr_to_rust_via_syn(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
+        let syn_expr = self.build_syn_expr(expr, info);
+        crate::syn_codegen::expr_to_string(&syn_expr)
+    }
+
     /// 式を Rust コードに変換
     fn expr_to_rust(&mut self, expr: &Expr, info: &MacroInferInfo) -> String {
         self.expr_to_rust_ctx(expr, info, ExprContext::Default)
