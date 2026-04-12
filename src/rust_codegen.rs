@@ -2950,10 +2950,160 @@ impl<'a> RustCodegen<'a> {
                     },
                 })
             }
+            ExprKind::UnaryMinus(inner) => {
+                let e = self.build_syn_expr(inner, info);
+                // unsigned 型のキャスト結果に対する負号は wrapping_neg を使用
+                let e_str = expr_to_string(&e);
+                if is_unsigned_cast_expr(&e_str) {
+                    return syn::parse_str(&format!("({}).wrapping_neg()", e_str.trim_start_matches('-')))
+                        .unwrap_or_else(|_| int_lit(0));
+                }
+                if let Some(ut) = self.infer_expr_type_unified(inner, info) {
+                    let ts = ut.to_rust_string();
+                    if matches!(normalize_integer_type(&ts), Some("usize" | "u8" | "u16" | "u32" | "u64")) {
+                        self.codegen_errors.push(format!("cannot negate unsigned type: -({}: {})", e_str, ts));
+                    }
+                }
+                syn::Expr::Unary(syn::ExprUnary {
+                    attrs: vec![],
+                    op: syn::UnOp::Neg(Default::default()),
+                    expr: Box::new(e),
+                })
+            }
+            ExprKind::LogNot(inner) => {
+                let e = self.build_syn_expr(inner, info);
+                let bool_e = if self.is_bool_expr_with_dict(inner) {
+                    e
+                } else if self.is_pointer_expr_unified(inner, info)
+                    || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer()) {
+                    // ポインタ → .is_null() (否定なし、外側の ! が担当)
+                    syn::Expr::MethodCall(syn::ExprMethodCall {
+                        attrs: vec![],
+                        receiver: Box::new(e),
+                        dot_token: Default::default(),
+                        method: ident("is_null"),
+                        turbofish: None,
+                        paren_token: Default::default(),
+                        args: syn::punctuated::Punctuated::new(),
+                    })
+                } else {
+                    // 整数 → != 0 して bool に変換、否定は外側 ! が担当
+                    wrap_as_bool(e)
+                };
+                syn::Expr::Unary(syn::ExprUnary {
+                    attrs: vec![],
+                    op: syn::UnOp::Not(Default::default()),
+                    expr: Box::new(bool_e),
+                })
+            }
+            ExprKind::Cast { type_name, expr: inner } => {
+                let e = self.build_syn_expr(inner, info);
+                let t = self.type_name_to_rust(type_name);
+                if t == "()" {
+                    // void キャスト → 式の値を捨てる
+                    let e_str = expr_to_string(&e);
+                    return syn::parse_str(&format!("{{ {}; }}", e_str))
+                        .unwrap_or_else(|_| int_lit(0));
+                }
+                if t == "bool" {
+                    // bool キャスト
+                    if self.is_bool_expr_with_dict(inner) {
+                        return e;
+                    }
+                    if self.is_pointer_expr_unified(inner, info)
+                        || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer()) {
+                        // ポインタ → !ptr.is_null()
+                        let is_null = syn::Expr::MethodCall(syn::ExprMethodCall {
+                            attrs: vec![],
+                            receiver: Box::new(e),
+                            dot_token: Default::default(),
+                            method: ident("is_null"),
+                            turbofish: None,
+                            paren_token: Default::default(),
+                            args: syn::punctuated::Punctuated::new(),
+                        });
+                        return syn::Expr::Unary(syn::ExprUnary {
+                            attrs: vec![],
+                            op: syn::UnOp::Not(Default::default()),
+                            expr: Box::new(is_null),
+                        });
+                    }
+                    return wrap_as_bool(e);
+                }
+                if self.is_enum_cast_target(type_name) {
+                    // enum キャスト → transmute
+                    let e_str = expr_to_string(&e);
+                    return syn::parse_str(&format!("std::mem::transmute::<_, {}>({})", t, e_str))
+                        .unwrap_or_else(|_| int_lit(0));
+                }
+                insert_cast(e, parse_type(&t))
+            }
+            ExprKind::Sizeof(inner) => {
+                // sizeof(literal_string_param) → param.len() + 1
+                if let ExprKind::Ident(name) = &inner.kind {
+                    if self.current_literal_string_params.contains(name) {
+                        let param = escape_rust_keyword(self.interner.get(*name));
+                        return syn::parse_str(&format!("({}.len() + 1)", param))
+                            .unwrap_or_else(|_| int_lit(0));
+                    }
+                }
+                let e = self.build_syn_expr(inner, info);
+                let e_str = expr_to_string(&e);
+                syn::parse_str(&format!("std::mem::size_of_val(&{})", e_str))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
             ExprKind::SizeofType(type_name) => {
                 let t = self.type_name_to_rust(type_name);
                 syn::parse_str(&format!("std::mem::size_of::<{}>()", t))
                     .unwrap_or_else(|_| int_lit(0))
+            }
+            ExprKind::Index { expr: base, index } => {
+                let i = self.build_syn_expr(index, info);
+                let i_str = expr_to_string(&i);
+                if self.is_static_array_expr(base) {
+                    let b = if let ExprKind::Ident(n) = &base.kind {
+                        escape_rust_keyword(self.interner.get(*n))
+                    } else {
+                        let b_expr = self.build_syn_expr(base, info);
+                        expr_to_string(&b_expr)
+                    };
+                    syn::parse_str(&format!("(*{}.as_ptr().offset({} as isize))", b, i_str))
+                        .unwrap_or_else(|_| int_lit(0))
+                } else {
+                    let b = self.build_syn_expr(base, info);
+                    let b_str = expr_to_string(&b);
+                    syn::parse_str(&format!("(*{}.offset({} as isize))", b_str, i_str))
+                        .unwrap_or_else(|_| int_lit(0))
+                }
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                let c = self.build_syn_expr(cond, info);
+                let c_str = expr_to_string(&c);
+                let cond_str = self.wrap_as_bool_condition(cond, &c_str, info);
+                let cond_syn: syn::Expr = syn::parse_str(&cond_str).unwrap_or(c);
+
+                let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
+                let tt = self.infer_expr_type_unified(then_expr, info);
+                let et = self.infer_expr_type_unified(else_expr, info);
+
+                // null リテラル分岐の型推論
+                let then_syn = if is_null_literal(then_expr) {
+                    if let Some(ref eut) = et {
+                        if eut.is_pointer() {
+                            syn::parse_str(&null_ptr_expr(eut)).unwrap_or_else(|_| int_lit(0))
+                        } else { self.build_syn_expr(then_expr, info) }
+                    } else { self.build_syn_expr(then_expr, info) }
+                } else { self.build_syn_expr(then_expr, info) };
+
+                let else_syn = if is_null_literal(else_expr) {
+                    if let Some(ref tut) = tt {
+                        if tut.is_pointer() {
+                            syn::parse_str(&null_ptr_expr(tut)).unwrap_or_else(|_| int_lit(0))
+                        } else { self.build_syn_expr(else_expr, info) }
+                    } else { self.build_syn_expr(else_expr, info) }
+                } else { self.build_syn_expr(else_expr, info) };
+
+                if_else(cond_syn, then_syn, else_syn)
             }
             // 未対応 variant: 旧 expr_to_rust_ctx の文字列出力を syn::parse_str でフォールバック
             _ => {
