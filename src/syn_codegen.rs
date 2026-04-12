@@ -227,10 +227,20 @@ pub fn expr_to_string(expr: &syn::Expr) -> String {
 }
 
 /// syn::Ident を作成するヘルパー
+///
+/// 通常の識別子を syn::Ident に変換する。
+/// `r#` プレフィックス付きや Rust キーワードも正しく処理する。
+/// `name!()` のようなマクロ呼び出し形式や不正な識別子は
+/// `__invalid_ident__` にフォールバックする。
 pub fn ident(name: &str) -> syn::Ident {
     // 既に r# プレフィックスが付いている場合は除去して raw ident として作成
     if let Some(raw_name) = name.strip_prefix("r#") {
         return syn::Ident::new_raw(raw_name, Span::call_site());
+    }
+    // 有効な識別子かチェック（マクロ呼び出し形式等を拒否）
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') ||
+       name.starts_with(|c: char| c.is_ascii_digit()) {
+        return syn::Ident::new("__invalid_ident__", Span::call_site());
     }
     // Rust のキーワードは r# プレフィックスが必要
     if is_rust_keyword(name) {
@@ -526,6 +536,14 @@ pub fn int_lit(n: i64) -> syn::Expr {
         attrs: vec![],
         lit: syn::Lit::Int(lit),
     })
+}
+
+/// 型名文字列から `as T` キャストを挿入（parse_type + insert_cast の統合版）
+///
+/// `syn::parse_str(&format!("{} as {}", ...))` の代替。パース失敗時もフォールバック型で
+/// キャストノードを確実に構築するため、キャストが消えるリスクがない。
+pub fn cast_syn_expr(expr: syn::Expr, ty_str: &str) -> syn::Expr {
+    insert_cast(expr, parse_type(ty_str))
 }
 
 /// `as T` キャストを挿入

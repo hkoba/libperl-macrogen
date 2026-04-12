@@ -2549,12 +2549,10 @@ impl<'a> RustCodegen<'a> {
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
                 let rust_expr = self.expr_with_type_hint(expr, info, type_hint.as_deref());
                 if self.current_return_type.as_ref().is_some_and(|ut| ut.is_void()) {
-                    // void 関数: 式の結果を捨てる
                     self.writeln(&format!("{}{};", body_indent, rust_expr));
                 } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
                     && !self.is_bool_expr_with_dict(expr)
                     && !is_string_bool_expr(&rust_expr) {
-                    // bool 関数: 式がポインタなら .is_null() で変換
                     if self.infer_type_hint(expr, info) == TypeHint::Pointer
                         || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
                         self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
@@ -3078,7 +3076,39 @@ impl<'a> RustCodegen<'a> {
                 let tt = self.infer_expr_type_unified(then_expr, info);
                 let et = self.infer_expr_type_unified(else_expr, info);
 
-                // null リテラル分岐の型推論
+                // Fix 3: type_hint ベースの null→null_ptr, 0/1→bool 変換
+                if let Some(ref hint) = type_hint {
+                    let hint_ut = UnifiedType::from_rust_str(hint);
+                    if hint_ut.is_pointer() {
+                        if is_null_literal(else_expr) {
+                            let t = self.build_syn_expr(then_expr, info);
+                            let e: syn::Expr = syn::parse_str(&null_ptr_expr(&hint_ut))
+                                .unwrap_or_else(|_| int_lit(0));
+                            return if_else(cond_syn, t, e);
+                        }
+                        if is_null_literal(then_expr) {
+                            let t: syn::Expr = syn::parse_str(&null_ptr_expr(&hint_ut))
+                                .unwrap_or_else(|_| int_lit(0));
+                            let e = self.build_syn_expr(else_expr, info);
+                            return if_else(cond_syn, t, e);
+                        }
+                    }
+                    if hint_ut.is_bool() {
+                        let then_syn = match &then_expr.kind {
+                            ExprKind::IntLit(0) => syn::parse_str("false").unwrap(),
+                            ExprKind::IntLit(1) => syn::parse_str("true").unwrap(),
+                            _ => self.build_syn_expr(then_expr, info),
+                        };
+                        let else_syn = match &else_expr.kind {
+                            ExprKind::IntLit(0) => syn::parse_str("false").unwrap(),
+                            ExprKind::IntLit(1) => syn::parse_str("true").unwrap(),
+                            _ => self.build_syn_expr(else_expr, info),
+                        };
+                        return if_else(cond_syn, then_syn, else_syn);
+                    }
+                }
+
+                // null リテラル分岐の型推論（type_hint がない場合のフォールバック）
                 let then_syn = if is_null_literal(then_expr) {
                     if let Some(ref eut) = et {
                         if eut.is_pointer() {
@@ -3094,6 +3124,24 @@ impl<'a> RustCodegen<'a> {
                         } else { self.build_syn_expr(else_expr, info) }
                     } else { self.build_syn_expr(else_expr, info) }
                 } else { self.build_syn_expr(else_expr, info) };
+
+                // Fix 2: wider_integer_type キャスト
+                if let (Some(tut), Some(eut)) = (&tt, &et) {
+                    let ts = tut.to_rust_string();
+                    let es = eut.to_rust_string();
+                    if let (Some(tn), Some(en)) = (normalize_integer_type(&ts), normalize_integer_type(&es)) {
+                        if tn != en {
+                            if let Some(wider) = wider_integer_type(&ts, &es) {
+                                let (then_final, else_final) = if normalize_integer_type(&ts) != Some(wider) {
+                                    (cast_syn_expr(then_syn, wider), else_syn)
+                                } else {
+                                    (then_syn, cast_syn_expr(else_syn, wider))
+                                };
+                                return if_else(cond_syn, then_final, else_final);
+                            }
+                        }
+                    }
+                }
 
                 if_else(cond_syn, then_syn, else_syn)
             }
@@ -3265,134 +3313,87 @@ impl<'a> RustCodegen<'a> {
                 let lt = self.infer_expr_type_unified(lhs, info);
                 let rt = self.infer_expr_type_unified(rhs, info);
                 if let (Some(lut), Some(rut)) = (&lt, &rt) {
+                    let make_binary = |left: syn::Expr, right: syn::Expr| -> syn::Expr {
+                        syn::Expr::Binary(syn::ExprBinary {
+                            attrs: vec![], left: Box::new(left),
+                            op: crate::syn_codegen::to_syn_binop(*op),
+                            right: Box::new(right),
+                        })
+                    };
                     // bool → integer キャスト
                     if rut.is_bool() {
                         let ls = lut.to_rust_string();
                         if let Some(nl) = normalize_integer_type(&ls) {
-                            let r_str = expr_to_string(&r);
-                            let r_cast: syn::Expr = syn::parse_str(&format!("{} as {}", r_str, nl))
-                                .unwrap_or(r);
-                            return syn::Expr::Binary(syn::ExprBinary {
-                                attrs: vec![], left: Box::new(l),
-                                op: crate::syn_codegen::to_syn_binop(*op),
-                                right: Box::new(r_cast),
-                            });
+                            return make_binary(l, cast_syn_expr(r, nl));
                         }
                     }
                     if lut.is_bool() {
                         let rs = rut.to_rust_string();
                         if let Some(nr) = normalize_integer_type(&rs) {
-                            let l_str = expr_to_string(&l);
-                            let l_cast: syn::Expr = syn::parse_str(&format!("{} as {}", l_str, nr))
-                                .unwrap_or(l);
-                            return syn::Expr::Binary(syn::ExprBinary {
-                                attrs: vec![], left: Box::new(l_cast),
-                                op: crate::syn_codegen::to_syn_binop(*op),
-                                right: Box::new(r),
-                            });
+                            return make_binary(cast_syn_expr(l, nr), r);
                         }
                     }
                     // float ↔ integer キャスト
                     if lut.is_float() && !rut.is_float() {
                         let ls = lut.to_rust_string();
                         let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
-                        let r_str = expr_to_string(&r);
-                        let r_cast: syn::Expr = syn::parse_str(&format!("{} as {}", r_str, float_ty)).unwrap_or(r);
-                        return syn::Expr::Binary(syn::ExprBinary {
-                            attrs: vec![], left: Box::new(l),
-                            op: crate::syn_codegen::to_syn_binop(*op),
-                            right: Box::new(r_cast),
-                        });
+                        return make_binary(l, cast_syn_expr(r, float_ty));
                     }
                     if rut.is_float() && !lut.is_float() {
                         let rs = rut.to_rust_string();
                         let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
-                        let l_str = expr_to_string(&l);
-                        let l_cast: syn::Expr = syn::parse_str(&format!("{} as {}", l_str, float_ty)).unwrap_or(l);
-                        return syn::Expr::Binary(syn::ExprBinary {
-                            attrs: vec![], left: Box::new(l_cast),
-                            op: crate::syn_codegen::to_syn_binop(*op),
-                            right: Box::new(r),
-                        });
+                        return make_binary(cast_syn_expr(l, float_ty), r);
                     }
                     // 整数幅不一致 → wider type にキャスト
                     let ls = lut.to_rust_string();
                     let rs = rut.to_rust_string();
                     if let Some(wider) = wider_integer_type(&ls, &rs) {
-                        let norm_l = normalize_integer_type(&ls);
-                        if norm_l != Some(wider) {
-                            let l_str = expr_to_string(&l);
-                            let l_cast: syn::Expr = syn::parse_str(&format!("{} as {}", l_str, wider)).unwrap_or(l);
-                            return syn::Expr::Binary(syn::ExprBinary {
-                                attrs: vec![], left: Box::new(l_cast),
-                                op: crate::syn_codegen::to_syn_binop(*op),
-                                right: Box::new(r),
-                            });
+                        if normalize_integer_type(&ls) != Some(wider) {
+                            return make_binary(cast_syn_expr(l, wider), r);
                         } else {
-                            let r_str = expr_to_string(&r);
-                            let r_cast: syn::Expr = syn::parse_str(&format!("{} as {}", r_str, wider)).unwrap_or(r);
-                            return syn::Expr::Binary(syn::ExprBinary {
-                                attrs: vec![], left: Box::new(l),
-                                op: crate::syn_codegen::to_syn_binop(*op),
-                                right: Box::new(r_cast),
-                            });
+                            return make_binary(l, cast_syn_expr(r, wider));
                         }
                     }
                 }
                 // float (片方のみ型判明)
-                match (&lt, &rt) {
-                    (Some(lut), None) if lut.is_float() => {
-                        let ls = lut.to_rust_string();
-                        let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
-                        let r_str = expr_to_string(&r);
-                        let r_cast: syn::Expr = syn::parse_str(&format!("{} as {}", r_str, float_ty)).unwrap_or(r);
-                        return syn::Expr::Binary(syn::ExprBinary {
-                            attrs: vec![], left: Box::new(l),
+                {
+                    let make_binary = |left: syn::Expr, right: syn::Expr| -> syn::Expr {
+                        syn::Expr::Binary(syn::ExprBinary {
+                            attrs: vec![], left: Box::new(left),
                             op: crate::syn_codegen::to_syn_binop(*op),
-                            right: Box::new(r_cast),
-                        });
-                    }
-                    (None, Some(rut)) if rut.is_float() => {
-                        let rs = rut.to_rust_string();
-                        let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
-                        let l_str = expr_to_string(&l);
-                        let l_cast: syn::Expr = syn::parse_str(&format!("{} as {}", l_str, float_ty)).unwrap_or(l);
-                        return syn::Expr::Binary(syn::ExprBinary {
-                            attrs: vec![], left: Box::new(l_cast),
-                            op: crate::syn_codegen::to_syn_binop(*op),
-                            right: Box::new(r),
-                        });
-                    }
-                    _ => {}
-                }
-                // ビット演算で片方のみ型判明
-                if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+                            right: Box::new(right),
+                        })
+                    };
                     match (&lt, &rt) {
-                        (Some(lut), None) => {
+                        (Some(lut), None) if lut.is_float() => {
                             let ls = lut.to_rust_string();
-                            if let Some(nl) = normalize_integer_type(&ls) {
-                                let r_str = expr_to_string(&r);
-                                let r_cast: syn::Expr = syn::parse_str(&format!("{} as {}", r_str, nl)).unwrap_or(r);
-                                return syn::Expr::Binary(syn::ExprBinary {
-                                    attrs: vec![], left: Box::new(l),
-                                    op: crate::syn_codegen::to_syn_binop(*op),
-                                    right: Box::new(r_cast),
-                                });
-                            }
+                            let float_ty = if ls == "c_float" || ls == "f32" { "f32" } else { "f64" };
+                            return make_binary(l, cast_syn_expr(r, float_ty));
                         }
-                        (None, Some(rut)) => {
+                        (None, Some(rut)) if rut.is_float() => {
                             let rs = rut.to_rust_string();
-                            if let Some(nr) = normalize_integer_type(&rs) {
-                                let l_str = expr_to_string(&l);
-                                let l_cast: syn::Expr = syn::parse_str(&format!("{} as {}", l_str, nr)).unwrap_or(l);
-                                return syn::Expr::Binary(syn::ExprBinary {
-                                    attrs: vec![], left: Box::new(l_cast),
-                                    op: crate::syn_codegen::to_syn_binop(*op),
-                                    right: Box::new(r),
-                                });
-                            }
+                            let float_ty = if rs == "c_float" || rs == "f32" { "f32" } else { "f64" };
+                            return make_binary(cast_syn_expr(l, float_ty), r);
                         }
                         _ => {}
+                    }
+                    // ビット演算で片方のみ型判明
+                    if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) {
+                        match (&lt, &rt) {
+                            (Some(lut), None) => {
+                                let ls = lut.to_rust_string();
+                                if let Some(nl) = normalize_integer_type(&ls) {
+                                    return make_binary(l, cast_syn_expr(r, nl));
+                                }
+                            }
+                            (None, Some(rut)) => {
+                                let rs = rut.to_rust_string();
+                                if let Some(nr) = normalize_integer_type(&rs) {
+                                    return make_binary(cast_syn_expr(l, nr), r);
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 // 基本の二項演算
@@ -3473,15 +3474,10 @@ impl<'a> RustCodegen<'a> {
                     let mut value_idx = if needs_my_perl { 1usize } else { 0 };
                     for (i, arg) in args.iter().enumerate() {
                         if generics.contains_key(&(i as i32)) {
-                            type_args.push(match info {
-                                Some(info) => self.expr_to_rust(arg, info),
-                                None => self.expr_to_rust_inline(arg),
-                            });
+                            let syn_arg = self.build_syn_expr(arg, info);
+                            type_args.push(normalize_parens(&expr_to_string(&syn_arg)));
                         } else {
-                            value_args.push(match info {
-                                Some(info) => self.expr_to_rust_arg(arg, info, callee_name, value_idx),
-                                None => self.expr_to_rust_inline(arg),
-                            });
+                            value_args.push(self.build_arg_string_unified(arg, info, callee_name, value_idx));
                             value_idx += 1;
                         }
                     }
@@ -3489,21 +3485,13 @@ impl<'a> RustCodegen<'a> {
                         .unwrap_or_else(|_| int_lit(0));
                 }
 
-                // 通常の関数呼び出し — 引数を処理
+                // 通常の関数呼び出し — 引数を処理（統一版）
                 let mut arg_strs: Vec<String> = if needs_my_perl {
                     vec!["my_perl".to_string()]
                 } else { vec![] };
                 let arg_offset = if needs_my_perl { 1usize } else { 0 };
                 for (i, arg) in args.iter().enumerate() {
-                    let arg_str = match info {
-                        Some(info) => self.expr_to_rust_arg(arg, info, callee_name, i + arg_offset),
-                        None => {
-                            // inline 用: 簡易引数処理
-                            let s = expr_to_string(&self.build_syn_expr(arg, None));
-                            normalize_parens(&s)
-                        }
-                    };
-                    arg_strs.push(arg_str);
+                    arg_strs.push(self.build_arg_string_unified(arg, info, callee_name, i + arg_offset));
                 }
                 syn::parse_str(&format!("{}({})", f_str, arg_strs.join(", ")))
                     .unwrap_or_else(|_| int_lit(0))
@@ -3703,6 +3691,62 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// 関数引数を文字列に変換（macro/inline 統一版）
+    ///
+    /// expr_to_rust_arg 相当の処理を build_syn_expr ベースで行う。
+    fn build_arg_string_unified(&mut self, arg: &Expr, info: Option<&MacroInferInfo>,
+                                  callee: Option<InternedStr>, arg_index: usize) -> String {
+        // macro: literal string パラメータ変換
+        if info.is_some() {
+            if let Some(name) = self.find_literal_string_ident(arg) {
+                if let Some(callee_name) = callee {
+                    if self.callee_expects_literal_string(callee_name, arg_index) {
+                        return escape_rust_keyword(self.interner.get(*name));
+                    }
+                }
+                let param = escape_rust_keyword(self.interner.get(*name));
+                return format!("{}.as_ptr() as *const c_char", param);
+            }
+        }
+        // null pointer 変換
+        if is_null_literal(arg) {
+            if let Some(callee_name) = callee {
+                let func_name = self.interner.get(callee_name).to_string();
+                if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
+                    if expected_ut.is_pointer() {
+                        return null_ptr_expr(&expected_ut);
+                    }
+                }
+            }
+        }
+        // bool パラメータ変換
+        if let Some(callee_name) = callee {
+            let func_name = self.interner.get(callee_name);
+            if self.callee_param_is_bool(func_name, arg_index) {
+                match &arg.kind {
+                    ExprKind::IntLit(0) => return "false".to_string(),
+                    ExprKind::IntLit(1) => return "true".to_string(),
+                    _ => {}
+                }
+            }
+        }
+        // 式の生成
+        let syn_expr = self.build_syn_expr(arg, info);
+        let result = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+        // 整数幅キャスト
+        if let Some(callee_name) = callee {
+            let func_name = self.interner.get(callee_name).to_string();
+            if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
+                let actual_ut = self.infer_expr_type_unified(arg, info);
+                let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
+                let expected_ty_str = expected_ut.to_rust_string();
+                let casted = self.cast_integer_arg_if_needed(&result, actual_ty_str.as_deref(), &expected_ty_str);
+                return normalize_parens(&casted);
+            }
+        }
+        result
+    }
+
     /// lvalue 用の文字列を構築（MacroCall/Call の展開対応）
     fn build_lvalue_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
         if let ExprKind::MacroCall { expanded, .. } = &expr.kind {
@@ -3727,10 +3771,24 @@ impl<'a> RustCodegen<'a> {
         normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
     }
 
-    /// build_syn_expr の結果を文字列に変換
-    fn expr_to_rust_via_syn(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
-        let syn_expr = self.build_syn_expr(expr, info);
-        crate::syn_codegen::expr_to_string(&syn_expr)
+    /// build_syn_expr + type_hint 適用（generate_macro のトップレベル用）
+    fn build_syn_expr_with_type_hint(&mut self, expr: &Expr, info: Option<&MacroInferInfo>,
+                                       type_hint: Option<&str>) -> syn::Expr {
+        use crate::syn_codegen::*;
+        if let Some(ty) = type_hint {
+            let ut = UnifiedType::from_rust_str(ty);
+            if ut.is_pointer() && is_null_literal(expr) {
+                return syn::parse_str(&null_ptr_expr(&ut)).unwrap_or_else(|_| int_lit(0));
+            }
+            if ut.is_bool() {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return syn::parse_str("false").unwrap(),
+                    ExprKind::IntLit(1) => return syn::parse_str("true").unwrap(),
+                    _ => {}
+                }
+            }
+        }
+        self.build_syn_expr(expr, info)
     }
 
     /// 式を Rust コードに変換
