@@ -2365,35 +2365,28 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// 返り値式の型キャストが必要ならキャスト済み文字列を返す
-    fn cast_return_expr_if_needed(&self, expr: &Expr, info: &MacroInferInfo, rust_expr: &str) -> Option<String> {
+    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（統一版）
+    fn cast_return_expr_if_needed_unified(&self, expr: &Expr, info: Option<&MacroInferInfo>, rust_expr: &str) -> Option<String> {
         let ret_ut = self.current_return_type.as_ref()?;
-        let expr_ut = self.infer_expr_type(expr, info)?;
+        let expr_ut = self.infer_expr_type_unified(expr, info)?;
         let ret_s = ret_ut.to_rust_string();
         let expr_s = expr_ut.to_rust_string();
-        // 整数型キャスト
         if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
             if !integer_types_compatible(nr, ne) {
                 return Some(format!("({} as {})", rust_expr, nr));
             }
         }
-        // ポインタ const→mut キャストは安全でないため行わない
         None
     }
 
-    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す (inline 版)
+    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（macro 用）— 統一版に委譲
+    fn cast_return_expr_if_needed(&self, expr: &Expr, info: &MacroInferInfo, rust_expr: &str) -> Option<String> {
+        self.cast_return_expr_if_needed_unified(expr, Some(info), rust_expr)
+    }
+
+    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（inline 用）— 統一版に委譲
     fn cast_return_expr_if_needed_inline(&self, expr: &Expr, rust_expr: &str) -> Option<String> {
-        let ret_ut = self.current_return_type.as_ref()?;
-        let expr_ut = self.infer_expr_type_inline(expr)?;
-        let ret_s = ret_ut.to_rust_string();
-        let expr_s = expr_ut.to_rust_string();
-        // 整数型キャスト
-        if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
-            if !integer_types_compatible(nr, ne) {
-                return Some(format!("({} as {})", rust_expr, nr));
-            }
-        }
-        // ポインタ const→mut キャストは安全でないため行わない
-        None
+        self.cast_return_expr_if_needed_unified(expr, None, rust_expr)
     }
 
     /// マクロ呼び出し形式で出力すべきかを判定
@@ -4582,38 +4575,122 @@ impl<'a> RustCodegen<'a> {
         self.expr_to_rust_inline_ctx(expr, ExprContext::Top)
     }
 
-    /// 文を Rust コードに変換
+    // ================================================================
+    // 統一文変換 (macro/inline 共通)
+    // ================================================================
+
+    /// return 文を構築（macro/inline 統一）
+    fn build_return_stmt(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+        if let Some(ref rt) = self.current_return_type {
+            if rt.is_pointer() && is_null_literal(expr) {
+                return format!("{}return {};", indent, null_ptr_expr(rt));
+            }
+            if rt.is_bool() {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return format!("{}return false;", indent),
+                    ExprKind::IntLit(1) => return format!("{}return true;", indent),
+                    _ => {
+                        let e = self.build_expr_string(expr, info);
+                        if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
+                            return format!("{}return {} != 0;", indent, normalize_parens(&e));
+                        }
+                        return format!("{}return {};", indent, normalize_parens(&e));
+                    }
+                }
+            }
+        }
+        let e = self.build_expr_string(expr, info);
+        if let Some(casted) = self.cast_return_expr_if_needed_unified(expr, info, &e) {
+            return format!("{}return {};", indent, normalize_parens(&casted));
+        }
+        format!("{}return {};", indent, normalize_parens(&e))
+    }
+
+    /// 代入文を構築（macro/inline 統一、文コンテキスト用）
+    fn build_assign_stmt(&mut self, op: &AssignOp, lhs: &Expr, rhs: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+        let l = self.build_lvalue_string(lhs, info);
+        let lhs_ut = self.infer_expr_type_unified(lhs, info);
+        let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
+            if let Some(ref lut) = lhs_ut {
+                if lut.is_pointer() {
+                    if lut.is_const_pointer() { "std::ptr::null()".to_string() }
+                    else { "std::ptr::null_mut()".to_string() }
+                } else { "0".to_string() }
+            } else { "std::ptr::null_mut()".to_string() }
+        } else {
+            let r_str = self.build_expr_string(rhs, info);
+            let r_str = normalize_parens(&r_str);
+            if *op == AssignOp::Assign {
+                if let Some(ref lut) = lhs_ut {
+                    if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
+                        let ls = lut.to_rust_string();
+                        let rs = rut.to_rust_string();
+                        if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
+                            if !integer_types_compatible(nl, nr) {
+                                let r_cast = if r_str.contains(' ') {
+                                    format!("({}) as {}", r_str, nl)
+                                } else {
+                                    format!("{} as {}", r_str, nl)
+                                };
+                                return format!("{}{} = {};", indent, l, r_cast);
+                            }
+                        }
+                    }
+                }
+            }
+            r_str
+        };
+        match op {
+            AssignOp::Assign => format!("{}{} = {};", indent, l, r),
+            AssignOp::AddAssign | AssignOp::SubAssign => {
+                if self.is_pointer_expr_unified(lhs, info)
+                    || lhs_ut.as_ref().is_some_and(|ut| ut.is_pointer()) {
+                    let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                    format!("{}{} = {}.{}({} as usize);", indent, l, l, method, r)
+                } else {
+                    format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+                }
+            }
+            AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
+                let lt = &lhs_ut;
+                let rt = self.infer_expr_type_unified(rhs, info);
+                if let (Some(lut), Some(rut)) = (lt, &rt) {
+                    let ls = lut.to_rust_string();
+                    let rs = rut.to_rust_string();
+                    let nl = normalize_integer_type(&ls);
+                    let nr = normalize_integer_type(&rs);
+                    if nl.is_some() && nr.is_some() && nl != nr {
+                        return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl.unwrap());
+                    }
+                }
+                if let (Some(lut), None) = (lt, &rt) {
+                    let ls = lut.to_rust_string();
+                    if let Some(nl) = normalize_integer_type(&ls) {
+                        return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl);
+                    }
+                }
+                format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+            }
+            _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
+        }
+    }
+
+    /// 式を文字列に変換（info に応じて macro/inline パスを選択）
+    fn build_expr_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
+        match info {
+            Some(info) => self.expr_to_rust(expr, info),
+            None => self.expr_to_rust_inline(expr),
+        }
+    }
+
+    /// 文を Rust コードに変換（マクロ用）— 統一ヘルパーに委譲
     fn stmt_to_rust(&mut self, stmt: &Stmt, info: &MacroInferInfo) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
                 format!("{};", self.expr_to_rust(expr, info))
             }
             Stmt::Expr(None, _) => ";".to_string(),
-            Stmt::Return(Some(expr), _) => {
-                if let Some(ref rt) = self.current_return_type {
-                    if rt.is_pointer() && is_null_literal(expr) {
-                        return format!("return {};", null_ptr_expr(rt));
-                    }
-                    if rt.is_bool() {
-                        match &expr.kind {
-                            ExprKind::IntLit(0) => return "return false;".to_string(),
-                            ExprKind::IntLit(1) => return "return true;".to_string(),
-                            _ => {
-                                let e = self.expr_to_rust(expr, info);
-                                if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("return {} != 0;", normalize_parens(&e));
-                                }
-                                return format!("return {};", normalize_parens(&e));
-                            }
-                        }
-                    }
-                }
-                let e = self.expr_to_rust(expr, info);
-                if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &e) {
-                    return format!("return {};", normalize_parens(&casted));
-                }
-                format!("return {};", normalize_parens(&e))
-            }
+            Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, "", Some(info)),
             Stmt::Return(None, _) => "return;".to_string(),
             _ => self.todo_marker("stmt")
         }
@@ -5137,128 +5214,15 @@ impl<'a> RustCodegen<'a> {
     fn stmt_to_rust_inline(&mut self, stmt: &Stmt, indent: &str) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                // 代入式は値を返さない形式で出力
+                // 代入式は値を返さない形式で出力（統一ヘルパー使用）
                 if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
-                    // LHS が MacroCall/Call の場合は展開形式で lvalue アクセス
-                    let l = if let ExprKind::MacroCall { expanded, .. } = &lhs.kind {
-                        self.expr_to_rust_inline(expanded)
-                    } else if let ExprKind::Call { func, args } = &lhs.kind {
-                        match self.try_expand_call_as_lvalue_inline(func, args) {
-                            Some(expanded) => expanded,
-                            None => {
-                                let lhs_str = self.expr_to_rust_inline(lhs);
-                                self.codegen_errors.push(format!("invalid lvalue: {} cannot be assigned to", lhs_str));
-                                lhs_str
-                            }
-                        }
-                    } else {
-                        self.expr_to_rust_inline(lhs)
-                    };
-                    let lhs_ut = self.infer_expr_type_inline(lhs);
-                    let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
-                        // null リテラル: LHS がポインタなら null_mut/null, 整数なら 0
-                        if let Some(ref lut) = lhs_ut {
-                            if lut.is_pointer() {
-                                if lut.is_const_pointer() {
-                                    "std::ptr::null()".to_string()
-                                } else {
-                                    "std::ptr::null_mut()".to_string()
-                                }
-                            } else {
-                                "0".to_string()
-                            }
-                        } else {
-                            "std::ptr::null_mut()".to_string()
-                        }
-                    } else {
-                        let r_str = self.expr_to_rust_inline_ctx(rhs, ExprContext::Top);
-                        // 整数型の幅不一致キャスト
-                        if *op == AssignOp::Assign {
-                            if let Some(ref lut) = lhs_ut {
-                                if let Some(rut) = self.infer_expr_type_inline(rhs) {
-                                    let ls = lut.to_rust_string();
-                                    let rs = rut.to_rust_string();
-                                    if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
-                                        if !integer_types_compatible(nl, nr) {
-                                            // Binary 式等の場合は括弧が必要（as の優先順位が高い）
-                                            let r_stripped = strip_outer_parens(&r_str);
-                                            let r_cast = if r_stripped.contains(' ') {
-                                                format!("({}) as {}", r_stripped, nl)
-                                            } else {
-                                                format!("{} as {}", r_stripped, nl)
-                                            };
-                                            return format!("{}{} = {};", indent, l, r_cast);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        r_str
-                    };
-                    match op {
-                        AssignOp::Assign => format!("{}{} = {};", indent, l, strip_outer_parens(&r)),
-                        AssignOp::AddAssign | AssignOp::SubAssign => {
-                            if self.is_pointer_expr_inline(lhs) {
-                                let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
-                                format!("{}{} = {}.{}({} as usize);", indent, l, l, method, r)
-                            } else {
-                                format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r))
-                            }
-                        }
-                        AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
-                            let lt = self.infer_expr_type_inline(lhs);
-                            let rt = self.infer_expr_type_inline(rhs);
-                            if let (Some(lut), Some(rut)) = (&lt, &rt) {
-                                let ls = lut.to_rust_string();
-                                let rs = rut.to_rust_string();
-                                let nl = normalize_integer_type(&ls);
-                                let nr = normalize_integer_type(&rs);
-                                if nl.is_some() && nr.is_some() && nl != nr {
-                                    let target = nl.unwrap();
-                                    return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, target);
-                                }
-                            }
-                            // 片方のみ型が判明: LHS型に合わせてRHSをキャスト
-                            if let (Some(lut), None) = (&lt, &rt) {
-                                let ls = lut.to_rust_string();
-                                if let Some(nl) = normalize_integer_type(&ls) {
-                                    return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl);
-                                }
-                            }
-                            format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r))
-                        }
-                        _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), strip_outer_parens(&r)),
-                    }
+                    self.build_assign_stmt(op, lhs, rhs, indent, None)
                 } else {
                     format!("{}{};", indent, self.expr_to_rust_inline(expr))
                 }
             }
-            Stmt::Expr(None, _) => String::new(),  // 空文は出力しない
-            Stmt::Return(Some(expr), _) => {
-                if let Some(ref rt) = self.current_return_type {
-                    if rt.is_pointer() && is_null_literal(expr) {
-                        return format!("{}return {};", indent, null_ptr_expr(rt));
-                    }
-                    if rt.is_bool() {
-                        match &expr.kind {
-                            ExprKind::IntLit(0) => return format!("{}return false;", indent),
-                            ExprKind::IntLit(1) => return format!("{}return true;", indent),
-                            _ => {
-                                let e = self.expr_to_rust_inline(expr);
-                                if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                                    return format!("{}return {} != 0;", indent, normalize_parens(&e));
-                                }
-                                return format!("{}return {};", indent, normalize_parens(&e));
-                            }
-                        }
-                    }
-                }
-                let e = self.expr_to_rust_inline(expr);
-                if let Some(casted) = self.cast_return_expr_if_needed_inline(expr, &e) {
-                    return format!("{}return {};", indent, normalize_parens(&casted));
-                }
-                format!("{}return {};", indent, normalize_parens(&e))
-            }
+            Stmt::Expr(None, _) => String::new(),
+            Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, indent, None),
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
                 let cond_str = self.expr_to_rust_inline(cond);
