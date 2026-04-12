@@ -149,6 +149,10 @@ struct Cli {
     /// 指定した関数のコード生成時に型推論結果を stderr にダンプ（デバッグ用）
     #[arg(long = "dump-types-for", value_name = "FUNC")]
     dump_types_for: Option<String>,
+
+    /// syn::Expr ベースのコード生成を使用（実験的）
+    #[arg(long = "use-syn-expr")]
+    use_syn_expr: bool,
 }
 
 fn main() {
@@ -255,6 +259,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ref name) = cli.dump_types_for {
         builder = builder.with_dump_types_for(name);
+    }
+    if cli.use_syn_expr {
+        builder = builder.with_use_syn_expr(true);
     }
 
     // Pipeline を構築してプリプロセスを実行

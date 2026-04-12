@@ -986,6 +986,8 @@ pub struct CodegenConfig {
     pub dump_ast_for: Option<String>,
     /// 型推論ダンプ対象関数名（デバッグ用）
     pub dump_types_for: Option<String>,
+    /// syn::Expr ベースのコード生成を使用（実験的）
+    pub use_syn_expr: bool,
 }
 
 impl Default for CodegenConfig {
@@ -997,6 +999,7 @@ impl Default for CodegenConfig {
             use_statements: Vec::new(),
             dump_ast_for: None,
             dump_types_for: None,
+            use_syn_expr: false,
         }
     }
 }
@@ -1187,6 +1190,8 @@ pub struct RustCodegen<'a> {
     dump_ast_for: Option<String>,
     /// 型推論ダンプ対象関数名（デバッグ用）
     dump_types_for: Option<String>,
+    /// syn::Expr ベースのコード生成を使用（実験的）
+    use_syn_expr: bool,
     /// const ポインタに変換可能なパラメータの引数位置集合
     const_pointer_positions: HashSet<usize>,
     /// 再代入されるローカル変数名の集合（let mut 判定用）
@@ -1258,6 +1263,7 @@ impl<'a> RustCodegen<'a> {
             field_type_map: build_field_type_map(rust_decl_dict),
             dump_ast_for: None,
             dump_types_for: None,
+            use_syn_expr: false,
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
             bool_return_macros: HashSet::new(),
@@ -1274,6 +1280,11 @@ impl<'a> RustCodegen<'a> {
 
     pub fn with_dump_types_for(mut self, name: Option<String>) -> Self {
         self.dump_types_for = name;
+        self
+    }
+
+    pub fn with_use_syn_expr(mut self, use_syn: bool) -> Self {
+        self.use_syn_expr = use_syn;
         self
     }
 
@@ -2547,15 +2558,21 @@ impl<'a> RustCodegen<'a> {
         match &info.parse_result {
             ParseResult::Expression(expr) => {
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
-                let rust_expr = self.expr_with_type_hint(expr, info, type_hint.as_deref());
+                let rust_expr = if self.use_syn_expr {
+                    // syn::Expr ベースのコード生成（実験的）
+                    let syn_expr = self.build_syn_expr_with_type_hint(expr, Some(info), type_hint.as_deref());
+                    crate::syn_codegen::expr_to_string(&syn_expr)
+                } else {
+                    self.expr_with_type_hint(expr, info, type_hint.as_deref())
+                };
                 if self.current_return_type.as_ref().is_some_and(|ut| ut.is_void()) {
-                    self.writeln(&format!("{}{};", body_indent, rust_expr));
+                    self.writeln(&format!("{}{};", body_indent, normalize_parens(&rust_expr)));
                 } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
                     && !self.is_bool_expr_with_dict(expr)
                     && !is_string_bool_expr(&rust_expr) {
-                    if self.infer_type_hint(expr, info) == TypeHint::Pointer
-                        || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
-                        self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
+                    if self.is_pointer_expr_unified(expr, Some(info))
+                        || self.infer_expr_type_unified(expr, Some(info)).is_some_and(|ut| ut.is_pointer()) {
+                        self.writeln(&format!("{}!{}.is_null()", body_indent, normalize_parens(&rust_expr)));
                     } else {
                         let normalized = normalize_parens(&rust_expr);
                         if normalized.starts_with('{') {
@@ -6571,6 +6588,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                 .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
+                .with_use_syn_expr(self.config.use_syn_expr)
                 .with_bool_return(false, self.bool_return_macros.clone());
             let generated = codegen.generate_inline_fn(**name, func_def);
 
@@ -6813,6 +6831,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
+                        .with_use_syn_expr(self.config.use_syn_expr)
                         .with_const_pointer_positions(const_positions)
                         .with_bool_return(is_bool, self.bool_return_macros.clone());
                     let generated = codegen.generate_macro(info);
