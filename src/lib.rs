@@ -25,6 +25,7 @@ pub mod rust_codegen;
 pub mod rust_decl;
 pub mod semantic;
 pub mod sexp;
+pub mod syn_codegen;
 pub mod source;
 pub mod token;
 pub mod token_source;
