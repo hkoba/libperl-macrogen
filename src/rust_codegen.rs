@@ -3703,20 +3703,37 @@ impl<'a> RustCodegen<'a> {
             }
         }
         // 式の生成
-        let syn_expr = self.build_syn_expr(arg, info);
-        let result = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-        // 整数幅キャスト
+        let mut syn_expr = self.build_syn_expr(arg, info);
+        // 整数幅キャストを syn レベルで挿入（文字列 "as type" の優先順位崩壊を防止）
         if let Some(callee_name) = callee {
             let func_name = self.interner.get(callee_name).to_string();
             if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
                 let actual_ut = self.infer_expr_type_unified(arg, info);
-                let actual_ty_str = actual_ut.as_ref().map(|ut| ut.to_rust_string());
-                let expected_ty_str = expected_ut.to_rust_string();
-                let casted = self.cast_integer_arg_if_needed(&result, actual_ty_str.as_deref(), &expected_ty_str);
-                return normalize_parens(&casted);
+                let actual_ty = actual_ut.as_ref().map(|ut| ut.to_rust_string());
+                let expected_ty = expected_ut.to_rust_string();
+                // SV subtype cast と整数幅 cast を syn レベルで適用
+                if let Some(actual) = &actual_ty {
+                    let na = normalize_integer_type(actual);
+                    let ne = normalize_integer_type(&expected_ty);
+                    if let (Some(a), Some(e)) = (na, ne) {
+                        if !integer_types_compatible(a, e) {
+                            syn_expr = crate::syn_codegen::cast_syn_expr(syn_expr, e);
+                        }
+                    } else {
+                        // SV subtype cast 等: 文字列ベースのフォールバック
+                        let result_str = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+                        let casted = self.cast_integer_arg_if_needed(&result_str, actual_ty.as_deref(), &expected_ty);
+                        return normalize_parens(&casted);
+                    }
+                } else {
+                    // actual 不明: 文字列ベースのフォールバック
+                    let result_str = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+                    let casted = self.cast_integer_arg_if_needed(&result_str, None, &expected_ty);
+                    return normalize_parens(&casted);
+                }
             }
         }
-        result
+        normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
     }
 
     /// lvalue 用の文字列を構築（MacroCall/Call の展開対応）
