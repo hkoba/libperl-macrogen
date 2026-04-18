@@ -199,9 +199,16 @@ pub struct CodegenConfig {
     pub dump_ast_for: Option<String>,
     /// 型推論ダンプ対象関数名（デバッグ用）
     pub dump_types_for: Option<String>,
-    /// syn::Expr ベースのコード生成を使用（実験的）
-    pub use_syn_expr: bool,
 }
+
+impl PipelineBuilder {
+    /// 旧 `--use-syn-expr` フラグ用の後方互換 no-op。
+    /// syn::Expr ベースのコード生成は常に有効化されているため、
+    /// この呼び出しは無視される。下流の `build.rs` 等の互換性維持用。
+    #[deprecated(note = "syn::Expr codegen is always enabled; this no-op is kept only for backward compatibility")]
+    pub fn with_use_syn_expr(self, _enable: bool) -> Self { self }
+}
+
 
 impl Default for CodegenConfig {
     fn default() -> Self {
@@ -214,7 +221,6 @@ impl Default for CodegenConfig {
             use_statements: Vec::new(),
             dump_ast_for: None,
             dump_types_for: None,
-            use_syn_expr: false,
         }
     }
 }
@@ -229,7 +235,6 @@ impl CodegenConfig {
             use_statements: self.use_statements.clone(),
             dump_ast_for: self.dump_ast_for.clone(),
             dump_types_for: self.dump_types_for.clone(),
-            use_syn_expr: self.use_syn_expr,
         }
     }
 }
@@ -373,12 +378,6 @@ impl PipelineBuilder {
     /// 型推論ダンプ対象関数名を指定（デバッグ用）
     pub fn with_dump_types_for(mut self, name: impl Into<String>) -> Self {
         self.codegen.dump_types_for = Some(name.into());
-        self
-    }
-
-    /// syn::Expr ベースのコード生成を有効化（実験的）
-    pub fn with_use_syn_expr(mut self, enable: bool) -> Self {
-        self.codegen.use_syn_expr = enable;
         self
     }
 
@@ -642,12 +641,6 @@ impl InferredPipeline {
     /// 型推論ダンプ対象関数名を指定（デバッグ用）
     pub fn with_dump_types_for(mut self, name: impl Into<String>) -> Self {
         self.codegen_config.dump_types_for = Some(name.into());
-        self
-    }
-
-    /// syn::Expr ベースのコード生成を有効化（実験的）
-    pub fn with_use_syn_expr(mut self, enable: bool) -> Self {
-        self.codegen_config.use_syn_expr = enable;
         self
     }
 
