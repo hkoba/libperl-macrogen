@@ -3716,19 +3716,28 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// 代入文を構築（macro/inline 統一、文コンテキスト用）
+    ///
+    /// LHS (`l`) と RHS (`r`) は両方とも syn::Expr 経由でビルドし、
+    /// 整数幅キャストや `wrapping_add` の `as usize` も `cast_syn_expr` で挿入する。
+    /// 文字列レベルで `as` を挿入する旧経路は優先順位崩壊を起こすため使わない。
     fn build_assign_stmt(&mut self, op: &AssignOp, lhs: &Expr, rhs: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+        use crate::syn_codegen::*;
         let l = self.build_lvalue_string(lhs, info);
         let lhs_ut = self.infer_expr_type_unified(lhs, info);
-        let r = if is_null_literal(rhs) && *op == AssignOp::Assign {
-            if let Some(ref lut) = lhs_ut {
-                if lut.is_pointer() {
-                    if lut.is_const_pointer() { "std::ptr::null()".to_string() }
-                    else { "std::ptr::null_mut()".to_string() }
-                } else { "0".to_string() }
-            } else { "std::ptr::null_mut()".to_string() }
+
+        // RHS の syn::Expr を組み立てる（null リテラル特別扱い + 必要に応じてキャスト）
+        let r_syn: syn::Expr = if is_null_literal(rhs) && *op == AssignOp::Assign {
+            match &lhs_ut {
+                Some(lut) if lut.is_pointer() => {
+                    let s = if lut.is_const_pointer() { "std::ptr::null()" } else { "std::ptr::null_mut()" };
+                    syn::parse_str(s).unwrap_or_else(|_| int_lit(0))
+                }
+                Some(_) => int_lit(0),
+                None => syn::parse_str("std::ptr::null_mut()").unwrap_or_else(|_| int_lit(0)),
+            }
         } else {
-            let r_str = self.build_expr_string(rhs, info);
-            let r_str = normalize_parens(&r_str);
+            let mut r_syn = self.build_syn_expr(rhs, info);
+            // 整数幅キャスト
             if *op == AssignOp::Assign {
                 if let Some(ref lut) = lhs_ut {
                     if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
@@ -3736,51 +3745,52 @@ impl<'a> RustCodegen<'a> {
                         let rs = rut.to_rust_string();
                         if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
                             if !integer_types_compatible(nl, nr) {
-                                let r_cast = if r_str.contains(' ') {
-                                    format!("({}) as {}", r_str, nl)
-                                } else {
-                                    format!("{} as {}", r_str, nl)
-                                };
-                                return format!("{}{} = {};", indent, l, r_cast);
+                                r_syn = cast_syn_expr(r_syn, nl);
                             }
                         }
                     }
                 }
-            }
-            r_str
-        };
-        match op {
-            AssignOp::Assign => format!("{}{} = {};", indent, l, r),
-            AssignOp::AddAssign | AssignOp::SubAssign => {
-                if self.is_pointer_expr_unified(lhs, info)
-                    || lhs_ut.as_ref().is_some_and(|ut| ut.is_pointer()) {
-                    let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
-                    format!("{}{} = {}.{}({} as usize);", indent, l, l, method, r)
-                } else {
-                    format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
-                }
-            }
-            AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
-                let lt = &lhs_ut;
+            } else if matches!(op, AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign) {
                 let rt = self.infer_expr_type_unified(rhs, info);
-                if let (Some(lut), Some(rut)) = (lt, &rt) {
+                if let (Some(lut), Some(rut)) = (&lhs_ut, &rt) {
                     let ls = lut.to_rust_string();
                     let rs = rut.to_rust_string();
                     let nl = normalize_integer_type(&ls);
                     let nr = normalize_integer_type(&rs);
                     if nl.is_some() && nr.is_some() && nl != nr {
-                        return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl.unwrap());
+                        r_syn = cast_syn_expr(r_syn, nl.unwrap());
                     }
-                }
-                if let (Some(lut), None) = (lt, &rt) {
+                } else if let (Some(lut), None) = (&lhs_ut, &rt) {
                     let ls = lut.to_rust_string();
                     if let Some(nl) = normalize_integer_type(&ls) {
-                        return format!("{}{} {} {} as {};", indent, l, assign_op_to_rust(*op), r, nl);
+                        r_syn = cast_syn_expr(r_syn, nl);
                     }
                 }
+            }
+            r_syn
+        };
+
+        match op {
+            AssignOp::Assign => {
+                let r = normalize_parens(&expr_to_string(&r_syn));
+                format!("{}{} = {};", indent, l, r)
+            }
+            AssignOp::AddAssign | AssignOp::SubAssign => {
+                if self.is_pointer_expr_unified(lhs, info)
+                    || lhs_ut.as_ref().is_some_and(|ut| ut.is_pointer()) {
+                    let method = if *op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                    let r_usize = cast_syn_expr(r_syn, "usize");
+                    let r = expr_to_string(&r_usize);
+                    format!("{}{} = {}.{}({});", indent, l, l, method, r)
+                } else {
+                    let r = normalize_parens(&expr_to_string(&r_syn));
+                    format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
+                }
+            }
+            _ => {
+                let r = normalize_parens(&expr_to_string(&r_syn));
                 format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r)
             }
-            _ => format!("{}{} {} {};", indent, l, assign_op_to_rust(*op), r),
         }
     }
 
