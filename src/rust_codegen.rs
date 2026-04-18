@@ -1398,31 +1398,19 @@ impl<'a> RustCodegen<'a> {
 
     /// Call 式が lvalue マクロ呼び出しなら、展開済み lvalue 文字列を返す
     fn try_expand_call_as_lvalue(&mut self, func: &Expr, args: &[Expr], info: &MacroInferInfo) -> Option<String> {
-        if let ExprKind::Ident(name) = &func.kind {
-            if self.should_emit_as_macro_call(*name) {
-                if let Some(macro_info) = self.macro_ctx.macros.get(name) {
-                    if let ParseResult::Expression(body) = &macro_info.parse_result {
-                        let body = body.clone();
-                        // パラメータ名 → 実引数文字列のマッピングを作成
-                        let saved_params = std::mem::take(&mut self.param_substitutions);
-                        for (i, param) in macro_info.params.iter().enumerate() {
-                            if let Some(arg) = args.get(i) {
-                                let arg_str = self.expr_to_rust(arg, info);
-                                self.param_substitutions.insert(param.name, arg_str);
-                            }
-                        }
-                        let result = self.expr_to_rust(&body, info);
-                        self.param_substitutions = saved_params;
-                        return Some(result);
-                    }
-                }
-            }
-        }
-        None
+        self.try_expand_call_as_lvalue_unified(func, args, Some(info))
     }
 
     /// Call 式が lvalue マクロ呼び出しなら、展開済み lvalue 文字列を返す（inline版）
     fn try_expand_call_as_lvalue_inline(&mut self, func: &Expr, args: &[Expr]) -> Option<String> {
+        self.try_expand_call_as_lvalue_unified(func, args, None)
+    }
+
+    /// `try_expand_call_as_lvalue` macro/inline 統一版（syn::Expr 経由）。
+    /// パラメータ置換マップは依然 `String` だが、本体の AST 走査は
+    /// `build_syn_expr` を経由するため `expr_to_rust*` への依存を排除している。
+    fn try_expand_call_as_lvalue_unified(&mut self, func: &Expr, args: &[Expr],
+                                         info: Option<&MacroInferInfo>) -> Option<String> {
         if let ExprKind::Ident(name) = &func.kind {
             if self.should_emit_as_macro_call(*name) {
                 if let Some(macro_info) = self.macro_ctx.macros.get(name) {
@@ -1431,11 +1419,13 @@ impl<'a> RustCodegen<'a> {
                         let saved_params = std::mem::take(&mut self.param_substitutions);
                         for (i, param) in macro_info.params.iter().enumerate() {
                             if let Some(arg) = args.get(i) {
-                                let arg_str = self.expr_to_rust_inline(arg);
+                                let arg_syn = self.build_syn_expr(arg, info);
+                                let arg_str = crate::syn_codegen::expr_to_string(&arg_syn);
                                 self.param_substitutions.insert(param.name, arg_str);
                             }
                         }
-                        let result = self.expr_to_rust_inline(&body);
+                        let body_syn = self.build_syn_expr(&body, info);
+                        let result = crate::syn_codegen::expr_to_string(&body_syn);
                         self.param_substitutions = saved_params;
                         return Some(result);
                     }
