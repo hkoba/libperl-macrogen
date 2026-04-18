@@ -3710,36 +3710,66 @@ impl<'a> RustCodegen<'a> {
         }
         // 式の生成
         let mut syn_expr = self.build_syn_expr(arg, info);
-        // 整数幅キャストを syn レベルで挿入（文字列 "as type" の優先順位崩壊を防止）
+        // 整数幅キャスト / SV subtype キャストを syn レベルで挿入
+        // （文字列 "as type" の優先順位崩壊を防止）
         if let Some(callee_name) = callee {
             let func_name = self.interner.get(callee_name).to_string();
             if let Some(expected_ut) = self.get_callee_param_type_extended(&func_name, arg_index) {
                 let actual_ut = self.infer_expr_type_unified(arg, info);
                 let actual_ty = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                 let expected_ty = expected_ut.to_rust_string();
-                // SV subtype cast と整数幅 cast を syn レベルで適用
-                if let Some(actual) = &actual_ty {
-                    let na = normalize_integer_type(actual);
-                    let ne = normalize_integer_type(&expected_ty);
-                    if let (Some(a), Some(e)) = (na, ne) {
-                        if !integer_types_compatible(a, e) {
-                            syn_expr = crate::syn_codegen::cast_syn_expr(syn_expr, e);
-                        }
-                    } else {
-                        // SV subtype cast 等: 文字列ベースのフォールバック
-                        let result_str = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                        let casted = self.cast_integer_arg_if_needed(&result_str, actual_ty.as_deref(), &expected_ty);
-                        return normalize_parens(&casted);
-                    }
-                } else {
-                    // actual 不明: 文字列ベースのフォールバック
-                    let result_str = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                    let casted = self.cast_integer_arg_if_needed(&result_str, None, &expected_ty);
-                    return normalize_parens(&casted);
-                }
+                syn_expr = self.cast_arg_syn_if_needed(syn_expr, actual_ty.as_deref(), &expected_ty);
             }
         }
         normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
+    }
+
+    /// 引数のキャスト挿入を syn::Expr レベルで実施。
+    /// 旧パスの `cast_integer_arg_if_needed` (文字列ベース) と論理は同等だが、
+    /// `as` 演算子の優先順位崩壊を起こさない。
+    fn cast_arg_syn_if_needed(&self, arg_expr: syn::Expr,
+                              actual_ty: Option<&str>, expected_ty: &str) -> syn::Expr {
+        use crate::syn_codegen::cast_syn_expr;
+        if let Some(actual) = actual_ty {
+            let na = normalize_integer_type(actual);
+            let ne = normalize_integer_type(expected_ty);
+            if let (Some(a), Some(e)) = (na, ne) {
+                if !integer_types_compatible(a, e) {
+                    return cast_syn_expr(arg_expr, e);
+                }
+                return arg_expr;
+            }
+            // ポインタ型のサブタイプ変換 (e.g., *mut GV → *mut SV)
+            if actual != expected_ty {
+                let actual_ut = UnifiedType::from_rust_str(actual);
+                let expected_ut = UnifiedType::from_rust_str(expected_ty);
+                if actual_ut.is_pointer() && expected_ut.is_pointer()
+                    && is_sv_subtype_cast(&actual_ut, &expected_ut) {
+                    let cast_ty = if actual.contains("*const") {
+                        expected_ty.replace("*mut", "*const")
+                    } else {
+                        expected_ty.to_string()
+                    };
+                    return cast_syn_expr(arg_expr, &cast_ty);
+                }
+            }
+            return arg_expr;
+        }
+        // actual 不明 + expected が SV ポインタ → 関数呼び出し風なら as キャスト
+        let expected_ut = UnifiedType::from_rust_str(expected_ty);
+        if expected_ut.is_pointer() {
+            if let Some(inner) = expected_ut.inner_type() {
+                if let UnifiedType::Named(name) = inner {
+                    let n = name.as_str();
+                    if matches!(n, "SV" | "GV" | "HV" | "AV" | "CV" | "IO") {
+                        if matches!(&arg_expr, syn::Expr::Call(_) | syn::Expr::MethodCall(_)) {
+                            return cast_syn_expr(arg_expr, expected_ty);
+                        }
+                    }
+                }
+            }
+        }
+        arg_expr
     }
 
     /// lvalue 用の syn::Expr を構築（MacroCall/Call の展開対応）
