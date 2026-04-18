@@ -3347,7 +3347,10 @@ impl<'a> RustCodegen<'a> {
                         format!("assert!({})", normalize_parens(&c_str))
                     } else if self.is_pointer_expr_unified(condition, info)
                         || self.infer_expr_type_unified(condition, info).is_some_and(|ut| ut.is_pointer()) {
-                        format!("assert!(!{}.is_null())", c_str)
+                        // `.is_null()` をくっつける際は受け手側を括弧で囲む。
+                        // c_str が `*x` のような単項式の場合 `!*x.is_null()` が
+                        // `!*(x.is_null())` と解釈されるため。
+                        format!("assert!(!({}).is_null())", c_str)
                     } else {
                         format!("assert!({} != 0)", normalize_parens(&c_str))
                     }
@@ -4314,25 +4317,23 @@ impl<'a> RustCodegen<'a> {
             if let Some(ref init) = init_decl.init {
                 match init {
                     Initializer::Expr(expr) => {
-                        let init_expr = self.expr_to_rust_inline(expr);
-                        // 宣言型と式の推論型が異なる整数型なら as キャストを挿入
-                        let init_expr = if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
+                        // 宣言型と式の推論型が異なる整数型なら as キャストを syn レベルで挿入。
+                        // 文字列ベースの `({} as {})` は normalize_parens に剥がされて
+                        // `a as u32 & b as u8` の優先順位崩壊を起こすため、syn::Expr で
+                        // 構築して expr_to_string に括弧の挿入を任せる。
+                        let mut init_syn = self.build_syn_expr(expr, None);
+                        if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
                             let decl_s = ty.clone();
                             let expr_s = expr_ut.to_rust_string();
                             let nd = normalize_integer_type(&decl_s);
                             let ne = normalize_integer_type(&expr_s);
                             if let (Some(d), Some(e)) = (nd, ne) {
                                 if !integer_types_compatible(d, e) {
-                                    format!("({} as {})", init_expr, d)
-                                } else {
-                                    init_expr
+                                    init_syn = crate::syn_codegen::cast_syn_expr(init_syn, d);
                                 }
-                            } else {
-                                init_expr
                             }
-                        } else {
-                            init_expr
-                        };
+                        }
+                        let init_expr = normalize_parens(&crate::syn_codegen::expr_to_string(&init_syn));
                         // ポインタの const/mut 不一致: 変数型を *const に変更
                         let ty = if ty.contains("*mut") && !ty.contains("*const") {
                             if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
@@ -4723,9 +4724,9 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// 式を Rust コードに変換（インライン関数用）
+    /// 式を Rust コードに変換（インライン関数用）— syn::Expr 経由に統一
     fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
-        self.expr_to_rust_inline_ctx(expr, ExprContext::Default)
+        self.build_expr_string(expr, None)
     }
 
     fn expr_to_rust_inline_ctx(&mut self, expr: &Expr, ctx: ExprContext) -> String {
