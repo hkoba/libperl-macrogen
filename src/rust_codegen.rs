@@ -4883,7 +4883,15 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// 式を文字列に変換（info に応じて macro/inline パスを選択）
+    ///
+    /// `--use-syn-expr` 有効かつ macro コンテキスト (info.is_some()) の場合は
+    /// `build_syn_expr` 経由で出力する。inline コンテキストは現状文字列パスのまま
+    /// （Step 3b で対応予定）。
     fn build_expr_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
+        if self.use_syn_expr && info.is_some() {
+            let syn_expr = self.build_syn_expr(expr, info);
+            return normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+        }
         match info {
             Some(info) => self.expr_to_rust(expr, info),
             None => self.expr_to_rust_inline(expr),
@@ -4894,7 +4902,7 @@ impl<'a> RustCodegen<'a> {
     fn stmt_to_rust(&mut self, stmt: &Stmt, info: &MacroInferInfo) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                format!("{};", self.expr_to_rust(expr, info))
+                format!("{};", self.build_expr_string(expr, Some(info)))
             }
             Stmt::Expr(None, _) => ";".to_string(),
             Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, "", Some(info)),
