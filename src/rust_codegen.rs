@@ -3656,7 +3656,14 @@ impl<'a> RustCodegen<'a> {
                 };
                 syn::parse_str(&fallback_str).unwrap_or_else(|_| int_lit(0))
             }
-            // CompoundLit, Alignof 等の稀なバリアント
+            ExprKind::Alignof(ty) => {
+                let ty_str = self.type_name_to_rust(ty);
+                syn::parse_str(&format!("std::mem::align_of::<{}>()", ty_str))
+                    .unwrap_or_else(|_| int_lit(0))
+            }
+            // CompoundLit 等の稀なバリアントは旧パスへフォールバック（未実装で
+            // /* TODO: ... */ マーカーが返るため、syn::parse_str も失敗 → int_lit(0)）。
+            // 実用上 macro_bindings.rs に現れないため Step 5 で削除予定。
             _ => {
                 let fallback_str = match info {
                     Some(info) => self.expr_to_rust_ctx(expr, info, ExprContext::Top),
