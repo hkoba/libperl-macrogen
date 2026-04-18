@@ -3550,27 +3550,59 @@ impl<'a> RustCodegen<'a> {
                 if let Some(init_expr) = self.detect_mutable_ptr_pattern(compound) {
                     return self.build_syn_expr(init_expr, info);
                 }
-                // 通常の statement expression → フォールバック（文の処理が必要）
-                let fallback_str = match info {
-                    Some(info) => self.expr_to_rust_ctx(expr, info, ExprContext::Top),
-                    None => self.expr_to_rust_inline_ctx(expr, ExprContext::Top),
+                // 通常の statement expression: Rust のブロック式として出力。
+                // 旧パスの実装と同じ部分文字列構築 + syn::parse_str だが、
+                // 内部の式は build_expr_string (build_syn_expr 経由) を通る。
+                let mut parts: Vec<String> = Vec::new();
+                for item in &compound.items {
+                    match item {
+                        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => {
+                            parts.push(self.build_expr_string(e, info));
+                        }
+                        BlockItem::Stmt(stmt) => {
+                            let s = match info {
+                                Some(info) => self.stmt_to_rust(stmt, info),
+                                None => self.stmt_to_rust_inline(stmt, ""),
+                            };
+                            parts.push(s);
+                        }
+                        BlockItem::Decl(decl) => {
+                            self.collect_decl_types(decl);
+                            let decl_str = self.decl_to_rust_let(decl, "");
+                            for line in decl_str.lines() {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    parts.push(trimmed.strip_suffix(';').unwrap_or(trimmed).to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                let block_str = if parts.is_empty() {
+                    "{ }".to_string()
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    let last = parts.pop().unwrap();
+                    let stmts = parts.join("; ");
+                    format!("{{ {}; {} }}", stmts, last)
                 };
-                syn::parse_str(&fallback_str).unwrap_or_else(|_| int_lit(0))
+                syn::parse_str(&block_str).unwrap_or_else(|_| int_lit(0))
             }
             ExprKind::Alignof(ty) => {
                 let ty_str = self.type_name_to_rust(ty);
                 syn::parse_str(&format!("std::mem::align_of::<{}>()", ty_str))
                     .unwrap_or_else(|_| int_lit(0))
             }
-            // CompoundLit 等の稀なバリアントは旧パスへフォールバック（未実装で
-            // /* TODO: ... */ マーカーが返るため、syn::parse_str も失敗 → int_lit(0)）。
-            // 実用上 macro_bindings.rs に現れないため Step 5 で削除予定。
+            // CompoundLit / 未対応バリアント: 0 を返してエラーを記録。
+            // 旧パスでも `/* TODO */` マーカーで生成コードが壊れる挙動だったため、
+            // 体感的には同等。実用上 macro_bindings.rs にはほぼ現れない。
             _ => {
-                let fallback_str = match info {
-                    Some(info) => self.expr_to_rust_ctx(expr, info, ExprContext::Top),
-                    None => self.expr_to_rust_inline_ctx(expr, ExprContext::Top),
-                };
-                syn::parse_str(&fallback_str).unwrap_or_else(|_| int_lit(0))
+                self.codegen_errors.push(format!(
+                    "unhandled ExprKind in syn codegen: {:?}",
+                    std::mem::discriminant(&expr.kind)
+                ));
+                int_lit(0)
             }
         }
     }
