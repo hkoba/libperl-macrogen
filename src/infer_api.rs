@@ -246,6 +246,19 @@ pub fn run_inference_with_preprocessor(
     let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
     pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
 
+    // 共通フィールド宣言マクロ（perl5 専用ハードコード）。
+    // `_SV_HEAD` と同様、struct 通過時に Watcher を見て使用関係を fields_dict
+    // に記録する。新規追加はこのリストに 1 行足すだけで良い。
+    const COMMON_FIELD_MACROS: &[&str] = &["_XPV_HEAD", "_XPVCV_COMMON"];
+    let common_field_macro_ids: Vec<InternedStr> = COMMON_FIELD_MACROS
+        .iter()
+        .map(|name| {
+            let id = pp.interner_mut().intern(name);
+            pp.set_macro_called_callback(id, Box::new(MacroCallWatcher::new()));
+            id
+        })
+        .collect();
+
     // pTHX_ と pTHX マクロ呼び出しを監視（関数宣言の THX 依存検出用）
     let pthx_id = pp.interner_mut().intern("pTHX_");
     let pthx_no_comma_id = pp.interner_mut().intern("pTHX");
@@ -298,7 +311,7 @@ pub fn run_inference_with_preprocessor(
             reset_macro_called(pp, pthx_no_comma_id);
         }
 
-        // 構造体定義の場合、_SV_HEAD フラグをチェック
+        // 構造体定義の場合、_SV_HEAD と共通フィールドマクロのフラグをチェック
         if decl.is_target() {
             if let Some(struct_names) = extract_struct_names(decl) {
                 // _SV_HEAD が呼ばれていたら SV ファミリーに追加
@@ -310,9 +323,22 @@ pub fn run_inference_with_preprocessor(
                                 .and_then(|args| args.first().cloned())
                                 .unwrap_or_default();
 
-                            for name in struct_names {
+                            for name in &struct_names {
                                 // typeName → 構造体名マッピングも同時に登録
-                                fields_dict.add_sv_family_member_with_type(name, &type_name);
+                                fields_dict.add_sv_family_member_with_type(*name, &type_name);
+                            }
+                        }
+                    }
+                }
+
+                // 共通フィールドマクロ (_XPV_HEAD, _XPVCV_COMMON 等) の使用を記録
+                for &macro_id in &common_field_macro_ids {
+                    if let Some(cb) = pp.get_macro_called_callback(macro_id) {
+                        if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                            if watcher.take_called() {
+                                for name in &struct_names {
+                                    fields_dict.add_struct_uses_common_macro(*name, macro_id);
+                                }
                             }
                         }
                     }

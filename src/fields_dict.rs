@@ -39,6 +39,12 @@ pub struct FieldsDict {
     /// key: フィールド名 (例: svu_pv, svu_hash)
     /// value: フィールドの C 型文字列 (例: "char*", "HE**")
     sv_u_field_types: HashMap<InternedStr, String>,
+    /// 構造体名 → そこで展開された共通フィールドマクロ集合
+    /// 例: xpvcv → {_XPV_HEAD, _XPVCV_COMMON}
+    struct_to_common_macros: HashMap<InternedStr, Vec<InternedStr>>,
+    /// 共通フィールドマクロ → それを使う構造体集合
+    /// 例: _XPVCV_COMMON → [xpvcv, xpvfm]
+    common_macro_to_structs: HashMap<InternedStr, Vec<InternedStr>>,
 }
 
 impl FieldsDict {
@@ -443,6 +449,49 @@ impl FieldsDict {
     /// typeName → 構造体名マッピングをイテレート
     pub fn sv_head_type_to_struct_iter(&self) -> impl Iterator<Item = (&String, &InternedStr)> {
         self.sv_head_type_to_struct.iter()
+    }
+
+    // ==================== Common Field Macros ====================
+    //
+    // perl5 の `_XPV_HEAD` / `_XPVCV_COMMON` のような object-like macro を
+    // 通じた共通フィールド宣言を構造体↔マクロのレベルで記録する
+    // （`_SV_HEAD` の sv_family サポートを一般化したもの）。
+
+    /// 構造体がある共通フィールドマクロを使用していることを記録する。
+    pub fn add_struct_uses_common_macro(
+        &mut self,
+        struct_name: InternedStr,
+        macro_name: InternedStr,
+    ) {
+        let v = self.struct_to_common_macros.entry(struct_name).or_default();
+        if !v.contains(&macro_name) {
+            v.push(macro_name);
+        }
+        let v = self.common_macro_to_structs.entry(macro_name).or_default();
+        if !v.contains(&struct_name) {
+            v.push(struct_name);
+        }
+    }
+
+    /// あるマクロを使用している構造体一覧
+    pub fn structs_using_common_macro(&self, macro_name: InternedStr) -> &[InternedStr] {
+        self.common_macro_to_structs
+            .get(&macro_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// ある構造体が使用している共通フィールドマクロ一覧
+    pub fn common_macros_used_by_struct(&self, struct_name: InternedStr) -> &[InternedStr] {
+        self.struct_to_common_macros
+            .get(&struct_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 観測対象の共通フィールドマクロ数（テスト・デバッグ用）
+    pub fn common_macro_count(&self) -> usize {
+        self.common_macro_to_structs.len()
     }
 
     // ==================== sv_u Union Field Types ====================
