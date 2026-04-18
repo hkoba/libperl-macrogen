@@ -926,6 +926,14 @@ fn collect_mut_params_from_stmt(stmt: &Stmt, params: &HashSet<InternedStr>, resu
 
 /// 構造体フィールド名 → 型の逆引きマップを構築
 /// 全構造体で同名フィールドの型が一致する場合のみ含む
+/// 型文字列が関数ポインタ形式（裸 fn または `Option<...fn(...)>`）かを判定する。
+///
+/// `quote::ToTokens` 経由の出力は `fn (` のようにスペースが入ることがあるため、
+/// `fn(` と `fn (` の両方を許容する。
+fn type_str_is_fn_pointer(ty_str: &str) -> bool {
+    ty_str.contains("fn(") || ty_str.contains("fn (")
+}
+
 fn build_field_type_map(dict: Option<&RustDeclDict>) -> HashMap<String, UnifiedType> {
     let mut map: HashMap<String, UnifiedType> = HashMap::new();
     let mut conflicts: HashSet<String> = HashSet::new();
@@ -3468,17 +3476,19 @@ impl<'a> RustCodegen<'a> {
         arg_expr
     }
 
-    /// 共通フィールドマクロが宣言する関数ポインタフィールド呼び出しを検出し、
+    /// 関数ポインタフィールド呼び出しを検出し、
     /// `<receiver>.<field>.unwrap_unchecked()(args)` 形式の `syn::Expr` を構築する。
     ///
-    /// `_XPVCV_COMMON` の `xcv_xsub` のように、bindings.rs では
-    /// `Option<unsafe extern "C" fn(...)>` にラップされたフィールドを呼び出す
-    /// パターンに対応する。検出条件:
+    /// `_XPVCV_COMMON` の `xcv_xsub` や `PerlInterpreter` の `Ilockhook` のような
+    /// `Option<unsafe extern "C" fn(...)>` フィールドを呼び出すパターンに対応する。
+    /// 検出条件:
     ///
     /// 1. callee が `Member` または `PtrMember` アクセスである
-    /// 2. そのフィールド名が `field_to_defining_macro` に登録されている
-    ///    （= 共通フィールドマクロが宣言したフィールド）
-    /// 3. canonical type が関数ポインタである
+    /// 2. そのフィールドが「関数ポインタ」と判定できる
+    ///    - 第一に共通フィールドマクロ（`_XPVCV_COMMON` 等）由来の canonical
+    ///      type で判定（C ソース由来）
+    ///    - フォールバックとして bindings.rs 由来の `field_type_map` で判定
+    ///      （文字列ヒューリスティク: `fn(` を含む）
     ///
     /// 当てはまらなければ `None` を返し、呼び出し側は通常の Call 生成パスへ進む。
     fn try_build_common_macro_fn_call(
@@ -3493,9 +3503,34 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => *member,
             _ => return None,
         };
-        let dict = self.fields_dict?;
-        let (_macro, canonical) = dict.canonical_field(member_id)?;
-        if !canonical.is_fn_pointer {
+
+        // 第一: 共通フィールドマクロ由来の canonical type で判定
+        let mut is_fn_ptr = self
+            .fields_dict
+            .and_then(|d| d.canonical_field(member_id).map(|(_, f)| f.is_fn_pointer))
+            .unwrap_or(false);
+
+        // フォールバック: bindings.rs 側の型を見て fn(...) 形式なら fn ポインタとみなす。
+        // bindgen 出力では Option<unsafe extern "C" fn(...)> 形式になるため
+        // "fn(" を含むかでヒューリスティック判定。フィールドの直接の型が
+        // typedef（例: `share_proc_t`）の場合は RustDeclDict.types で解決する。
+        if !is_fn_ptr {
+            let field_name = self.interner.get(member_id);
+            if let Some(ut) = self.field_type_map.get(field_name) {
+                let ty_str = ut.to_rust_string();
+                if type_str_is_fn_pointer(&ty_str) {
+                    is_fn_ptr = true;
+                } else if let Some(dict) = self.rust_decl_dict {
+                    if let Some(alias) = dict.types.get(&ty_str) {
+                        if type_str_is_fn_pointer(&alias.ty) {
+                            is_fn_ptr = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !is_fn_ptr {
             return None;
         }
 
