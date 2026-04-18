@@ -2396,7 +2396,6 @@ impl<'a> RustCodegen<'a> {
             return "bool".to_string();
         }
 
-        let macro_name = self.interner.get(info.name);
         match &info.parse_result {
             ParseResult::Expression(expr) => {
                 if let Some(ty) = info.get_return_type() {
@@ -4324,14 +4323,14 @@ impl<'a> RustCodegen<'a> {
                 if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
                     self.build_assign_stmt(op, lhs, rhs, indent, None)
                 } else {
-                    format!("{}{};", indent, self.expr_to_rust_inline(expr))
+                    format!("{}{};", indent, self.build_expr_string(expr, None))
                 }
             }
             Stmt::Expr(None, _) => String::new(),
             Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, indent, None),
             Stmt::Return(None, _) => format!("{}return;", indent),
             Stmt::If { cond, then_stmt, else_stmt, .. } => {
-                let cond_str = self.expr_to_rust_inline(cond);
+                let cond_str = self.build_expr_string(cond, None);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_bool = self.wrap_as_bool_condition_inline(cond, &cond_str);
                 let mut result = format!("{}if {} {{\n", indent, normalize_parens(&cond_bool));
@@ -4367,7 +4366,7 @@ impl<'a> RustCodegen<'a> {
                 result
             }
             Stmt::While { cond, body, .. } => {
-                let cond_str = self.expr_to_rust_inline(cond);
+                let cond_str = self.build_expr_string(cond, None);
                 // 条件が既に bool なら != 0 を追加しない
                 let cond_bool = self.wrap_as_bool_condition_inline(cond, &cond_str);
                 let mut result = format!("{}while {} {{\n", indent, cond_bool);
@@ -4385,7 +4384,7 @@ impl<'a> RustCodegen<'a> {
                 if let Some(for_init) = init {
                     match for_init {
                         ForInit::Expr(expr) => {
-                            result.push_str(&format!("{}{};\n", nested_indent, self.expr_to_rust_inline(expr)));
+                            result.push_str(&format!("{}{};\n", nested_indent, self.build_expr_string(expr, None)));
                         }
                         ForInit::Decl(decl) => {
                             self.collect_decl_types(decl);
@@ -4396,7 +4395,7 @@ impl<'a> RustCodegen<'a> {
 
                 // ループ部分
                 if let Some(cond_expr) = cond {
-                    let cond_str = self.expr_to_rust_inline(cond_expr);
+                    let cond_str = self.build_expr_string(cond_expr, None);
                     // 条件が既に bool なら != 0 を追加しない
                     let cond_bool = self.wrap_as_bool_condition_inline(cond_expr, &cond_str);
                     result.push_str(&format!("{}while {} {{\n", nested_indent, cond_bool));
@@ -4412,7 +4411,7 @@ impl<'a> RustCodegen<'a> {
 
                 // ステップ部分
                 if let Some(step_expr) = step {
-                    result.push_str(&format!("{}{};\n", body_indent, self.expr_to_rust_inline(step_expr)));
+                    result.push_str(&format!("{}{};\n", body_indent, self.build_expr_string(step_expr, None)));
                 }
 
                 result.push_str(&format!("{}}}\n", nested_indent));
@@ -4437,7 +4436,7 @@ impl<'a> RustCodegen<'a> {
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
-                let cond_str = self.expr_to_rust_inline(cond);
+                let cond_str = self.build_expr_string(cond, None);
                 // bool 式なら !cond、そうでなければ cond == 0
                 let break_cond = if is_boolean_expr(cond) {
                     format!("!{}", cond_str)
@@ -4449,7 +4448,7 @@ impl<'a> RustCodegen<'a> {
                 result
             }
             Stmt::Switch { expr, body, .. } => {
-                let expr_str = self.expr_to_rust_inline(expr);
+                let expr_str = self.build_expr_string(expr, None);
                 let mut result = format!("{}match {} {{\n", indent, expr_str);
                 let nested_indent = format!("{}    ", indent);
 
@@ -4461,7 +4460,7 @@ impl<'a> RustCodegen<'a> {
             }
             Stmt::Case { expr: case_expr, stmt: case_stmt, .. } => {
                 // Switch 外で Case が出現した場合（通常は Switch 内で処理される）
-                let case_val = self.expr_to_rust_inline(case_expr);
+                let case_val = self.build_expr_string(case_expr, None);
                 let mut result = format!("{}{} => {{\n", indent, case_val);
                 let body_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(case_stmt, &body_indent));
@@ -4645,11 +4644,6 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// 式を Rust コードに変換（インライン関数用）— syn::Expr 経由に統一
-    fn expr_to_rust_inline(&mut self, expr: &Expr) -> String {
-        self.build_expr_string(expr, None)
-    }
-
 
     /// match パターン用の式を Rust に変換
     ///
@@ -4669,7 +4663,7 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             // 他の式は通常の変換
-            _ => self.expr_to_rust_inline(expr)
+            _ => self.build_expr_string(expr, None)
         }
     }
 }
