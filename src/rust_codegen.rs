@@ -2558,55 +2558,27 @@ impl<'a> RustCodegen<'a> {
         match &info.parse_result {
             ParseResult::Expression(expr) => {
                 let type_hint = self.current_return_type.as_ref().map(|ut| ut.to_rust_string());
-                if self.use_syn_expr {
-                    // syn::Expr ベースのコード生成
-                    let mut syn_expr = self.build_syn_expr_with_type_hint(expr, Some(info), type_hint.as_deref());
+                let mut syn_expr = self.build_syn_expr_with_type_hint(expr, Some(info), type_hint.as_deref());
 
-                    if self.current_return_type.as_ref().is_some_and(|ut| ut.is_void()) {
+                if self.current_return_type.as_ref().is_some_and(|ut| ut.is_void()) {
+                    let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+                    self.writeln(&format!("{}{};", body_indent, s));
+                } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
+                    && !self.is_bool_expr_with_dict(expr)
+                    && !crate::syn_codegen::is_bool_syn_expr(&syn_expr) {
+                    if self.is_pointer_expr_unified(expr, Some(info))
+                        || self.infer_expr_type_unified(expr, Some(info)).is_some_and(|ut| ut.is_pointer()) {
                         let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                        self.writeln(&format!("{}{};", body_indent, s));
-                    } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
-                        && !self.is_bool_expr_with_dict(expr)
-                        && !crate::syn_codegen::is_bool_syn_expr(&syn_expr) {
-                        if self.is_pointer_expr_unified(expr, Some(info))
-                            || self.infer_expr_type_unified(expr, Some(info)).is_some_and(|ut| ut.is_pointer()) {
-                            let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                            self.writeln(&format!("{}!{}.is_null()", body_indent, s));
-                        } else {
-                            // != 0 を syn レベルで追加
-                            syn_expr = crate::syn_codegen::wrap_as_bool(syn_expr);
-                            let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                            self.writeln(&format!("{}{}", body_indent, s));
-                        }
+                        self.writeln(&format!("{}!{}.is_null()", body_indent, s));
                     } else {
-                        syn_expr = self.cast_return_syn_expr_if_needed(expr, Some(info), syn_expr);
+                        syn_expr = crate::syn_codegen::wrap_as_bool(syn_expr);
                         let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
                         self.writeln(&format!("{}{}", body_indent, s));
                     }
                 } else {
-                    // 旧: 文字列ベースのコード生成
-                    let rust_expr = self.expr_with_type_hint(expr, info, type_hint.as_deref());
-                    if self.current_return_type.as_ref().is_some_and(|ut| ut.is_void()) {
-                        self.writeln(&format!("{}{};", body_indent, rust_expr));
-                    } else if self.current_return_type.as_ref().is_some_and(|ut| ut.is_bool())
-                        && !self.is_bool_expr_with_dict(expr)
-                        && !is_string_bool_expr(&rust_expr) {
-                        if self.infer_type_hint(expr, info) == TypeHint::Pointer
-                            || self.infer_expr_type(expr, info).is_some_and(|ut| ut.is_pointer()) {
-                            self.writeln(&format!("{}!{}.is_null()", body_indent, rust_expr));
-                        } else {
-                            let normalized = normalize_parens(&rust_expr);
-                            if normalized.starts_with('{') {
-                                self.writeln(&format!("{}({}) != 0", body_indent, normalized));
-                            } else {
-                                self.writeln(&format!("{}{} != 0", body_indent, normalized));
-                            }
-                        }
-                    } else if let Some(casted) = self.cast_return_expr_if_needed(expr, info, &rust_expr) {
-                        self.writeln(&format!("{}{}", body_indent, normalize_parens(&casted)));
-                    } else {
-                        self.writeln(&format!("{}{}", body_indent, normalize_parens(&rust_expr)));
-                    }
+                    syn_expr = self.cast_return_syn_expr_if_needed(expr, Some(info), syn_expr);
+                    let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
+                    self.writeln(&format!("{}{}", body_indent, s));
                 }
             }
             ParseResult::Statement(block_items) => {
@@ -4805,42 +4777,12 @@ impl<'a> RustCodegen<'a> {
     // 統一文変換 (macro/inline 共通)
     // ================================================================
 
-    /// return 文を構築（macro/inline 統一）
-    fn build_return_stmt(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
-        if self.use_syn_expr {
-            return self.build_return_stmt_syn(expr, indent, info);
-        }
-        if let Some(ref rt) = self.current_return_type {
-            if rt.is_pointer() && is_null_literal(expr) {
-                return format!("{}return {};", indent, null_ptr_expr(rt));
-            }
-            if rt.is_bool() {
-                match &expr.kind {
-                    ExprKind::IntLit(0) => return format!("{}return false;", indent),
-                    ExprKind::IntLit(1) => return format!("{}return true;", indent),
-                    _ => {
-                        let e = self.build_expr_string(expr, info);
-                        if !self.is_bool_expr_with_dict(expr) && !is_string_bool_expr(&e) {
-                            return format!("{}return {} != 0;", indent, normalize_parens(&e));
-                        }
-                        return format!("{}return {};", indent, normalize_parens(&e));
-                    }
-                }
-            }
-        }
-        let e = self.build_expr_string(expr, info);
-        if let Some(casted) = self.cast_return_expr_if_needed_unified(expr, info, &e) {
-            return format!("{}return {};", indent, normalize_parens(&casted));
-        }
-        format!("{}return {};", indent, normalize_parens(&e))
-    }
-
-    /// return 文を syn::Expr ベースで構築（`--use-syn-expr` 時）
+    /// return 文を syn::Expr ベースで構築（macro/inline 統一）
     ///
     /// 整数幅キャストや bool 変換を syn::Expr レベルで挿入することで、
     /// 文字列ベースの `(rhs as ty)` フォーマットが `normalize_parens` で
     /// 括弧を剥がされて優先順位が崩れる問題（`a & b as u8` 等）を回避する。
-    fn build_return_stmt_syn(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+    fn build_return_stmt(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
         use crate::syn_codegen::*;
         if let Some(ref rt) = self.current_return_type {
             if rt.is_pointer() && is_null_literal(expr) {
@@ -4952,20 +4894,10 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// 式を文字列に変換（info に応じて macro/inline パスを選択）
-    ///
-    /// `--use-syn-expr` 有効かつ macro コンテキスト (info.is_some()) の場合は
-    /// `build_syn_expr` 経由で出力する。inline コンテキストは現状文字列パスのまま
-    /// （Step 3b で対応予定）。
+    /// 式を文字列に変換（syn::Expr 経由で生成）
     fn build_expr_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
-        if self.use_syn_expr {
-            let syn_expr = self.build_syn_expr(expr, info);
-            return normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-        }
-        match info {
-            Some(info) => self.expr_to_rust(expr, info),
-            None => self.expr_to_rust_inline(expr),
-        }
+        let syn_expr = self.build_syn_expr(expr, info);
+        normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
     }
 
     /// 文を Rust コードに変換（マクロ用）— 統一ヘルパーに委譲
