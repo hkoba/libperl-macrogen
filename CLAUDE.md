@@ -105,8 +105,21 @@ This outputs to stderr:
 
 - **bindings.rs**: `samples/bindings.rs` (use this for checking function availability)
 - **Integration test script**: `~/blob/libperl-rs/12-macrogen-2-build.zsh`
-- **Build error log**: `tmp/build-error.log`
-- **Generated macro bindings**: `tmp/macro_bindings.rs`
+
+The script supports two codegen modes via the `--use-syn-expr` option, with
+**separate output directories** so results from both modes can coexist:
+
+| Mode | Invocation | Build error log | Generated bindings |
+|------|------------|-----------------|--------------------|
+| Old (string-based, default) | `~/blob/libperl-rs/12-macrogen-2-build.zsh` | `tmp/build-error.log` | `tmp/macro_bindings.rs` |
+| New (syn::Expr) | `~/blob/libperl-rs/12-macrogen-2-build.zsh --use-syn-expr` | `tmp/new/build-error.log` | `tmp/new/macro_bindings.rs` |
+
+Mechanism: the script exports `MACROGEN_SYN=1` when `--use-syn-expr` is passed,
+and `~/blob/libperl-rs/12-macrogen-2/libperl-sys/build.rs` reads that env var
+to call `.with_use_syn_expr(true)` on the codegen builder.
+
+**⚠️ When verifying syn::Expr migration work, always pass `--use-syn-expr`** —
+omitting it tests the old path silently.
 
 ## Reference Documents
 
