@@ -433,6 +433,13 @@ pub fn run_inference_with_preprocessor(
         });
     }
 
+    // 共通フィールドマクロ宣言フィールド名 → bindings.rs 由来の Rust 型
+    // のマッピングを構築。`CvXSUB` の戻り値型のような無名 union メンバ
+    // への型解決に使う。
+    if let Some(ref dict) = rust_decl_dict {
+        fields_dict.build_common_field_rust_types(dict, pp.interner_mut());
+    }
+
     // sv_u フィールド型は parse_each で動的に収集済み
     // （SV ファミリー構造体の sv_u union から自動検出）
 

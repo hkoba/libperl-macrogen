@@ -1454,9 +1454,17 @@ impl<'a> SemanticAnalyzer<'a> {
                     // TypeRepr ベースのフィールドルックアップ
                     let base_type_repr = self.get_expr_type_repr(base.id, type_env);
                     let struct_name = base_type_repr.as_ref().and_then(|t| t.type_name());
-                    struct_name
+                    let direct = struct_name
                         .and_then(|n| self.fields_dict?.get_field_type(n, *member))
-                        .map(|ft| Box::new(ft.type_repr.clone()))
+                        .map(|ft| Box::new(ft.type_repr.clone()));
+                    // フォールバック: 共通フィールドマクロ × bindings.rs マッピング
+                    // （無名 union メンバ等、上の経路で解決できないケース）
+                    direct.or_else(|| {
+                        self.fields_dict
+                            .and_then(|fd| fd.rust_type_of_common_field(*member))
+                            .cloned()
+                            .map(Box::new)
+                    })
                 };
 
                 type_env.add_constraint(TypeEnvConstraint::new(
@@ -1516,15 +1524,27 @@ impl<'a> SemanticAnalyzer<'a> {
                 let pointee = base_type_repr.as_ref().and_then(|t| t.pointee_name());
                 let (field_type, used_consistent_type) = if let Some(name) = pointee {
                     // ベース型が既知のポインタ型：構造体名で直接ルックアップ
-                    let ty = self.fields_dict
+                    let direct = self.fields_dict
                         .and_then(|fd| fd.get_field_type(name, *member))
                         .map(|ft| Box::new(ft.type_repr.clone()));
+                    let ty = direct.or_else(|| {
+                        // 共通フィールドマクロ × bindings.rs マッピング（無名 union 等）
+                        self.fields_dict
+                            .and_then(|fd| fd.rust_type_of_common_field(*member))
+                            .cloned()
+                            .map(Box::new)
+                    });
                     (ty, false)
                 } else if let Some(fields_dict) = self.fields_dict {
                     // ベース型が不明な場合：一致型があればそれを使用（O(1)）
-                    let ty = fields_dict.get_consistent_field_type(*member)
+                    let consistent = fields_dict.get_consistent_field_type(*member)
                         .cloned()
                         .map(Box::new);
+                    let ty = consistent.or_else(|| {
+                        fields_dict.rust_type_of_common_field(*member)
+                            .cloned()
+                            .map(Box::new)
+                    });
                     (ty, true)
                 } else {
                     (None, false)

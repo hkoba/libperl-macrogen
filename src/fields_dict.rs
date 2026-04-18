@@ -91,6 +91,9 @@ pub struct FieldsDict {
     /// 例: xcv_xsub → _XPVCV_COMMON
     /// （無名 union 内のフィールドも含む）
     field_to_defining_macro: HashMap<InternedStr, InternedStr>,
+    /// 共通フィールドマクロが宣言したフィールド名 → 整合性のある Rust 型
+    /// （bindings.rs 由来）。`build_common_field_rust_types` で構築。
+    common_field_rust_types: HashMap<InternedStr, TypeRepr>,
 }
 
 impl FieldsDict {
@@ -559,6 +562,69 @@ impl FieldsDict {
         let cm = self.common_macros.get(&macro_name)?;
         let cf = cm.fields.iter().find(|f| f.name == field_name)?;
         Some((cm, cf))
+    }
+
+    /// 共通フィールドマクロ宣言フィールドの bindings.rs 由来 Rust 型
+    /// （`build_common_field_rust_types` で構築）
+    pub fn rust_type_of_common_field(&self, field_name: InternedStr) -> Option<&TypeRepr> {
+        self.common_field_rust_types.get(&field_name)
+    }
+
+    /// `RustDeclDict.structs` (bindgen の Item::Struct と Item::Union を含む)
+    /// を走査し、共通フィールドマクロ宣言フィールドについて整合性のある Rust 型を
+    /// 収集する。
+    ///
+    /// あるフィールド名が複数の bindings.rs エントリで異なる型を持つ場合、
+    /// マップから除外する（`build_field_type_map` と同じポリシー）。
+    pub fn build_common_field_rust_types(
+        &mut self,
+        rust_dict: &crate::rust_decl::RustDeclDict,
+        interner: &mut StringInterner,
+    ) {
+        use std::collections::hash_map::Entry;
+        // 関心対象: 共通マクロ宣言フィールド名集合
+        let target_names: HashSet<InternedStr> = self
+            .common_macros
+            .values()
+            .flat_map(|m| m.fields.iter().map(|f| f.name))
+            .collect();
+        if target_names.is_empty() {
+            return;
+        }
+
+        let mut acc: HashMap<InternedStr, String> = HashMap::new();
+        let mut conflicts: HashSet<InternedStr> = HashSet::new();
+
+        for rust_struct in rust_dict.structs.values() {
+            for field in &rust_struct.fields {
+                let id = interner.intern(&field.name);
+                if !target_names.contains(&id) {
+                    continue;
+                }
+                if conflicts.contains(&id) {
+                    continue;
+                }
+                match acc.entry(id) {
+                    Entry::Vacant(e) => {
+                        e.insert(field.ty.clone());
+                    }
+                    Entry::Occupied(e) => {
+                        if e.get() != &field.ty {
+                            conflicts.insert(id);
+                            e.remove();
+                        }
+                    }
+                }
+            }
+        }
+
+        for (id, ty_str) in acc {
+            let repr = TypeRepr::RustType {
+                repr: crate::type_repr::RustTypeRepr::from_type_string(&ty_str),
+                source: crate::type_repr::RustTypeSource::Parsed { raw: ty_str },
+            };
+            self.common_field_rust_types.insert(id, repr);
+        }
     }
 
     /// 共通フィールドマクロの canonical field set を構築する。
