@@ -201,15 +201,6 @@ pub struct CodegenConfig {
     pub dump_types_for: Option<String>,
 }
 
-impl PipelineBuilder {
-    /// 旧 `--use-syn-expr` フラグ用の後方互換 no-op。
-    /// syn::Expr ベースのコード生成は常に有効化されているため、
-    /// この呼び出しは無視される。下流の `build.rs` 等の互換性維持用。
-    #[deprecated(note = "syn::Expr codegen is always enabled; this no-op is kept only for backward compatibility")]
-    pub fn with_use_syn_expr(self, _enable: bool) -> Self { self }
-}
-
-
 impl Default for CodegenConfig {
     fn default() -> Self {
         Self {
