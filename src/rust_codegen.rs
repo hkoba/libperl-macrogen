@@ -4788,6 +4788,9 @@ impl<'a> RustCodegen<'a> {
 
     /// return 文を構築（macro/inline 統一）
     fn build_return_stmt(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+        if self.use_syn_expr {
+            return self.build_return_stmt_syn(expr, indent, info);
+        }
         if let Some(ref rt) = self.current_return_type {
             if rt.is_pointer() && is_null_literal(expr) {
                 return format!("{}return {};", indent, null_ptr_expr(rt));
@@ -4811,6 +4814,48 @@ impl<'a> RustCodegen<'a> {
             return format!("{}return {};", indent, normalize_parens(&casted));
         }
         format!("{}return {};", indent, normalize_parens(&e))
+    }
+
+    /// return 文を syn::Expr ベースで構築（`--use-syn-expr` 時）
+    ///
+    /// 整数幅キャストや bool 変換を syn::Expr レベルで挿入することで、
+    /// 文字列ベースの `(rhs as ty)` フォーマットが `normalize_parens` で
+    /// 括弧を剥がされて優先順位が崩れる問題（`a & b as u8` 等）を回避する。
+    fn build_return_stmt_syn(&mut self, expr: &Expr, indent: &str, info: Option<&MacroInferInfo>) -> String {
+        use crate::syn_codegen::*;
+        if let Some(ref rt) = self.current_return_type {
+            if rt.is_pointer() && is_null_literal(expr) {
+                return format!("{}return {};", indent, null_ptr_expr(rt));
+            }
+            if rt.is_bool() {
+                match &expr.kind {
+                    ExprKind::IntLit(0) => return format!("{}return false;", indent),
+                    ExprKind::IntLit(1) => return format!("{}return true;", indent),
+                    _ => {
+                        let mut syn_expr = self.build_syn_expr(expr, info);
+                        if !self.is_bool_expr_with_dict(expr) && !is_bool_syn_expr(&syn_expr) {
+                            syn_expr = wrap_as_bool(syn_expr);
+                        }
+                        let s = normalize_parens(&expr_to_string(&syn_expr));
+                        return format!("{}return {};", indent, s);
+                    }
+                }
+            }
+        }
+        let mut syn_expr = self.build_syn_expr(expr, info);
+        if let Some(ret_ut) = &self.current_return_type {
+            if let Some(expr_ut) = self.infer_expr_type_unified(expr, info) {
+                let ret_s = ret_ut.to_rust_string();
+                let expr_s = expr_ut.to_rust_string();
+                if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
+                    if !integer_types_compatible(nr, ne) {
+                        syn_expr = cast_syn_expr(syn_expr, nr);
+                    }
+                }
+            }
+        }
+        let s = normalize_parens(&expr_to_string(&syn_expr));
+        format!("{}return {};", indent, s)
     }
 
     /// 代入文を構築（macro/inline 統一、文コンテキスト用）
@@ -4888,7 +4933,7 @@ impl<'a> RustCodegen<'a> {
     /// `build_syn_expr` 経由で出力する。inline コンテキストは現状文字列パスのまま
     /// （Step 3b で対応予定）。
     fn build_expr_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
-        if self.use_syn_expr && info.is_some() {
+        if self.use_syn_expr {
             let syn_expr = self.build_syn_expr(expr, info);
             return normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
         }
