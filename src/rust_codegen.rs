@@ -2579,18 +2579,7 @@ impl<'a> RustCodegen<'a> {
                             self.writeln(&format!("{}{}", body_indent, s));
                         }
                     } else {
-                        // 返り値キャストを syn::Expr レベルで挿入
-                        if let Some(ret_ut) = &self.current_return_type {
-                            if let Some(expr_ut) = self.infer_expr_type_unified(expr, Some(info)) {
-                                let ret_s = ret_ut.to_rust_string();
-                                let expr_s = expr_ut.to_rust_string();
-                                if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
-                                    if !integer_types_compatible(nr, ne) {
-                                        syn_expr = crate::syn_codegen::cast_syn_expr(syn_expr, nr);
-                                    }
-                                }
-                            }
-                        }
+                        syn_expr = self.cast_return_syn_expr_if_needed(expr, Some(info), syn_expr);
                         let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
                         self.writeln(&format!("{}{}", body_indent, s));
                     }
@@ -4873,19 +4862,25 @@ impl<'a> RustCodegen<'a> {
             }
         }
         let mut syn_expr = self.build_syn_expr(expr, info);
-        if let Some(ret_ut) = &self.current_return_type {
-            if let Some(expr_ut) = self.infer_expr_type_unified(expr, info) {
-                let ret_s = ret_ut.to_rust_string();
-                let expr_s = expr_ut.to_rust_string();
-                if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
-                    if !integer_types_compatible(nr, ne) {
-                        syn_expr = cast_syn_expr(syn_expr, nr);
-                    }
-                }
-            }
-        }
+        syn_expr = self.cast_return_syn_expr_if_needed(expr, info, syn_expr);
         let s = normalize_parens(&expr_to_string(&syn_expr));
         format!("{}return {};", indent, s)
+    }
+
+    /// 返り値式の型キャストを syn::Expr レベルで挿入（必要なら）。
+    /// `cast_return_expr_if_needed_unified` の syn 版。
+    fn cast_return_syn_expr_if_needed(&self, expr: &Expr, info: Option<&MacroInferInfo>,
+                                      syn_expr: syn::Expr) -> syn::Expr {
+        let Some(ret_ut) = &self.current_return_type else { return syn_expr };
+        let Some(expr_ut) = self.infer_expr_type_unified(expr, info) else { return syn_expr };
+        let ret_s = ret_ut.to_rust_string();
+        let expr_s = expr_ut.to_rust_string();
+        if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
+            if !integer_types_compatible(nr, ne) {
+                return crate::syn_codegen::cast_syn_expr(syn_expr, nr);
+            }
+        }
+        syn_expr
     }
 
     /// 代入文を構築（macro/inline 統一、文コンテキスト用）
