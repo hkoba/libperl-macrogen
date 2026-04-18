@@ -1379,21 +1379,11 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
-    /// Call 式が lvalue マクロ呼び出しなら、展開済み lvalue 文字列を返す
-    fn try_expand_call_as_lvalue(&mut self, func: &Expr, args: &[Expr], info: &MacroInferInfo) -> Option<String> {
-        self.try_expand_call_as_lvalue_unified(func, args, Some(info))
-    }
-
-    /// Call 式が lvalue マクロ呼び出しなら、展開済み lvalue 文字列を返す（inline版）
-    fn try_expand_call_as_lvalue_inline(&mut self, func: &Expr, args: &[Expr]) -> Option<String> {
-        self.try_expand_call_as_lvalue_unified(func, args, None)
-    }
-
-    /// `try_expand_call_as_lvalue` macro/inline 統一版（syn::Expr 経由）。
+    /// Call 式が lvalue マクロ呼び出しなら、展開済み lvalue を syn::Expr で返す。
     /// パラメータ置換マップは依然 `String` だが、本体の AST 走査は
-    /// `build_syn_expr` を経由するため `expr_to_rust*` への依存を排除している。
-    fn try_expand_call_as_lvalue_unified(&mut self, func: &Expr, args: &[Expr],
-                                         info: Option<&MacroInferInfo>) -> Option<String> {
+    /// `build_syn_expr` を経由するため `expr_to_rust*` への依存はない。
+    fn try_expand_call_as_lvalue_syn(&mut self, func: &Expr, args: &[Expr],
+                                     info: Option<&MacroInferInfo>) -> Option<syn::Expr> {
         if let ExprKind::Ident(name) = &func.kind {
             if self.should_emit_as_macro_call(*name) {
                 if let Some(macro_info) = self.macro_ctx.macros.get(name) {
@@ -1408,9 +1398,8 @@ impl<'a> RustCodegen<'a> {
                             }
                         }
                         let body_syn = self.build_syn_expr(&body, info);
-                        let result = crate::syn_codegen::expr_to_string(&body_syn);
                         self.param_substitutions = saved_params;
-                        return Some(result);
+                        return Some(body_syn);
                     }
                 }
             }
@@ -3465,21 +3454,13 @@ impl<'a> RustCodegen<'a> {
     }
 
     /// lvalue 用の syn::Expr を構築（MacroCall/Call の展開対応）
-    ///
-    /// `try_expand_call_as_lvalue*` は現状文字列を返すため `syn::parse_str` 経由で
-    /// 取り込む（暫定。Step 4 で `Option<syn::Expr>` 化する）。
     fn build_lvalue_syn_expr(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> syn::Expr {
-        use crate::syn_codegen::int_lit;
         if let ExprKind::MacroCall { expanded, .. } = &expr.kind {
             return self.build_syn_expr(expanded, info);
         }
         if let ExprKind::Call { func, args } = &expr.kind {
-            let result = match info {
-                Some(info) => self.try_expand_call_as_lvalue(func, args, info),
-                None => self.try_expand_call_as_lvalue_inline(func, args),
-            };
-            if let Some(expanded) = result {
-                return syn::parse_str(&expanded).unwrap_or_else(|_| int_lit(0));
+            if let Some(expanded) = self.try_expand_call_as_lvalue_syn(func, args, info) {
+                return expanded;
             }
             let syn_expr = self.build_syn_expr(expr, info);
             let s = crate::syn_codegen::expr_to_string(&syn_expr);
@@ -3619,27 +3600,9 @@ impl<'a> RustCodegen<'a> {
         block_with_value(vec![stmt], l)
     }
 
-    /// lvalue 用の文字列を構築（MacroCall/Call の展開対応）
+    /// lvalue 用の文字列を構築（`build_lvalue_syn_expr` の文字列化版）
     fn build_lvalue_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> String {
-        if let ExprKind::MacroCall { expanded, .. } = &expr.kind {
-            let syn_expr = self.build_syn_expr(expanded, info);
-            return normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-        }
-        if let ExprKind::Call { func, args } = &expr.kind {
-            let result = match info {
-                Some(info) => self.try_expand_call_as_lvalue(func, args, info),
-                None => self.try_expand_call_as_lvalue_inline(func, args),
-            };
-            if let Some(expanded) = result {
-                return expanded;
-            }
-            // 展開失敗
-            let syn_expr = self.build_syn_expr(expr, info);
-            let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-            self.codegen_errors.push(format!("invalid lvalue: {} cannot be assigned to", s));
-            return s;
-        }
-        let syn_expr = self.build_syn_expr(expr, info);
+        let syn_expr = self.build_lvalue_syn_expr(expr, info);
         normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
     }
 
