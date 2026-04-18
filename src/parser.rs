@@ -2984,6 +2984,42 @@ pub fn parse_type_from_string(
     parser.parse_type_name()
 }
 
+/// トークン列を struct メンバー宣言の連続としてパースする。
+///
+/// `_XPVCV_COMMON` のような共通フィールド宣言マクロの本体を解析する用途。
+/// 入力末尾に `;` が無い場合は自動補完する（マクロ本体は典型的に最終
+/// 宣言の後に `;` を持たない — 展開先で `;` が補われる）。
+pub fn parse_struct_members_from_tokens_ref(
+    mut tokens: Vec<Token>,
+    interner: &StringInterner,
+    files: &FileRegistry,
+    typedefs: &HashSet<InternedStr>,
+) -> Result<Vec<StructMember>> {
+    // 末尾に `;` が無ければ補う（最後の意味のあるトークンを見て判定）
+    let needs_trailing_semi = tokens
+        .iter()
+        .rev()
+        .find(|t| !matches!(t.kind, TokenKind::Eof))
+        .is_some_and(|t| !matches!(t.kind, TokenKind::Semi));
+    if needs_trailing_semi {
+        // EOF を取り除いて `;` を足し直す
+        let eof = tokens.iter().position(|t| matches!(t.kind, TokenKind::Eof))
+            .map(|i| tokens.remove(i));
+        let semi_loc = tokens.last().map(|t| t.loc.clone()).unwrap_or_default();
+        tokens.push(Token::new(TokenKind::Semi, semi_loc));
+        if let Some(eof) = eof {
+            tokens.push(eof);
+        }
+    }
+    let mut source = TokenSliceRef::new(tokens, interner, files);
+    let mut parser = Parser::from_source_with_typedefs(&mut source, typedefs.clone())?;
+    let mut members = Vec::new();
+    while !parser.check(&TokenKind::Eof) {
+        members.push(parser.parse_struct_member()?);
+    }
+    Ok(members)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

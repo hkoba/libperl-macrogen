@@ -5,9 +5,48 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StorageClass, StructSpec, TypeSpec};
+use crate::ast::{Declaration, DeclSpecs, Declarator, DerivedDecl, ExternalDecl, StorageClass, StructMember, StructSpec, TypeSpec};
 use crate::intern::{InternedStr, StringInterner};
 use crate::type_repr::TypeRepr;
+
+/// 共通フィールドマクロが宣言する 1 つのフィールドの最小情報
+#[derive(Debug, Clone)]
+pub struct CommonField {
+    /// フィールド名（最も内側、例: `xcv_xsub`）
+    pub name: InternedStr,
+    /// 関数ポインタ（`void (*name)(...)` 等）かどうか
+    pub is_fn_pointer: bool,
+    /// マクロ本体内での出現位置の素性
+    pub origin: CommonFieldOrigin,
+}
+
+/// `CommonField` の出現位置素性
+#[derive(Debug, Clone)]
+pub enum CommonFieldOrigin {
+    /// 直接のフィールド
+    Direct,
+    /// 無名 union/struct の中のフィールド（外側のフィールド名を持つ）
+    InsideUnion { union_field: InternedStr },
+}
+
+/// 共通フィールドマクロが定義するフィールド集合
+#[derive(Debug, Clone)]
+pub struct CommonFieldMacro {
+    pub name: InternedStr,
+    pub fields: Vec<CommonField>,
+}
+
+/// `Declarator.derived` から関数ポインタを判定する。
+///
+/// C の関数ポインタ宣言 `void (*name)(args)` の `derived` は典型的に
+/// `[Function(...), Pointer(...)]` の順で並ぶ（最内側が先頭）。
+/// 関数自体（fn pointer ではなく fn 型）と区別するため、Pointer と
+/// Function の両方が出現することを要求する。
+fn is_fn_pointer_declarator(derived: &[DerivedDecl]) -> bool {
+    let has_fn = derived.iter().any(|d| matches!(d, DerivedDecl::Function(_)));
+    let has_ptr = derived.iter().any(|d| matches!(d, DerivedDecl::Pointer(_)));
+    has_fn && has_ptr
+}
 
 /// フィールドの型情報
 #[derive(Debug, Clone)]
@@ -45,6 +84,13 @@ pub struct FieldsDict {
     /// 共通フィールドマクロ → それを使う構造体集合
     /// 例: _XPVCV_COMMON → [xpvcv, xpvfm]
     common_macro_to_structs: HashMap<InternedStr, Vec<InternedStr>>,
+    /// 共通フィールドマクロ名 → そこで宣言されるフィールド情報
+    /// 例: _XPVCV_COMMON → [{ name: xcv_xsub, is_fn_pointer: true, ... }, ...]
+    common_macros: HashMap<InternedStr, CommonFieldMacro>,
+    /// フィールド名 → そのフィールドを定義している共通マクロ名
+    /// 例: xcv_xsub → _XPVCV_COMMON
+    /// （無名 union 内のフィールドも含む）
+    field_to_defining_macro: HashMap<InternedStr, InternedStr>,
 }
 
 impl FieldsDict {
@@ -492,6 +538,101 @@ impl FieldsDict {
     /// 観測対象の共通フィールドマクロ数（テスト・デバッグ用）
     pub fn common_macro_count(&self) -> usize {
         self.common_macro_to_structs.len()
+    }
+
+    /// あるフィールド名を宣言している共通マクロ（B-2 で構築）
+    pub fn defining_macro_of(&self, field_name: InternedStr) -> Option<InternedStr> {
+        self.field_to_defining_macro.get(&field_name).copied()
+    }
+
+    /// マクロ名から `CommonFieldMacro` を取得
+    pub fn common_macro(&self, macro_name: InternedStr) -> Option<&CommonFieldMacro> {
+        self.common_macros.get(&macro_name)
+    }
+
+    /// フィールド名から定義マクロと該当 `CommonField` をまとめて取得
+    pub fn canonical_field(
+        &self,
+        field_name: InternedStr,
+    ) -> Option<(&CommonFieldMacro, &CommonField)> {
+        let macro_name = *self.field_to_defining_macro.get(&field_name)?;
+        let cm = self.common_macros.get(&macro_name)?;
+        let cf = cm.fields.iter().find(|f| f.name == field_name)?;
+        Some((cm, cf))
+    }
+
+    /// 共通フィールドマクロの canonical field set を構築する。
+    ///
+    /// B-1 で `add_struct_uses_common_macro` により記録された各共通マクロに
+    /// ついて、`MacroDef.body` を struct member 列としてパースし、
+    /// `CommonFieldMacro` と `field_to_defining_macro` を構築する。
+    ///
+    /// `parse_struct_members` は呼び出し側に委ねる関数（典型的には
+    /// `crate::parser::parse_struct_members_from_tokens_ref` をラップしたもの）。
+    /// これは `FieldsDict` が `Preprocessor` への直接依存を避けるため。
+    pub fn build_common_macro_fields<F>(
+        &mut self,
+        macro_bodies: &[(InternedStr, Vec<crate::token::Token>)],
+        mut parse_struct_members: F,
+    ) where
+        F: FnMut(Vec<crate::token::Token>) -> Result<Vec<StructMember>, crate::error::CompileError>,
+    {
+        for (macro_name, body) in macro_bodies {
+            let members = match parse_struct_members(body.clone()) {
+                Ok(m) => m,
+                Err(_) => continue, // 解析失敗は黙殺（マクロが struct member 形式でない可能性）
+            };
+            let mut fields = Vec::new();
+            for member in &members {
+                Self::collect_common_fields_from_member(member, CommonFieldOrigin::Direct, &mut fields);
+            }
+            for f in &fields {
+                self.field_to_defining_macro.insert(f.name, *macro_name);
+            }
+            self.common_macros.insert(
+                *macro_name,
+                CommonFieldMacro { name: *macro_name, fields },
+            );
+        }
+    }
+
+    /// `StructMember` から `CommonField` を抽出（無名 union/struct を再帰）
+    fn collect_common_fields_from_member(
+        member: &StructMember,
+        outer_origin: CommonFieldOrigin,
+        out: &mut Vec<CommonField>,
+    ) {
+        // 直下の declarator を見る
+        for decl in &member.declarators {
+            let Some(declarator) = decl.declarator.as_ref() else { continue };
+            let Some(field_name) = declarator.name else { continue };
+            let is_fn_pointer = is_fn_pointer_declarator(&declarator.derived);
+            out.push(CommonField {
+                name: field_name,
+                is_fn_pointer,
+                origin: outer_origin.clone(),
+            });
+
+            // この declarator が無名 union/struct の名前なら、その中身も収集する
+            // （例: `union { ... } xcv_root_u` の `xcv_root_u`）
+            for type_spec in &member.specs.type_specs {
+                let nested = match type_spec {
+                    TypeSpec::Struct(s) | TypeSpec::Union(s) => s,
+                    _ => continue,
+                };
+                if nested.name.is_some() {
+                    continue; // 名前付き struct/union（typedef 経由など）はスキップ
+                }
+                let Some(inner_members) = &nested.members else { continue };
+                for inner in inner_members {
+                    Self::collect_common_fields_from_member(
+                        inner,
+                        CommonFieldOrigin::InsideUnion { union_field: field_name },
+                        out,
+                    );
+                }
+            }
+        }
     }
 
     // ==================== sv_u Union Field Types ====================

@@ -369,6 +369,27 @@ pub fn run_inference_with_preprocessor(
     // 一致型キャッシュを構築（全フィールドについて型の一貫性を事前計算）
     fields_dict.build_consistent_type_cache(pp.interner());
 
+    // 共通フィールドマクロの canonical field set を構築（B-2）。
+    // B-1 で観測対象として登録した各マクロの本体を struct member 列として
+    // パースし、フィールド名と関数ポインタ判定を `FieldsDict.common_macros`
+    // と `field_to_defining_macro` に格納する。
+    {
+        let mut macro_bodies: Vec<(InternedStr, Vec<crate::token::Token>)> = Vec::new();
+        for &macro_id in &common_field_macro_ids {
+            if let Some(def) = pp.macros().get(macro_id) {
+                macro_bodies.push((macro_id, def.body.clone()));
+            }
+        }
+        let interner = pp.interner();
+        let files = pp.files().clone();
+        let typedefs_ref = typedefs.clone();
+        fields_dict.build_common_macro_fields(&macro_bodies, |body| {
+            crate::parser::parse_struct_members_from_tokens_ref(
+                body, interner, &files, &typedefs_ref,
+            ).map_err(crate::error::CompileError::from)
+        });
+    }
+
     // sv_u フィールド型は parse_each で動的に収集済み
     // （SV ファミリー構造体の sv_u union から自動検出）
 
