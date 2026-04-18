@@ -489,16 +489,6 @@ fn is_null_literal(expr: &Expr) -> bool {
     }
 }
 
-/// 生成済み文字列が bool 式かどうかを判定
-fn is_string_bool_expr(s: &str) -> bool {
-    s.ends_with("!= 0)")
-        || s.ends_with("== 0)")
-        || s.ends_with(".is_null()")
-        || s.ends_with(" as bool)")
-        || s == "true"
-        || s == "false"
-}
-
 /// ポインタ型に対応する null ポインタ式を生成
 fn null_ptr_expr(return_type: &UnifiedType) -> String {
     if return_type.is_const_pointer() {
@@ -2364,30 +2354,6 @@ impl<'a> RustCodegen<'a> {
         arg_str.to_string()
     }
 
-    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す
-    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（統一版）
-    fn cast_return_expr_if_needed_unified(&self, expr: &Expr, info: Option<&MacroInferInfo>, rust_expr: &str) -> Option<String> {
-        let ret_ut = self.current_return_type.as_ref()?;
-        let expr_ut = self.infer_expr_type_unified(expr, info)?;
-        let ret_s = ret_ut.to_rust_string();
-        let expr_s = expr_ut.to_rust_string();
-        if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
-            if !integer_types_compatible(nr, ne) {
-                return Some(format!("({} as {})", rust_expr, nr));
-            }
-        }
-        None
-    }
-
-    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（macro 用）— 統一版に委譲
-    fn cast_return_expr_if_needed(&self, expr: &Expr, info: &MacroInferInfo, rust_expr: &str) -> Option<String> {
-        self.cast_return_expr_if_needed_unified(expr, Some(info), rust_expr)
-    }
-
-    /// 返り値式の型キャストが必要ならキャスト済み文字列を返す（inline 用）— 統一版に委譲
-    fn cast_return_expr_if_needed_inline(&self, expr: &Expr, rust_expr: &str) -> Option<String> {
-        self.cast_return_expr_if_needed_unified(expr, None, rust_expr)
-    }
 
     /// マクロ呼び出し形式で出力すべきかを判定
     ///
