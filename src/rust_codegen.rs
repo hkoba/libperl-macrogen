@@ -3108,23 +3108,21 @@ impl<'a> RustCodegen<'a> {
                     .unwrap_or_else(|_| int_lit(0))
             }
             ExprKind::Index { expr: base, index } => {
+                use crate::syn_codegen::*;
                 let i = self.build_syn_expr(index, info);
-                let i_str = expr_to_string(&i);
-                if self.is_static_array_expr(base) {
+                let i_isize = cast_syn_expr(i, "isize");
+                let base_expr: syn::Expr = if self.is_static_array_expr(base) {
                     let b = if let ExprKind::Ident(n) = &base.kind {
-                        escape_rust_keyword(self.interner.get(*n))
+                        ident_expr(escape_rust_keyword(self.interner.get(*n)).as_str())
                     } else {
-                        let b_expr = self.build_syn_expr(base, info);
-                        expr_to_string(&b_expr)
+                        self.build_syn_expr(base, info)
                     };
-                    syn::parse_str(&format!("(*{}.as_ptr().offset({} as isize))", b, i_str))
-                        .unwrap_or_else(|_| int_lit(0))
+                    method_call(b, "as_ptr", vec![])
                 } else {
-                    let b = self.build_syn_expr(base, info);
-                    let b_str = expr_to_string(&b);
-                    syn::parse_str(&format!("(*{}.offset({} as isize))", b_str, i_str))
-                        .unwrap_or_else(|_| int_lit(0))
-                }
+                    self.build_syn_expr(base, info)
+                };
+                let offset_call = method_call(base_expr, "offset", vec![i_isize]);
+                deref(offset_call)
             }
             ExprKind::Conditional { cond, then_expr, else_expr } => {
                 let c = self.build_syn_expr(cond, info);
@@ -3299,29 +3297,26 @@ impl<'a> RustCodegen<'a> {
                     if lp && !rp {
                         let l = self.build_syn_expr(lhs, info);
                         let r = self.build_syn_expr(rhs, info);
-                        let l_str = expr_to_string(&l);
-                        let r_str = expr_to_string(&r);
-                        return if *op == BinOp::Add {
-                            syn::parse_str(&format!("{}.offset({} as isize)", l_str, r_str))
-                        } else {
-                            syn::parse_str(&format!("{}.offset(-({} as isize))", l_str, r_str))
-                        }.unwrap_or_else(|_| int_lit(0));
+                        let r_isize = crate::syn_codegen::cast_syn_expr(r, "isize");
+                        let arg = if *op == BinOp::Add { r_isize } else {
+                            syn::Expr::Unary(syn::ExprUnary {
+                                attrs: vec![],
+                                op: syn::UnOp::Neg(Default::default()),
+                                expr: Box::new(r_isize),
+                            })
+                        };
+                        return crate::syn_codegen::method_call(l, "offset", vec![arg]);
                     }
                     if rp && !lp && *op == BinOp::Add {
                         let l = self.build_syn_expr(lhs, info);
                         let r = self.build_syn_expr(rhs, info);
-                        let l_str = expr_to_string(&l);
-                        let r_str = expr_to_string(&r);
-                        return syn::parse_str(&format!("{}.offset({} as isize)", r_str, l_str))
-                            .unwrap_or_else(|_| int_lit(0));
+                        let l_isize = crate::syn_codegen::cast_syn_expr(l, "isize");
+                        return crate::syn_codegen::method_call(r, "offset", vec![l_isize]);
                     }
                     if lp && rp && *op == BinOp::Sub {
                         let l = self.build_syn_expr(lhs, info);
                         let r = self.build_syn_expr(rhs, info);
-                        let l_str = expr_to_string(&l);
-                        let r_str = expr_to_string(&r);
-                        return syn::parse_str(&format!("{}.offset_from({})", l_str, r_str))
-                            .unwrap_or_else(|_| int_lit(0));
+                        return crate::syn_codegen::method_call(l, "offset_from", vec![r]);
                     }
                 }
 
