@@ -1154,6 +1154,8 @@ pub struct RustCodegen<'a> {
     rust_decl_dict: Option<&'a RustDeclDict>,
     /// inline 関数辞書への参照（戻り値型/引数型判定用）
     inline_fn_dict: Option<&'a crate::inline_fn::InlineFnDict>,
+    /// FieldsDict への参照（共通フィールドマクロの canonical type 参照用）
+    fields_dict: Option<&'a crate::fields_dict::FieldsDict>,
     /// 構造体フィールド名 → 型の逆引きマップ
     field_type_map: HashMap<String, UnifiedType>,
     /// AST ダンプ対象関数名（デバッグ用）
@@ -1228,6 +1230,7 @@ impl<'a> RustCodegen<'a> {
             used_libc_fns: HashSet::new(),
             rust_decl_dict,
             inline_fn_dict,
+            fields_dict: None,
             field_type_map: build_field_type_map(rust_decl_dict),
             dump_ast_for: None,
             dump_types_for: None,
@@ -1247,6 +1250,12 @@ impl<'a> RustCodegen<'a> {
 
     pub fn with_dump_types_for(mut self, name: Option<String>) -> Self {
         self.dump_types_for = name;
+        self
+    }
+
+    /// FieldsDict への参照を設定
+    pub fn with_fields_dict(mut self, dict: &'a crate::fields_dict::FieldsDict) -> Self {
+        self.fields_dict = Some(dict);
         self
     }
 
@@ -3097,6 +3106,12 @@ impl<'a> RustCodegen<'a> {
                 })
             }
             ExprKind::Call { func, args } => {
+                // 共通フィールドマクロが定義する関数ポインタフィールドの呼び出しを検出。
+                // `(*x).xcv_root_u.xcv_xsub(args)` のような Member/PtrMember 経由の Call で、
+                // canonical type が fn ポインタなら `<field>.unwrap_unchecked()(args)` 形式で出力。
+                if let Some(syn_call) = self.try_build_common_macro_fn_call(func, args, info) {
+                    return syn_call;
+                }
                 // builtin 関数の特殊処理
                 if let ExprKind::Ident(name) = &func.kind {
                     let func_name = self.interner.get(*name);
@@ -3451,6 +3466,58 @@ impl<'a> RustCodegen<'a> {
             }
         }
         arg_expr
+    }
+
+    /// 共通フィールドマクロが宣言する関数ポインタフィールド呼び出しを検出し、
+    /// `<receiver>.<field>.unwrap_unchecked()(args)` 形式の `syn::Expr` を構築する。
+    ///
+    /// `_XPVCV_COMMON` の `xcv_xsub` のように、bindings.rs では
+    /// `Option<unsafe extern "C" fn(...)>` にラップされたフィールドを呼び出す
+    /// パターンに対応する。検出条件:
+    ///
+    /// 1. callee が `Member` または `PtrMember` アクセスである
+    /// 2. そのフィールド名が `field_to_defining_macro` に登録されている
+    ///    （= 共通フィールドマクロが宣言したフィールド）
+    /// 3. canonical type が関数ポインタである
+    ///
+    /// 当てはまらなければ `None` を返し、呼び出し側は通常の Call 生成パスへ進む。
+    fn try_build_common_macro_fn_call(
+        &mut self,
+        func: &Expr,
+        args: &[Expr],
+        info: Option<&MacroInferInfo>,
+    ) -> Option<syn::Expr> {
+        use crate::syn_codegen::*;
+
+        let member_id = match &func.kind {
+            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => *member,
+            _ => return None,
+        };
+        let dict = self.fields_dict?;
+        let (_macro, canonical) = dict.canonical_field(member_id)?;
+        if !canonical.is_fn_pointer {
+            return None;
+        }
+
+        // <receiver>.<field> までを syn::Expr で組む
+        let field_access = self.build_syn_expr(func, info);
+        // .unwrap_unchecked() を挟む（bindgen の Option<fn> をはがす）
+        let callee = method_call(field_access, "unwrap_unchecked", vec![]);
+
+        // 引数: 既存ヘルパで構築（callee 名なし → 型ベース cast は無効）
+        let mut punctuated = syn::punctuated::Punctuated::new();
+        for (i, arg) in args.iter().enumerate() {
+            let s = self.build_arg_string_unified(arg, info, None, i);
+            let parsed = syn::parse_str(&s).unwrap_or_else(|_| int_lit(0));
+            punctuated.push(parsed);
+        }
+
+        Some(syn::Expr::Call(syn::ExprCall {
+            attrs: vec![],
+            func: Box::new(callee),
+            paren_token: Default::default(),
+            args: punctuated,
+        }))
     }
 
     /// lvalue 用の syn::Expr を構築（MacroCall/Call の展開対応）
@@ -4865,6 +4932,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                 .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
+                .with_fields_dict(&result.fields_dict)
                 .with_bool_return(false, self.bool_return_macros.clone());
             let generated = codegen.generate_inline_fn(**name, func_def);
 
@@ -5107,6 +5175,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
+                        .with_fields_dict(&result.fields_dict)
                         .with_const_pointer_positions(const_positions)
                         .with_bool_return(is_bool, self.bool_return_macros.clone());
                     let generated = codegen.generate_macro(info);
@@ -5178,6 +5247,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         .cloned().unwrap_or_default();
                     let is_bool = self.bool_return_macros.contains(&name);
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                        .with_fields_dict(&result.fields_dict)
                         .with_const_pointer_positions(const_positions)
                         .with_bool_return(is_bool, self.bool_return_macros.clone());
                     let generated = codegen.generate_macro(info);

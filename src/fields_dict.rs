@@ -580,7 +580,7 @@ impl FieldsDict {
         for (macro_name, body) in macro_bodies {
             let members = match parse_struct_members(body.clone()) {
                 Ok(m) => m,
-                Err(_) => continue, // 解析失敗は黙殺（マクロが struct member 形式でない可能性）
+                Err(_) => continue, // 解析失敗は黙殺
             };
             let mut fields = Vec::new();
             for member in &members {

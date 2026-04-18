@@ -2,7 +2,7 @@
 //!
 //! build.rs や外部ツールから型推論を実行するための API を提供する。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +17,7 @@ use crate::intern::InternedStr;
 use crate::macro_infer::{ExplicitExpandSymbols, MacroInferContext, NoExpandSymbols};
 use crate::parser::Parser;
 use crate::perl_config::PerlConfigError;
-use crate::preprocessor::{MacroCallWatcher, Preprocessor};
+use crate::preprocessor::{MacroCallWatcher, MacroDefCallback, Preprocessor};
 use crate::rust_decl::RustDeclDict;
 
 /// typedef 辞書の型エイリアス
@@ -158,6 +158,32 @@ impl DebugOptions {
     }
 }
 
+/// 共通フィールドマクロ (`_XPV_HEAD` / `_XPVCV_COMMON` 等) の本体を
+/// `#define` の時点で捕獲する `MacroDefCallback`。
+///
+/// これらのマクロは perl のヘッダ（perl.h, sv.h）で `#undef` されてから
+/// 利用が終わるため、最終的な MacroTable には残らない。`on_macro_defined`
+/// で本体を保存しておくことで Phase 2 後にもアクセスできる。
+struct CommonMacroBodyCollector {
+    targets: HashSet<InternedStr>,
+    bodies: HashMap<InternedStr, Vec<crate::token::Token>>,
+}
+
+impl CommonMacroBodyCollector {
+    fn new(targets: HashSet<InternedStr>) -> Self {
+        Self { targets, bodies: HashMap::new() }
+    }
+}
+
+impl MacroDefCallback for CommonMacroBodyCollector {
+    fn on_macro_defined(&mut self, def: &crate::macro_def::MacroDef) {
+        if self.targets.contains(&def.name) {
+            self.bodies.insert(def.name, def.body.clone());
+        }
+    }
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> { self }
+}
+
 /// 統計情報
 #[derive(Debug, Clone, Default)]
 pub struct InferStats {
@@ -249,6 +275,10 @@ pub fn run_inference_with_preprocessor(
     // 共通フィールド宣言マクロ（perl5 専用ハードコード）。
     // `_SV_HEAD` と同様、struct 通過時に Watcher を見て使用関係を fields_dict
     // に記録する。新規追加はこのリストに 1 行足すだけで良い。
+    //
+    // また、これらのマクロは perl.h / sv.h で `#undef` されるため、最終的な
+    // MacroTable には残らない。本体（フィールド宣言列）は
+    // `CommonMacroBodyCollector` が `#define` 時点で捕獲する。
     const COMMON_FIELD_MACROS: &[&str] = &["_XPV_HEAD", "_XPVCV_COMMON"];
     let common_field_macro_ids: Vec<InternedStr> = COMMON_FIELD_MACROS
         .iter()
@@ -258,6 +288,9 @@ pub fn run_inference_with_preprocessor(
             id
         })
         .collect();
+    pp.set_macro_def_callback(Box::new(CommonMacroBodyCollector::new(
+        common_field_macro_ids.iter().copied().collect(),
+    )));
 
     // pTHX_ と pTHX マクロ呼び出しを監視（関数宣言の THX 依存検出用）
     let pthx_id = pp.interner_mut().intern("pTHX_");
@@ -374,11 +407,21 @@ pub fn run_inference_with_preprocessor(
     // パースし、フィールド名と関数ポインタ判定を `FieldsDict.common_macros`
     // と `field_to_defining_macro` に格納する。
     {
-        let mut macro_bodies: Vec<(InternedStr, Vec<crate::token::Token>)> = Vec::new();
-        for &macro_id in &common_field_macro_ids {
-            if let Some(def) = pp.macros().get(macro_id) {
-                macro_bodies.push((macro_id, def.body.clone()));
-            }
+        let collector = pp
+            .take_macro_def_callback()
+            .and_then(|cb| cb.into_any().downcast::<CommonMacroBodyCollector>().ok());
+        let mut macro_bodies: Vec<(InternedStr, Vec<crate::token::Token>)> = collector
+            .map(|c| c.bodies.into_iter().collect())
+            .unwrap_or_default();
+        // perl 共通マクロ本体内に現れる `pTHX_` / `pTHX` トークンは関数ポインタ
+        // シグネチャ内のスレッド対応マクロ。本体パース時は意味的に空に展開
+        // されるべきなのでトークンレベルで除去する。
+        let pthx_id = pp.interner_mut().intern("pTHX_");
+        let pthx_no_comma_id = pp.interner_mut().intern("pTHX");
+        for (_id, body) in macro_bodies.iter_mut() {
+            body.retain(|t| !matches!(&t.kind,
+                crate::token::TokenKind::Ident(id)
+                    if *id == pthx_id || *id == pthx_no_comma_id));
         }
         let interner = pp.interner();
         let files = pp.files().clone();
