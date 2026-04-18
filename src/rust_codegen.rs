@@ -3605,16 +3605,20 @@ impl<'a> RustCodegen<'a> {
                 syn::parse_str(&format!("{}({})", func_name, a.join(", ")))
                     .unwrap_or_else(|_| int_lit(0))
             }
-            // Assign, Pre/PostInc/Dec はブロック式を生成し、内部の MacroCall 展開が
-            // 複雑なため旧パス (expr_to_rust_ctx) にフォールバックする。
-            // ブロック式は自己完結するため括弧の問題は発生しない。
-            ExprKind::Assign { .. } | ExprKind::PreInc(_) | ExprKind::PreDec(_)
-            | ExprKind::PostInc(_) | ExprKind::PostDec(_) => {
-                let fallback_str = match info {
-                    Some(info) => self.expr_to_rust_ctx(expr, info, ExprContext::Top),
-                    None => self.expr_to_rust_inline_ctx(expr, ExprContext::Top),
-                };
-                syn::parse_str(&fallback_str).unwrap_or_else(|_| int_lit(0))
+            ExprKind::Assign { op, lhs, rhs } => {
+                self.build_assign_syn_expr(*op, lhs, rhs, info)
+            }
+            ExprKind::PreInc(inner) => {
+                self.build_inc_dec_syn_expr(inner, info, /*is_inc=*/ true, /*is_post=*/ false)
+            }
+            ExprKind::PreDec(inner) => {
+                self.build_inc_dec_syn_expr(inner, info, /*is_inc=*/ false, /*is_post=*/ false)
+            }
+            ExprKind::PostInc(inner) => {
+                self.build_inc_dec_syn_expr(inner, info, /*is_inc=*/ true, /*is_post=*/ true)
+            }
+            ExprKind::PostDec(inner) => {
+                self.build_inc_dec_syn_expr(inner, info, /*is_inc=*/ false, /*is_post=*/ true)
             }
             ExprKind::Assert { kind, condition } => {
                 let assert_str = if let Some((real_cond, msg)) = decompose_assert_with_message(condition) {
@@ -3734,6 +3738,161 @@ impl<'a> RustCodegen<'a> {
             }
         }
         normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr))
+    }
+
+    /// lvalue 用の syn::Expr を構築（MacroCall/Call の展開対応）
+    ///
+    /// `try_expand_call_as_lvalue*` は現状文字列を返すため `syn::parse_str` 経由で
+    /// 取り込む（暫定。Step 4 で `Option<syn::Expr>` 化する）。
+    fn build_lvalue_syn_expr(&mut self, expr: &Expr, info: Option<&MacroInferInfo>) -> syn::Expr {
+        use crate::syn_codegen::int_lit;
+        if let ExprKind::MacroCall { expanded, .. } = &expr.kind {
+            return self.build_syn_expr(expanded, info);
+        }
+        if let ExprKind::Call { func, args } = &expr.kind {
+            let result = match info {
+                Some(info) => self.try_expand_call_as_lvalue(func, args, info),
+                None => self.try_expand_call_as_lvalue_inline(func, args),
+            };
+            if let Some(expanded) = result {
+                return syn::parse_str(&expanded).unwrap_or_else(|_| int_lit(0));
+            }
+            let syn_expr = self.build_syn_expr(expr, info);
+            let s = crate::syn_codegen::expr_to_string(&syn_expr);
+            self.codegen_errors.push(format!("invalid lvalue: {} cannot be assigned to", s));
+            return syn_expr;
+        }
+        self.build_syn_expr(expr, info)
+    }
+
+    /// `Pre/PostInc/Dec` を syn::Expr で構築。
+    /// 旧パス `expr_to_rust_ctx` の対応 arm（rust_codegen.rs の PreInc 〜 PostDec）と同等。
+    fn build_inc_dec_syn_expr(&mut self, inner: &Expr, info: Option<&MacroInferInfo>,
+                              is_inc: bool, is_post: bool) -> syn::Expr {
+        use crate::syn_codegen::*;
+        let lv = self.build_lvalue_syn_expr(inner, info);
+        let is_ptr = self.is_pointer_expr_unified(inner, info)
+            || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer());
+        // 「lv を 1 つ増減する」文を構築
+        let step_stmt: syn::Stmt = if is_ptr {
+            // lv = lv.wrapping_add(1);  または wrapping_sub
+            let method = if is_inc { "wrapping_add" } else { "wrapping_sub" };
+            let call = method_call(lv.clone(), method, vec![int_lit(1)]);
+            semi_stmt(assign_expr(lv.clone(), call))
+        } else {
+            let op = if is_inc {
+                syn::BinOp::AddAssign(Default::default())
+            } else {
+                syn::BinOp::SubAssign(Default::default())
+            };
+            semi_stmt(assign_op_expr(lv.clone(), op, int_lit(1)))
+        };
+        if is_post {
+            // { let _t = lv; <step>; _t }
+            let save = let_stmt("_t", lv.clone());
+            block_with_value(vec![save, step_stmt], ident_expr("_t"))
+        } else {
+            // { <step>; lv }
+            block_with_value(vec![step_stmt], lv)
+        }
+    }
+
+    /// `Assign` を syn::Expr で構築。
+    /// 旧パス `expr_to_rust_ctx` の Assign arm（rust_codegen.rs:4380 周辺）と同等。
+    fn build_assign_syn_expr(&mut self, op: AssignOp, lhs: &Expr, rhs: &Expr,
+                             info: Option<&MacroInferInfo>) -> syn::Expr {
+        use crate::syn_codegen::*;
+        let l = self.build_lvalue_syn_expr(lhs, info);
+        let lhs_ut = self.infer_expr_type_unified(lhs, info);
+
+        // RHS の構築（null リテラル特別扱い + プレーン Assign の整数幅キャスト）
+        let r: syn::Expr = if is_null_literal(rhs) && op == AssignOp::Assign {
+            match &lhs_ut {
+                Some(lut) if lut.is_pointer() => {
+                    if lut.is_const_pointer() {
+                        syn::parse_str("std::ptr::null()").unwrap_or_else(|_| int_lit(0))
+                    } else {
+                        syn::parse_str("std::ptr::null_mut()").unwrap_or_else(|_| int_lit(0))
+                    }
+                }
+                Some(_) => int_lit(0),
+                None => syn::parse_str("std::ptr::null_mut()").unwrap_or_else(|_| int_lit(0)),
+            }
+        } else {
+            let mut r_expr = self.build_syn_expr(rhs, info);
+            // プレーン Assign のみ: LHS 型に合わせて整数幅キャスト挿入
+            if op == AssignOp::Assign {
+                if let Some(ref lut) = lhs_ut {
+                    if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
+                        let ls = lut.to_rust_string();
+                        let rs = rut.to_rust_string();
+                        if let (Some(nl), Some(nr)) = (
+                            normalize_integer_type(&ls),
+                            normalize_integer_type(&rs),
+                        ) {
+                            if !integer_types_compatible(nl, nr) {
+                                r_expr = cast_syn_expr(r_expr, nl);
+                            }
+                        }
+                    }
+                }
+            }
+            r_expr
+        };
+
+        // op に応じた文を構築し、ブロックでラップ
+        let stmt: syn::Stmt = match op {
+            AssignOp::Assign => semi_stmt(assign_expr(l.clone(), r)),
+            AssignOp::AddAssign | AssignOp::SubAssign => {
+                let is_ptr = self.is_pointer_expr_unified(lhs, info)
+                    || lhs_ut.as_ref().is_some_and(|ut| ut.is_pointer());
+                if is_ptr {
+                    // lv = lv.wrapping_add(r as usize);
+                    let method = if op == AssignOp::AddAssign { "wrapping_add" } else { "wrapping_sub" };
+                    let r_usize = cast_syn_expr(r, "usize");
+                    let call = method_call(l.clone(), method, vec![r_usize]);
+                    semi_stmt(assign_expr(l.clone(), call))
+                } else {
+                    let syn_op = c_assign_op_to_syn_compound(op).unwrap();
+                    semi_stmt(assign_op_expr(l.clone(), syn_op, r))
+                }
+            }
+            AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
+                // 整数幅が異なる場合 RHS を LHS 型にキャスト
+                let lt = &lhs_ut;
+                let rt = self.infer_expr_type_unified(rhs, info);
+                let r_final = {
+                    let mut casted = false;
+                    let mut ret = r;
+                    if let (Some(lut), Some(rut)) = (lt, &rt) {
+                        let ls = lut.to_rust_string();
+                        let rs = rut.to_rust_string();
+                        let nl = normalize_integer_type(&ls);
+                        let nr = normalize_integer_type(&rs);
+                        if nl.is_some() && nr.is_some() && nl != nr {
+                            ret = cast_syn_expr(ret, nl.unwrap());
+                            casted = true;
+                        }
+                    }
+                    if !casted {
+                        if let (Some(lut), None) = (lt, &rt) {
+                            let ls = lut.to_rust_string();
+                            if let Some(nl) = normalize_integer_type(&ls) {
+                                ret = cast_syn_expr(ret, nl);
+                            }
+                        }
+                    }
+                    ret
+                };
+                let syn_op = c_assign_op_to_syn_compound(op).unwrap();
+                semi_stmt(assign_op_expr(l.clone(), syn_op, r_final))
+            }
+            _ => {
+                let syn_op = c_assign_op_to_syn_compound(op).unwrap();
+                semi_stmt(assign_op_expr(l.clone(), syn_op, r))
+            }
+        };
+        block_with_value(vec![stmt], l)
     }
 
     /// lvalue 用の文字列を構築（MacroCall/Call の展開対応）

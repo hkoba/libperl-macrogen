@@ -146,6 +146,19 @@ pub fn parenthesize(expr: syn::Expr) -> syn::Expr {
             }
             syn::Expr::Return(ret)
         }
+        syn::Expr::Block(mut b) => {
+            parenthesize_block(&mut b.block);
+            syn::Expr::Block(b)
+        }
+        syn::Expr::Reference(mut r) => {
+            r.expr = Box::new(parenthesize(*r.expr));
+            syn::Expr::Reference(r)
+        }
+        syn::Expr::Index(mut i) => {
+            i.expr = Box::new(parenthesize(*i.expr));
+            i.index = Box::new(parenthesize(*i.index));
+            syn::Expr::Index(i)
+        }
         // その他はそのまま返す
         other => other,
     }
@@ -157,13 +170,29 @@ fn parenthesize_child(child: syn::Expr, parent_prec: u8, is_left: bool) -> syn::
     let child_prec = expr_precedence(&child);
     // 子の優先順位が親より低い → 括弧必要
     // 同じ優先順位で右辺 → 括弧必要（左結合のため）
-    let needs_parens = child_prec < parent_prec
+    let mut needs_parens = child_prec < parent_prec
         || (child_prec == parent_prec && !is_left);
+    // Block/Unsafe/Loop/If/Match 等の `{}` で始まる式は、
+    // Binary や Cast の左辺に置くと Rust パーサが "expression statement"
+    // として解釈してしまう（例: `{ x } != 0` は構文エラー）。
+    // 子の優先順位に関わらず括弧で囲む。
+    if is_left && starts_with_block(&child) {
+        needs_parens = true;
+    }
     if needs_parens {
         wrap_paren(child)
     } else {
         child
     }
+}
+
+/// 式が `{` で始まるか（block / if / match / unsafe / loop / while / for）
+fn starts_with_block(expr: &syn::Expr) -> bool {
+    matches!(expr,
+        syn::Expr::Block(_) | syn::Expr::Unsafe(_) | syn::Expr::If(_) |
+        syn::Expr::Match(_) | syn::Expr::Loop(_) | syn::Expr::While(_) |
+        syn::Expr::ForLoop(_)
+    )
 }
 
 /// Expr::Paren で囲む
@@ -639,6 +668,115 @@ pub fn call(func_name: &str, args: Vec<syn::Expr>) -> syn::Expr {
         })),
         paren_token: Default::default(),
         args: punctuated,
+    })
+}
+
+/// 識別子を `syn::Expr::Path` として構築（`name` を式コンテキストで参照する）
+pub fn ident_expr(name: &str) -> syn::Expr {
+    syn::Expr::Path(syn::ExprPath {
+        attrs: vec![],
+        qself: None,
+        path: ident(name).into(),
+    })
+}
+
+/// メソッド呼び出し `receiver.method(args...)` を構築
+pub fn method_call(receiver: syn::Expr, method: &str, args: Vec<syn::Expr>) -> syn::Expr {
+    let mut punctuated = syn::punctuated::Punctuated::new();
+    for arg in args {
+        punctuated.push(arg);
+    }
+    syn::Expr::MethodCall(syn::ExprMethodCall {
+        attrs: vec![],
+        receiver: Box::new(receiver),
+        dot_token: Default::default(),
+        method: ident(method),
+        turbofish: None,
+        paren_token: Default::default(),
+        args: punctuated,
+    })
+}
+
+/// `lhs = rhs` を式として構築（plain assign）
+pub fn assign_expr(lhs: syn::Expr, rhs: syn::Expr) -> syn::Expr {
+    syn::Expr::Assign(syn::ExprAssign {
+        attrs: vec![],
+        left: Box::new(lhs),
+        eq_token: Default::default(),
+        right: Box::new(rhs),
+    })
+}
+
+/// `lhs op= rhs` を式として構築（複合代入）
+///
+/// `op` には `syn::BinOp::AddAssign(_)` 等の `*Assign` 系バリアントを渡す。
+pub fn assign_op_expr(lhs: syn::Expr, op: syn::BinOp, rhs: syn::Expr) -> syn::Expr {
+    syn::Expr::Binary(syn::ExprBinary {
+        attrs: vec![],
+        left: Box::new(lhs),
+        op,
+        right: Box::new(rhs),
+    })
+}
+
+/// 式を `Stmt::Expr(_, Some(Semi))` の文として構築
+pub fn semi_stmt(expr: syn::Expr) -> syn::Stmt {
+    syn::Stmt::Expr(expr, Some(Default::default()))
+}
+
+/// `let name = value;` 文を構築
+pub fn let_stmt(name: &str, value: syn::Expr) -> syn::Stmt {
+    let pat = syn::Pat::Ident(syn::PatIdent {
+        attrs: vec![],
+        by_ref: None,
+        mutability: None,
+        ident: ident(name),
+        subpat: None,
+    });
+    syn::Stmt::Local(syn::Local {
+        attrs: vec![],
+        let_token: Default::default(),
+        pat,
+        init: Some(syn::LocalInit {
+            eq_token: Default::default(),
+            expr: Box::new(value),
+            diverge: None,
+        }),
+        semi_token: Default::default(),
+    })
+}
+
+/// `{ stmts...; value }` ブロック式を構築
+pub fn block_with_value(stmts: Vec<syn::Stmt>, value: syn::Expr) -> syn::Expr {
+    let mut all_stmts = stmts;
+    all_stmts.push(syn::Stmt::Expr(value, None)); // 末尾値（セミコロンなし）
+    syn::Expr::Block(syn::ExprBlock {
+        attrs: vec![],
+        label: None,
+        block: syn::Block {
+            brace_token: Default::default(),
+            stmts: all_stmts,
+        },
+    })
+}
+
+/// `AssignOp` (C AST) → 複合代入用の `syn::BinOp` を返す。
+///
+/// `AssignOp::Assign` は plain `=` であり `BinOp` を持たないため `None`。
+pub fn c_assign_op_to_syn_compound(op: crate::ast::AssignOp) -> Option<syn::BinOp> {
+    use crate::ast::AssignOp;
+    Some(match op {
+        AssignOp::Assign => return None,
+        AssignOp::AddAssign => syn::BinOp::AddAssign(Default::default()),
+        AssignOp::SubAssign => syn::BinOp::SubAssign(Default::default()),
+        AssignOp::MulAssign => syn::BinOp::MulAssign(Default::default()),
+        AssignOp::DivAssign => syn::BinOp::DivAssign(Default::default()),
+        AssignOp::ModAssign => syn::BinOp::RemAssign(Default::default()),
+        AssignOp::AndAssign => syn::BinOp::BitAndAssign(Default::default()),
+        AssignOp::OrAssign  => syn::BinOp::BitOrAssign(Default::default()),
+        AssignOp::XorAssign => syn::BinOp::BitXorAssign(Default::default()),
+        AssignOp::ShlAssign => syn::BinOp::ShlAssign(Default::default()),
+        AssignOp::ShrAssign => syn::BinOp::ShrAssign(Default::default()),
     })
 }
 
