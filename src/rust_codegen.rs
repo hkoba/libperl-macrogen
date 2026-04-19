@@ -1880,7 +1880,12 @@ impl<'a> RustCodegen<'a> {
                         if let Some(struct_name) = self.interner.lookup(&struct_name_str) {
                             if let Some(member_ty) = fd.member_type(struct_name, *member) {
                                 let rust_ty = member_ty.to_rust_string(self.interner);
-                                return Some(UnifiedType::from_rust_str(&rust_ty));
+                                // 関数ポインタ (`*mut /* fn */` 形式) は正しい
+                                // `Option<fn(...)>` に解決できないので bindings.rs の
+                                // field_type_map にフォールバック。
+                                if !rust_ty.contains("/* fn */") {
+                                    return Some(UnifiedType::from_rust_str(&rust_ty));
+                                }
                             }
                         }
                     }
@@ -3417,6 +3422,18 @@ impl<'a> RustCodegen<'a> {
                             return if_else(cond_syn, t, e);
                         }
                     }
+                    // 整数型の type_hint + 片方が null リテラル → null を 0 に。
+                    // C `cond ? i : 0` の 0 がマクロ展開で NULL になっているケース。
+                    if normalize_integer_type(hint).is_some() {
+                        if is_null_literal(else_expr) {
+                            let t = self.build_syn_expr(then_expr, info);
+                            return if_else(cond_syn, t, int_lit(0));
+                        }
+                        if is_null_literal(then_expr) {
+                            let e = self.build_syn_expr(else_expr, info);
+                            return if_else(cond_syn, int_lit(0), e);
+                        }
+                    }
                     if hint_ut.is_bool() {
                         let then_syn = match &then_expr.kind {
                             ExprKind::IntLit(0) => syn::parse_str("false").unwrap(),
@@ -3464,6 +3481,23 @@ impl<'a> RustCodegen<'a> {
                                 return if_else(cond_syn, then_final, else_final);
                             }
                         }
+                    }
+                    // SV サブタイプ間: 両枝を共通型 (type_hint 優先、なければ then 型)
+                    // に揃えて if/else 型整合を確保する。
+                    if tut.is_pointer() && eut.is_pointer() && ts != es
+                        && is_sv_subtype_cast(tut, eut)
+                    {
+                        // type_hint が void (`()` や `c_void`) の場合は cast 対象に
+                        // しない (return 型が void の文脈で分岐値は捨てられる)。
+                        let target_str = type_hint.as_deref()
+                            .filter(|t| *t != "()" && !UnifiedType::from_rust_str(t).is_void())
+                            .unwrap_or(&ts)
+                            .to_string();
+                        return if_else(
+                            cond_syn,
+                            cast_syn_expr(then_syn, &target_str),
+                            cast_syn_expr(else_syn, &target_str),
+                        );
                     }
                 }
 
