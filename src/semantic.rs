@@ -19,6 +19,71 @@ use crate::type_repr::{
 };
 use crate::unified_type::{IntSize, UnifiedType};
 
+/// `Member` / `PtrMember` / `Deref` / `Cast` の連鎖を遡って leftmost の Ident
+/// を探す。Ident が macro params に含まれていれば `Some((name, expr_id))` を
+/// 返す。Call や Binary 等で連鎖が中断する場合は `None` を返す（誤推論を避ける）。
+///
+/// GCC StmtExpr による MUTABLE_PTR の展開
+/// `({ void *p_ = (expr); p_; })` も透過する（perl5 の MUTABLE_PTR は
+/// この形に展開されることがある）。
+fn leftmost_param_ident(
+    expr: &Expr,
+    params: &HashSet<InternedStr>,
+) -> Option<(InternedStr, ExprId)> {
+    let mut cur = expr;
+    loop {
+        match &cur.kind {
+            ExprKind::Member { expr: base, .. }
+            | ExprKind::PtrMember { expr: base, .. }
+            | ExprKind::Deref(base)
+            | ExprKind::Cast { expr: base, .. } => cur = base,
+            ExprKind::StmtExpr(compound) => {
+                if let Some(inner) = mutable_ptr_inner_expr(compound) {
+                    cur = inner;
+                } else {
+                    return None;
+                }
+            }
+            ExprKind::Ident(name) if params.contains(name) => {
+                return Some((*name, cur.id));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `({ void *p_ = (expr); p_; })` という MUTABLE_PTR の GCC StmtExpr 展開を
+/// 検出し、内側の expr への参照を返す。`detect_mutable_ptr_pattern`
+/// (`src/rust_codegen.rs`) と同等の判定を semantic 側で行う。
+fn mutable_ptr_inner_expr(compound: &CompoundStmt) -> Option<&Expr> {
+    if compound.items.len() != 2 {
+        return None;
+    }
+    let decl = match &compound.items[0] {
+        BlockItem::Decl(d) => d,
+        _ => return None,
+    };
+    if decl.declarators.len() != 1 {
+        return None;
+    }
+    let init_decl = &decl.declarators[0];
+    let declared_name = init_decl.declarator.name?;
+    let init_expr = match init_decl.init.as_ref()? {
+        Initializer::Expr(e) => e.as_ref(),
+        _ => return None,
+    };
+    let last_expr = match &compound.items[1] {
+        BlockItem::Stmt(Stmt::Expr(Some(e), _)) => e,
+        _ => return None,
+    };
+    if let ExprKind::Ident(name) = &last_expr.kind {
+        if *name == declared_name {
+            return Some(init_expr);
+        }
+    }
+    None
+}
+
 /// 型変数 ID (制約ベース型推論用)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(usize);
@@ -1069,6 +1134,43 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    /// `*mut <typedef>` 形式の SV ファミリー型を作成（共通マクロ由来、tier 3）
+    fn make_sv_family_ptr_type(&self, typedef_name: InternedStr) -> TypeRepr {
+        TypeRepr::CType {
+            specs: CTypeSpecs::TypedefName(typedef_name),
+            derived: vec![CDerivedType::Pointer { is_const: false, is_volatile: false, is_restrict: false }],
+            source: CTypeSource::CommonMacroFieldInference,
+        }
+    }
+
+    /// 共通フィールドマクロ宣言フィールドへのアクセス経路から SV ファミリー
+    /// パラメータ型を逆推論する。
+    ///
+    /// 例: `(cv)->sv_any->xcv_gv_u` の `xcv_gv_u` は `_XPVCV_COMMON` 由来 →
+    /// 経路を辿って `cv` macro param に `*mut CV` 制約を追加。
+    fn try_infer_sv_family_from_member(
+        &self,
+        member: InternedStr,
+        base: &Expr,
+        type_env: &mut TypeEnv,
+    ) {
+        let Some(fields_dict) = self.fields_dict else { return };
+        let Some(macro_id) = fields_dict.defining_macro_of(member) else { return };
+        let Some(sv_typedef) = fields_dict.sv_family_of_common_macro(macro_id) else { return };
+        let Some((_param_name, param_node_id)) = leftmost_param_ident(base, &self.macro_params)
+        else {
+            return;
+        };
+        let sv_type = self.make_sv_family_ptr_type(sv_typedef);
+        let typedef_str = self.interner.get(sv_typedef);
+        let member_str = self.interner.get(member);
+        type_env.add_constraint(TypeEnvConstraint::new(
+            param_node_id,
+            sv_type,
+            format!("common-macro field {} implies {}*", member_str, typedef_str),
+        ));
+    }
+
     /// type_env から式の TypeRepr を直接取得
     fn get_expr_type_repr(&self, expr_id: ExprId, type_env: &TypeEnv) -> Option<TypeRepr> {
         type_env.expr_constraints.get(&expr_id)
@@ -1476,6 +1578,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     }),
                     format!("{}.{}", base_ty, member_name),
                 ));
+
+                // 共通フィールドマクロ宣言フィールド → SV ファミリー型逆推論
+                self.try_infer_sv_family_from_member(*member, base, type_env);
             }
 
             // ポインタメンバーアクセス
@@ -1560,6 +1665,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     }),
                     format!("{}->{}", base_ty, member_name),
                 ));
+
+                // 共通フィールドマクロ宣言フィールド → SV ファミリー型逆推論
+                self.try_infer_sv_family_from_member(*member, base, type_env);
             }
 
             // 代入演算子

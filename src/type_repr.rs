@@ -58,6 +58,11 @@ pub enum CTypeSource {
     Cast,
     /// SV ファミリーキャストからの型推論
     SvFamilyCast,
+    /// 共通フィールドマクロ宣言フィールドへのアクセス経路から逆推論された
+    /// SV ファミリー型（例: `xcv_gv_u` (in `_XPVCV_COMMON`) アクセス →
+    /// 引数 `cv` は `*mut CV`）。総称的な `SvFamilyCast` 由来の `*mut SV`
+    /// より優先するため、`confidence_tier` で 3 を返す。
+    CommonMacroFieldInference,
 }
 
 // ============================================================================
@@ -677,6 +682,7 @@ impl TypeRepr {
                 CTypeSource::FieldInference { .. } => "field-inference",
                 CTypeSource::Cast => "cast",
                 CTypeSource::SvFamilyCast => "sv-family-cast",
+                CTypeSource::CommonMacroFieldInference => "common-macro-field-inference",
             },
             TypeRepr::RustType { .. } => "rust-bindings",
             TypeRepr::Inferred(_) => "inferred",
@@ -708,7 +714,8 @@ impl TypeRepr {
             },
             TypeRepr::CType { source, .. } => match source {
                 CTypeSource::InlineFn { .. } | CTypeSource::Header => 2,
-                CTypeSource::Apidoc { .. } => 3,
+                CTypeSource::Apidoc { .. }
+                | CTypeSource::CommonMacroFieldInference => 3,
                 CTypeSource::Cast
                 | CTypeSource::SvFamilyCast
                 | CTypeSource::FieldInference { .. }
