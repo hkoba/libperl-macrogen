@@ -152,6 +152,12 @@ impl KnownSymbols {
             "true", "false", "std", "crate", "self", "super",
             "null_mut", "null",
             "PerlInterpreter", "my_perl",
+            // 出力ヘッダで `type X = Y;` 定義しているもの
+            // (`generate_use_statements` 参照)
+            "size_t", "ssize_t", "SSize_t",
+            // std::ffi 由来（use 文で import 済み）
+            "c_void", "c_char", "c_uchar", "c_int", "c_uint",
+            "c_long", "c_ulong", "c_short", "c_ushort",
         ];
         for name in rust_primitives {
             names.insert(name.to_string());
@@ -2319,6 +2325,106 @@ impl<'a> RustCodegen<'a> {
                 let ty = self.apply_derived_to_type(&base_type, &init_decl.declarator.derived);
                 self.current_param_types.insert(name, UnifiedType::from_rust_str(&ty));
             }
+        }
+    }
+
+    /// 関数本体全体を再帰的に走査して、ネストした compound 内・StmtExpr 内・
+    /// for ループ初期化部の Declaration を全て `current_local_names` に追加する。
+    /// scope 厳密性は犠牲にして「同一名はどのスコープでも解決済み」と扱う簡易版。
+    /// `STMT_START { let v = ...; ... } STMT_END` 展開で生まれる block-local
+    /// 変数を未解決と誤検出しないようにする。
+    fn collect_local_names_recursive(&mut self, body: &CompoundStmt) {
+        for item in &body.items {
+            self.collect_local_names_from_block_item(item);
+        }
+    }
+
+    fn collect_local_names_from_block_item(&mut self, item: &BlockItem) {
+        match item {
+            BlockItem::Decl(d) => self.collect_decl_names(d),
+            BlockItem::Stmt(s) => self.collect_local_names_from_stmt(s),
+        }
+    }
+
+    fn collect_local_names_from_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Compound(c) => self.collect_local_names_recursive(c),
+            Stmt::If { then_stmt, else_stmt, cond, .. } => {
+                self.collect_local_names_from_expr(cond);
+                self.collect_local_names_from_stmt(then_stmt);
+                if let Some(es) = else_stmt {
+                    self.collect_local_names_from_stmt(es);
+                }
+            }
+            Stmt::Switch { body, expr, .. } => {
+                self.collect_local_names_from_expr(expr);
+                self.collect_local_names_from_stmt(body);
+            }
+            Stmt::While { body, cond, .. } => {
+                self.collect_local_names_from_expr(cond);
+                self.collect_local_names_from_stmt(body);
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                self.collect_local_names_from_stmt(body);
+                self.collect_local_names_from_expr(cond);
+            }
+            Stmt::For { init, cond, step, body, .. } => {
+                if let Some(i) = init {
+                    match i {
+                        ForInit::Decl(d) => self.collect_decl_names(d),
+                        ForInit::Expr(e) => self.collect_local_names_from_expr(e),
+                    }
+                }
+                if let Some(c) = cond { self.collect_local_names_from_expr(c); }
+                if let Some(s) = step { self.collect_local_names_from_expr(s); }
+                self.collect_local_names_from_stmt(body);
+            }
+            Stmt::Expr(Some(e), _) => self.collect_local_names_from_expr(e),
+            Stmt::Return(Some(e), _) => self.collect_local_names_from_expr(e),
+            Stmt::Label { stmt, .. } | Stmt::Case { stmt, .. } | Stmt::Default { stmt, .. } => {
+                self.collect_local_names_from_stmt(stmt);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_local_names_from_expr(&mut self, expr: &Expr) {
+        if let ExprKind::StmtExpr(c) = &expr.kind {
+            self.collect_local_names_recursive(c);
+        }
+        // 他の式ノードに含まれる StmtExpr は普通存在しない（C 文法上）が、
+        // 念のため簡易的に再帰しておく
+        match &expr.kind {
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Assign { lhs, rhs, .. }
+            | ExprKind::Comma { lhs, rhs } => {
+                self.collect_local_names_from_expr(lhs);
+                self.collect_local_names_from_expr(rhs);
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                self.collect_local_names_from_expr(cond);
+                self.collect_local_names_from_expr(then_expr);
+                self.collect_local_names_from_expr(else_expr);
+            }
+            ExprKind::Cast { expr: e, .. }
+            | ExprKind::AddrOf(e) | ExprKind::Deref(e)
+            | ExprKind::UnaryPlus(e) | ExprKind::UnaryMinus(e)
+            | ExprKind::BitNot(e) | ExprKind::LogNot(e)
+            | ExprKind::PreInc(e) | ExprKind::PreDec(e)
+            | ExprKind::PostInc(e) | ExprKind::PostDec(e)
+            | ExprKind::Sizeof(e)
+            | ExprKind::Member { expr: e, .. } | ExprKind::PtrMember { expr: e, .. } => {
+                self.collect_local_names_from_expr(e);
+            }
+            ExprKind::Call { func, args } => {
+                self.collect_local_names_from_expr(func);
+                for a in args { self.collect_local_names_from_expr(a); }
+            }
+            ExprKind::Index { expr: e, index } => {
+                self.collect_local_names_from_expr(e);
+                self.collect_local_names_from_expr(index);
+            }
+            _ => {}
         }
     }
 
@@ -4494,12 +4600,9 @@ impl<'a> RustCodegen<'a> {
             }
         }
 
-        // 本体のローカル変数宣言もスコープに追加
-        for item in &func_def.body.items {
-            if let BlockItem::Decl(decl) = item {
-                self.collect_decl_names(decl);
-            }
-        }
+        // 本体のローカル変数宣言もスコープに追加（ネストした compound、
+        // StmtExpr、for ループ初期化、すべての block レベルを再帰走査）
+        self.collect_local_names_recursive(&func_def.body);
 
         // THX 依存性を判定
         let is_thx_dependent = self.is_inline_fn_thx_dependent(&func_def.declarator.derived);

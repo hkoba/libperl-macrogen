@@ -1425,27 +1425,11 @@ impl MacroInferContext {
             for called_fn in called_fns {
                 let fn_name = interner.get(called_fn);
 
-                // マクロとして存在する場合はOK
-                if macro_names.contains(&called_fn) {
-                    continue;
-                }
+                if macro_names.contains(&called_fn) { continue; }
+                if bindings_fns.contains(fn_name) { continue; }
+                if inline_fn_dict.get(called_fn).is_some() { continue; }
+                if builtin_fns.contains(fn_name) { continue; }
 
-                // bindings.rs に存在する場合はOK
-                if bindings_fns.contains(fn_name) {
-                    continue;
-                }
-
-                // inline 関数として存在する場合はOK
-                if inline_fn_dict.get(called_fn).is_some() {
-                    continue;
-                }
-
-                // ビルトイン関数の場合はOK
-                if builtin_fns.contains(fn_name) {
-                    continue;
-                }
-
-                // それ以外は利用不可
                 has_unavailable = true;
                 break;
             }

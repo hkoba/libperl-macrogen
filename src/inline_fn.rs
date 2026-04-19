@@ -75,10 +75,18 @@ impl InlineFnDict {
 
     /// FunctionDef から inline 関数を収集
     ///
+    /// `inline` または `static`（内部リンケージ）の関数を対象とする。
+    /// `STATIC` (= `static`) のみで `inline` でない関数も翻訳単位ローカルなため
+    /// Rust 側に独自に持つ意味論的問題はない（`bodies_by_type` 配列と同じ理屈）。
+    /// 例: `perlstatic.h` の `Perl_croak_memory_wrap` (STATIC void) を取り込む
+    /// ことで、これを呼ぶ inline 関数 (`Perl_newSV_type` 等) のカスケード解消に
+    /// 寄与する。
+    ///
     /// assert/assert_ 呼び出しを Assert 式に変換してから保存する。
     /// 関数呼び出し先（called_functions）も同時に収集する。
     pub fn collect_from_function_def(&mut self, func_def: &FunctionDef, interner: &StringInterner) {
-        if !func_def.specs.is_inline {
+        let is_static = func_def.specs.storage == Some(crate::ast::StorageClass::Static);
+        if !func_def.specs.is_inline && !is_static {
             return;
         }
 
