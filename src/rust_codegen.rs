@@ -4422,6 +4422,15 @@ impl<'a> RustCodegen<'a> {
             let mut r_expr = self.build_syn_expr(rhs, info);
             // プレーン Assign のみ: LHS 型に合わせて整数幅キャスト挿入
             if op == AssignOp::Assign {
+                // 整数リテラル 0/1 を float LHS に代入 → `0.0` / `1.0` に変換
+                if let Some(ref lut) = lhs_ut {
+                    if lut.is_float() {
+                        if let ExprKind::IntLit(n) = &rhs.kind {
+                            r_expr = syn::parse_str(&format!("{}.0", n))
+                                .unwrap_or_else(|_| int_lit(0));
+                        }
+                    }
+                }
                 if let Some(ref lut) = lhs_ut {
                     if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
                         let ls = lut.to_rust_string();
@@ -4661,6 +4670,15 @@ impl<'a> RustCodegen<'a> {
             let mut r_syn = self.build_syn_expr(rhs, info);
             // 整数幅キャスト
             if *op == AssignOp::Assign {
+                // 整数リテラル 0/1 を float LHS に代入 → `0.0` / `1.0`
+                if let Some(ref lut) = lhs_ut {
+                    if lut.is_float() {
+                        if let ExprKind::IntLit(n) = &rhs.kind {
+                            r_syn = syn::parse_str(&format!("{}.0", n))
+                                .unwrap_or_else(|_| int_lit(0));
+                        }
+                    }
+                }
                 if let Some(ref lut) = lhs_ut {
                     if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
                         let ls = lut.to_rust_string();
