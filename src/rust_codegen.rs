@@ -416,6 +416,89 @@ fn best_constraint_for_macro_param(
     best.map(|(t, _)| t.clone())
 }
 
+/// `Expr` を再帰的に走査し、`ExprKind::Ident(name)` のうち `subs` に
+/// マッチするものを `subs[name]` のクローンで置換する。
+///
+/// 用途: 自家生成マクロの本体式に対し、`(param_name → arg_expr)` の
+/// 対応で alpha 置換を行う（C プリプロセッサの token 置換相当）。
+/// `&MACRO(args)` を `&<inlined_body>` に展開するために使う。
+fn substitute_idents(expr: &mut Expr, subs: &HashMap<InternedStr, &Expr>) {
+    if let ExprKind::Ident(name) = &expr.kind {
+        if let Some(replacement) = subs.get(name) {
+            *expr = (*replacement).clone();
+            return;
+        }
+    }
+    match &mut expr.kind {
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_)
+        | ExprKind::Alignof(_) => {}
+        ExprKind::Index { expr: e, index } => {
+            substitute_idents(e, subs);
+            substitute_idents(index, subs);
+        }
+        ExprKind::Call { func, args } => {
+            substitute_idents(func, subs);
+            for arg in args {
+                substitute_idents(arg, subs);
+            }
+        }
+        ExprKind::Member { expr: e, .. }
+        | ExprKind::PtrMember { expr: e, .. }
+        | ExprKind::PostInc(e)
+        | ExprKind::PostDec(e)
+        | ExprKind::PreInc(e)
+        | ExprKind::PreDec(e)
+        | ExprKind::AddrOf(e)
+        | ExprKind::Deref(e)
+        | ExprKind::UnaryPlus(e)
+        | ExprKind::UnaryMinus(e)
+        | ExprKind::BitNot(e)
+        | ExprKind::LogNot(e)
+        | ExprKind::Sizeof(e)
+        | ExprKind::Cast { expr: e, .. } => substitute_idents(e, subs),
+        ExprKind::Binary { lhs, rhs, .. }
+        | ExprKind::Assign { lhs, rhs, .. }
+        | ExprKind::Comma { lhs, rhs } => {
+            substitute_idents(lhs, subs);
+            substitute_idents(rhs, subs);
+        }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            substitute_idents(cond, subs);
+            substitute_idents(then_expr, subs);
+            substitute_idents(else_expr, subs);
+        }
+        ExprKind::Assert { condition, .. } => substitute_idents(condition, subs),
+        ExprKind::MacroCall { args, expanded, .. } => {
+            for arg in args {
+                substitute_idents(arg, subs);
+            }
+            substitute_idents(expanded, subs);
+        }
+        ExprKind::BuiltinCall { args, .. } => {
+            for arg in args {
+                if let crate::ast::BuiltinArg::Expr(e) = arg {
+                    substitute_idents(e, subs);
+                }
+            }
+        }
+        ExprKind::CompoundLit { init, .. } => {
+            for item in init {
+                if let crate::ast::Initializer::Expr(e) = &mut item.init {
+                    substitute_idents(e, subs);
+                }
+            }
+        }
+        // StmtExpr 内部は文を含むので alpha 置換は当面非対応（保守的）
+        ExprKind::StmtExpr(_) => {}
+    }
+}
+
 /// unsigned 型へのキャスト式かどうか判定
 /// 例: "(x as usize)", "(x as u32)"
 fn is_unsigned_cast_expr(expr_str: &str) -> bool {
@@ -2571,6 +2654,48 @@ impl<'a> RustCodegen<'a> {
     // syn::Expr ベースの式構築 (Step 1+)
     // ================================================================
 
+    /// `&MACRO(args)` の AddrOf inner が「自家生成マクロへの Call」で、
+    /// 呼び出し先が **Expression body**（lvalue chain として展開可能）なら、
+    /// 本体式を引数で alpha 置換した `Expr` を返す。
+    ///
+    /// 用途: `&GvSV(gv)` のような C 慣用句で、Rust 側の wrap 関数が
+    /// temporary を返すため `&raw mut <fn_call>` が E0745 になる問題の回避。
+    /// マクロ本体を inline 展開して `&raw mut (*GvGP(gv)).gp_sv` のような
+    /// 真の place 式に変換する。
+    fn try_inline_call_for_addrof(&self, inner: &Expr) -> Option<Expr> {
+        let (callee_id, args) = match &inner.kind {
+            ExprKind::Call { func, args } => match &func.kind {
+                ExprKind::Ident(name) => (*name, args),
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        let callee_info = self.macro_ctx.macros.get(&callee_id)?;
+        let body = match &callee_info.parse_result {
+            ParseResult::Expression(e) => e,
+            _ => return None,
+        };
+
+        // THX 依存だと第一引数が my_perl で arg と zip がずれる → 当面非対応
+        if callee_info.is_thx_dependent {
+            return None;
+        }
+        if callee_info.params.len() != args.len() {
+            return None;
+        }
+
+        // param_name → arg_expr の置換マップを構築
+        let mut subs: HashMap<InternedStr, &Expr> = HashMap::new();
+        for (param, arg) in callee_info.params.iter().zip(args.iter()) {
+            subs.insert(param.name, arg);
+        }
+
+        let mut inlined = (**body).clone();
+        substitute_idents(&mut inlined, &subs);
+        Some(inlined)
+    }
+
     /// C AST の式を syn::Expr に変換する（macro/inline 統一）
     ///
     /// `info` が Some の場合はマクロ用、None の場合は inline 用。
@@ -2648,6 +2773,15 @@ impl<'a> RustCodegen<'a> {
                 deref(e)
             }
             ExprKind::AddrOf(inner) => {
+                // C の `&MACRO(args)` パターン: マクロが lvalue を返すことを
+                // 期待する C コード。Rust では MACRO が unsafe fn として
+                // wrap されるため戻り値が temporary になり `&raw mut <call>`
+                // が E0745 を起こす。callee の本体式を inline 展開して
+                // lvalue 性を回復する。
+                if let Some(inlined) = self.try_inline_call_for_addrof(inner) {
+                    let e = self.build_syn_expr(&inlined, info);
+                    return addr_of_mut(e);
+                }
                 let e = self.build_syn_expr(inner, info);
                 addr_of_mut(e)
             }
@@ -2760,8 +2894,38 @@ impl<'a> RustCodegen<'a> {
                 })
             }
             ExprKind::Cast { type_name, expr: inner } => {
-                let e = self.build_syn_expr(inner, info);
                 let t = self.type_name_to_rust(type_name);
+                // C の const-cast パターン `(T*)&place`:
+                // place が `*const` ポインタ deref 経由（例: `(c)->field` で
+                // `c: *const PERL_CONTEXT`）だと `&raw mut place` が E0596
+                // になるため、`&raw const place as *mut T` で const を剥がす。
+                // place が元から mut でも結果は等価（raw pointer の as cast は
+                // mut/const を問わない）。
+                if (t.starts_with("*mut ") || t.starts_with("*const "))
+                    && matches!(&inner.kind, ExprKind::AddrOf(_))
+                {
+                    if let ExprKind::AddrOf(addrof_inner) = &inner.kind {
+                        // AddrOf の inner が「callee マクロ呼び出し」なら inline 展開
+                        let inlined_owned;
+                        let inner_to_build: &Expr =
+                            if let Some(inlined) = self.try_inline_call_for_addrof(addrof_inner) {
+                                inlined_owned = inlined;
+                                &inlined_owned
+                            } else {
+                                addrof_inner
+                            };
+                        let inner_e = self.build_syn_expr(inner_to_build, info);
+                        let raw_const = syn::Expr::RawAddr(syn::ExprRawAddr {
+                            attrs: vec![],
+                            and_token: Default::default(),
+                            raw: Default::default(),
+                            mutability: syn::PointerMutability::Const(Default::default()),
+                            expr: Box::new(inner_e),
+                        });
+                        return insert_cast(raw_const, parse_type(&t));
+                    }
+                }
+                let e = self.build_syn_expr(inner, info);
                 if t == "()" {
                     // void キャスト → 式の値を捨てる
                     let e_str = expr_to_string(&e);

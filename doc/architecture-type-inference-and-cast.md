@@ -277,20 +277,67 @@ save_clearsv((SV**)&sv);
 
 ```rust
 // Rust 出力 (現行)
-save_clearsv(my_perl, &raw mut sv as *mut *mut SV);  // E0606 回避
+save_clearsv(my_perl, (&raw const sv) as *mut *mut SV);  // E0606 回避
 
 // 旧出力
 save_clearsv(my_perl, (&mut sv) as *mut *mut SV);    // E0606 (invalid cast)
 ```
 
-#### 既知の限界: マクロ wrap された lvalue
+#### Cast(AddrOf) は `&raw const X as *mut T` で出力
 
-C マクロが lvalue を返す（例: `GvSV(gv)` = `((GV*)gv)->gp_sv`）場合、
-我々の codegen は GvSV を `unsafe fn ... -> *mut SV` として出力するため
-戻り値は **temporary value**。`&GvSV(gv)` を `&raw mut GvSV(gv)` に
-変換しても E0745（cannot take address of a temporary）になる。
-これは「マクロ wrap 関数の lvalue 性が失われる」より深い問題で、
-別タスクで対応する。例: `CxITERVAR` の中央枝。
+`(T*)&place` 形式の C const-cast パターン（`build_syn_expr` の Cast 内部で
+`inner` が `AddrOf` かつ target が `*mut/*const`）は **`&raw const X as *mut T`**
+を生成する。`place` が `*const` ポインタ deref 経由（例: `c: *const PERL_CONTEXT`
+の `(c)->...gv`）でも E0596（`cannot borrow as mutable, behind *const`）に
+ならない。`place` が元から mut でも結果は等価で、raw pointer の `as` cast は
+mut/const を問わず通る。
+
+```c
+// C: const-cast パターン
+(SV**)&(c)->blk_loop.itervar_u.gv  // c: const PERL_CONTEXT *
+```
+
+```rust
+// 出力
+(&raw const (*c).cx_u.cx_blk.blk_u.blku_loop.itervar_u.gv) as *mut *mut SV
+```
+
+#### `&MACRO(args)` の inline 展開
+
+C で `&MACRO(args)` は token 置換で `&<inlined_body>` になり、
+MACRO が lvalue chain を返す慣用句がある（例: `&GvSV(gv)`）。
+我々の codegen は MACRO を `unsafe fn -> *mut T` で wrap するため、
+そのままだと `&raw mut MACRO(args)` が **temporary のアドレス取得 (E0745)**
+になる。
+
+これを回避するため `build_syn_expr` の `AddrOf` ハンドラは
+`try_inline_call_for_addrof` を呼び、`inner` が「自家生成マクロへの Call」で
+かつ callee が **Expression body** の場合に **本体式を引数で alpha 置換**
+してから AddrOf を被せる。`substitute_idents` ヘルパが Ident → Expr の
+置換を再帰的に行う（C プリプロセッサの token 置換相当）。
+
+```c
+// C
+&GvSV((c)->blk_loop.itervar_u.gv)
+```
+
+```rust
+// 旧出力 (E0745)
+&raw mut GvSV((*c).cx_u.cx_blk.blk_u.blku_loop.itervar_u.gv as *const SV)
+
+// 現行: GvSV body `(*GvGP(gv)).gp_sv` を inline 展開
+&raw mut (*GvGP((*c).cx_u.cx_blk.blk_u.blku_loop.itervar_u.gv as *const SV)).gp_sv
+```
+
+`(*GvGP(...))` は raw pointer deref で place 式になるため、
+`.gp_sv` field の場所を取れる。
+
+##### 制限事項
+
+- callee が `ParseResult::Expression(_)` でない（`Statement` や `Unparseable`）場合は inline 不可
+- callee が **THX 依存**（`my_perl` 自動挿入）の場合は引数 zip がずれるため当面非対応
+- StmtExpr 内部の文中での Ident 置換は当面非対応（保守的に skip）
+- 引数に副作用があると inline 展開で複数評価される（C マクロと同じ）
 
 ## 括弧制御
 
