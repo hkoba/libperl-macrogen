@@ -61,8 +61,12 @@ pub fn missing_struct_defs<'a>(
 ///
 /// ビットフィールド群は連続グループを `_bitfield_<n>: u8` に統合する。
 /// 1 byte (8 bit) を超えるグループは現状非対応で warning コメントを出力。
-pub fn format_struct(def: &StructDef, interner: &StringInterner) -> String {
+/// 第 2 戻り値は当該 struct に生成した bit-field getter メソッド名の集合。
+/// 呼出側でこれを `bitfield_methods` 集合にマージすると、codegen 時に
+/// フィールド参照を `.name()`、代入を `.set_name(val)` に変換できる。
+pub fn format_struct(def: &StructDef, interner: &StringInterner) -> (String, HashSet<String>) {
     let mut buf = String::new();
+    let mut bitfield_accessors: HashSet<String> = HashSet::new();
     buf.push_str("#[repr(C)]\n");
     buf.push_str("#[derive(Copy, Clone)]\n");
     buf.push_str(&format!(
@@ -70,6 +74,9 @@ pub fn format_struct(def: &StructDef, interner: &StringInterner) -> String {
         if def.is_union { "union" } else { "struct" },
         interner.get(def.name)
     ));
+
+    // bitfield 群ごとの情報（impl 生成用）: (group_idx, pack_ty, [(name, shift, width)])
+    let mut bitfield_groups: Vec<(usize, &'static str, Vec<(String, u32, u32)>)> = Vec::new();
 
     // bitfield 連続グループを検出
     let mut i = 0;
@@ -85,7 +92,7 @@ pub fn format_struct(def: &StructDef, interner: &StringInterner) -> String {
                 i += 1;
             }
             // packed 型を選択
-            let pack_ty = if total_width <= 8 { "u8" }
+            let pack_ty: &'static str = if total_width <= 8 { "u8" }
                 else if total_width <= 16 { "u16" }
                 else if total_width <= 32 { "u32" }
                 else { "u64" };
@@ -100,6 +107,15 @@ pub fn format_struct(def: &StructDef, interner: &StringInterner) -> String {
                 "    pub _bitfield_{}: {},\n",
                 bitfield_group_idx, pack_ty
             ));
+            // impl 生成用情報を収集
+            let mut shift = 0u32;
+            let mut entries: Vec<(String, u32, u32)> = Vec::new();
+            for bm in &def.members[group_start..i] {
+                let w = bm.bitfield_width.unwrap();
+                entries.push((interner.get(bm.name).to_string(), shift, w));
+                shift += w;
+            }
+            bitfield_groups.push((bitfield_group_idx, pack_ty, entries));
             bitfield_group_idx += 1;
         } else {
             buf.push_str(&format_member_line(m, interner));
@@ -108,7 +124,43 @@ pub fn format_struct(def: &StructDef, interner: &StringInterner) -> String {
     }
 
     buf.push_str("}\n");
-    buf
+
+    // Bitfield の getter / setter を impl ブロックで emit する。
+    // bindgen と同名（`fn <name>(&self)` / `fn set_<name>(&mut self, val)`）にして
+    // codegen 側の bitfield-method 判定にそのまま乗せる。
+    if !bitfield_groups.is_empty() {
+        buf.push_str(&format!("impl {} {{\n", interner.get(def.name)));
+        for (gidx, pack_ty, entries) in &bitfield_groups {
+            for (name, shift, width) in entries {
+                // Rust キーワードは getter 名として使えないため skip
+                if SKIP_NAMES_KEYWORDS.contains(&name.as_str()) {
+                    continue;
+                }
+                let mask = if *width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                // getter: ((self._bitfield_N >> shift) & mask) as pack_ty
+                buf.push_str(&format!(
+                    "    #[inline]\n    pub const fn {name}(&self) -> {pack_ty} {{\n\
+                     \x20       ((self._bitfield_{gidx} >> {shift}) & {mask}) as {pack_ty}\n\
+                     \x20   }}\n",
+                    name = name, pack_ty = pack_ty, gidx = gidx,
+                    shift = shift, mask = mask
+                ));
+                // setter: clear bits then OR new value
+                buf.push_str(&format!(
+                    "    #[inline]\n    pub fn set_{name}(&mut self, val: {pack_ty}) {{\n\
+                     \x20       self._bitfield_{gidx} = (self._bitfield_{gidx} & !(({mask} as {pack_ty}) << {shift}))\n\
+                     \x20           | ((val & {mask} as {pack_ty}) << {shift});\n\
+                     \x20   }}\n",
+                    name = name, pack_ty = pack_ty, gidx = gidx,
+                    shift = shift, mask = mask
+                ));
+                bitfield_accessors.insert(name.clone());
+            }
+        }
+        buf.push_str("}\n");
+    }
+
+    (buf, bitfield_accessors)
 }
 
 /// 単一メンバー行を整形（非 bitfield）。flex array は `[T; 0]` に置換。
@@ -144,6 +196,10 @@ pub struct EmittedStructs {
     pub emitted_struct_names: HashSet<String>,
     /// 出力した typedef alias 名（左辺）
     pub emitted_typedef_names: HashSet<String>,
+    /// 自動生成した struct ごとの bit-field getter 名集合。codegen 側で
+    /// `bitfield_methods` にマージすると、フィールド参照が自動的に
+    /// `.name()` / `.set_name(val)` に書き換えられる。
+    pub bitfield_methods: std::collections::HashMap<String, HashSet<String>>,
 }
 
 /// `missing_struct_defs` 全件を 1 つの Rust ソース文字列にする。
@@ -156,20 +212,32 @@ pub fn emit_missing_structs(
     let defs = missing_struct_defs(fields_dict, rust_decl_dict, interner);
     let mut emitted_struct_names: HashSet<String> = HashSet::new();
     let mut emitted_typedef_names: HashSet<String> = HashSet::new();
+    let mut bitfield_methods: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
     if defs.is_empty() {
-        return EmittedStructs { source: String::new(), emitted_struct_names, emitted_typedef_names };
+        return EmittedStructs {
+            source: String::new(),
+            emitted_struct_names,
+            emitted_typedef_names,
+            bitfield_methods,
+        };
     }
     let mut buf = String::new();
     buf.push_str("// === Auto-generated struct definitions ===\n");
     buf.push_str("// Structs/unions declared in C headers but absent from bindings.rs\n");
     buf.push_str("// (typically static-inline-only headers like sv_inline.h).\n\n");
     for (name, def) in defs {
-        let formatted = format_struct(def, interner);
-        // syn でパース可能か検証（関数ポインタ未対応等の broken 出力を弾く）
-        if syn::parse_str::<syn::Item>(&formatted).is_ok() {
+        let (formatted, accessors) = format_struct(def, interner);
+        // `struct ... impl ...` 連結は syn::Item 単体では parse できないので
+        // File としてパース検証する。
+        if syn::parse_str::<syn::File>(&formatted).is_ok() {
             buf.push_str(&formatted);
             buf.push('\n');
-            emitted_struct_names.insert(interner.get(name).to_string());
+            let struct_name = interner.get(name).to_string();
+            emitted_struct_names.insert(struct_name.clone());
+            if !accessors.is_empty() {
+                bitfield_methods.insert(struct_name, accessors);
+            }
         } else {
             buf.push_str(&format!(
                 "// [SKIPPED] struct/union {} — failed to format as valid Rust\n\n",
@@ -207,5 +275,5 @@ pub fn emit_missing_structs(
         }
         buf.push('\n');
     }
-    EmittedStructs { source: buf, emitted_struct_names, emitted_typedef_names }
+    EmittedStructs { source: buf, emitted_struct_names, emitted_typedef_names, bitfield_methods }
 }

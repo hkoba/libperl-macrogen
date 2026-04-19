@@ -4109,6 +4109,30 @@ impl<'a> RustCodegen<'a> {
             r_expr
         };
 
+        // ビットフィールドセッター: LHS が `.getter()` 形式の MethodCall
+        // （bitfield_methods 由来）だった場合、`set_getter(val)` 呼び出しに
+        // 書き換える。`a.f() = v` は E0070 (invalid lvalue) になるため。
+        if op == AssignOp::Assign {
+            if let syn::Expr::MethodCall(mc) = &l {
+                if mc.args.is_empty() {
+                    let method_name = mc.method.to_string();
+                    if self.is_bitfield_method(&method_name) {
+                        let setter_name = format!("set_{}", method_name);
+                        let setter_call = method_call(
+                            (*mc.receiver).clone(),
+                            &setter_name,
+                            vec![r],
+                        );
+                        // block_with_value: { setter(); getter() } を返し
+                        // 式として getter の値を評価可能にする（既存 Assign
+                        // と同じく `{ a = v; a }` の形）
+                        let stmt = semi_stmt(setter_call);
+                        return block_with_value(vec![stmt], l);
+                    }
+                }
+            }
+        }
+
         // op に応じた文を構築し、ブロックでラップ
         let stmt: syn::Stmt = match op {
             AssignOp::Assign => semi_stmt(assign_expr(l.clone(), r)),
@@ -5279,6 +5303,17 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
         for n in &missing_structs.emitted_typedef_names {
             known_symbols.insert(n.clone());
+        }
+
+        // 自動生成 struct の bit-field アクセサを bindings_info にマージ。
+        // これにより `is_bitfield_method` がそれらの getter 名を認識し、
+        // `.name` → `.name()` / `.name = val` → `.set_name(val)` の書換が効く。
+        for (struct_name, methods) in &missing_structs.bitfield_methods {
+            self.bindings_info
+                .bitfield_methods
+                .entry(struct_name.clone())
+                .or_default()
+                .extend(methods.iter().cloned());
         }
         // global_const_dict 由来の static 配列は既に KnownSymbols::new 内で
         // 登録済みなので追加不要
