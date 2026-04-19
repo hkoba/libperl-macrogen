@@ -1572,6 +1572,13 @@ impl<'a> RustCodegen<'a> {
                         return Some(c.uty.clone());
                     }
                 }
+                // enum バリアント（C 側 EnumDict 由来）。bindings.rs では nominal
+                // 型の variant として現れるため、属する enum 名を Named 型として
+                // 返す。比較・ビット演算等での enum→int キャスト挿入で利用。
+                if let Some(enum_name) = self.enum_dict.get_enum_for_variant(*name) {
+                    let enum_str = self.interner.get(enum_name).to_string();
+                    return Some(UnifiedType::Named(enum_str));
+                }
                 None
             }
             ExprKind::Cast { type_name, .. } => {
@@ -1986,6 +1993,37 @@ impl<'a> RustCodegen<'a> {
         self.rust_decl_dict?.fns.get(func_name).and_then(|f| {
             f.uret_ty.as_ref()
         })
+    }
+
+    /// `UnifiedType` が bindings.rs 上の Rust enum 型を指すかを判定。
+    /// （C 側では int 互換だが、Rust 側は nominal 型なので、整数演算には
+    /// `as <int>` キャストが必要になる）
+    fn is_rust_enum_type(&self, ut: &UnifiedType) -> bool {
+        if let UnifiedType::Named(name) = ut {
+            if let Some(dict) = self.rust_decl_dict {
+                return dict.enums.contains(name.as_str());
+            }
+        }
+        false
+    }
+
+    /// 必要なら enum→int キャストを挿入。
+    /// `self_ut` が Rust enum 型で `target_int_ty` が整数型なら
+    /// `syn_expr as <target_int_ty>` を返す。それ以外は `syn_expr` をそのまま返す。
+    fn maybe_cast_enum_to_int(
+        &self,
+        syn_expr: syn::Expr,
+        self_ut: Option<&UnifiedType>,
+        target_int_ty: &str,
+    ) -> syn::Expr {
+        if let Some(ut) = self_ut {
+            if self.is_rust_enum_type(ut) {
+                if normalize_integer_type(target_int_ty).is_some() {
+                    return crate::syn_codegen::cast_syn_expr(syn_expr, target_int_ty);
+                }
+            }
+        }
+        syn_expr
     }
 
     /// 式が bool を返すかどうかを判定（関数の戻り値型も考慮）
@@ -3018,7 +3056,7 @@ impl<'a> RustCodegen<'a> {
                     });
                 }
 
-                // 型キャスト挿入（整数幅、bool→int、float↔int）
+                // 型キャスト挿入（整数幅、bool→int、float↔int、enum→int）
                 let lt = self.infer_expr_type_unified(lhs, info);
                 let rt = self.infer_expr_type_unified(rhs, info);
                 if let (Some(lut), Some(rut)) = (&lt, &rt) {
@@ -3029,6 +3067,20 @@ impl<'a> RustCodegen<'a> {
                             right: Box::new(right),
                         })
                     };
+                    // enum → integer キャスト（C 側は int 互換だが Rust enum は
+                    // nominal 型なので比較・ビット演算で `as <int>` が必要）
+                    let l_is_enum = self.is_rust_enum_type(lut);
+                    let r_is_enum = self.is_rust_enum_type(rut);
+                    if l_is_enum && !r_is_enum {
+                        let rs = rut.to_rust_string();
+                        let target = normalize_integer_type(&rs).unwrap_or("u32");
+                        return make_binary(cast_syn_expr(l, target), r);
+                    }
+                    if r_is_enum && !l_is_enum {
+                        let ls = lut.to_rust_string();
+                        let target = normalize_integer_type(&ls).unwrap_or("u32");
+                        return make_binary(l, cast_syn_expr(r, target));
+                    }
                     // bool → integer キャスト
                     if rut.is_bool() {
                         let ls = lut.to_rust_string();
@@ -3435,6 +3487,13 @@ impl<'a> RustCodegen<'a> {
                               actual_ty: Option<&str>, expected_ty: &str) -> syn::Expr {
         use crate::syn_codegen::cast_syn_expr;
         if let Some(actual) = actual_ty {
+            // enum → integer キャスト（actual が Rust enum で expected が整数型）
+            let actual_ut = UnifiedType::from_rust_str(actual);
+            if self.is_rust_enum_type(&actual_ut) {
+                if let Some(target) = normalize_integer_type(expected_ty) {
+                    return cast_syn_expr(arg_expr, target);
+                }
+            }
             let na = normalize_integer_type(actual);
             let ne = normalize_integer_type(expected_ty);
             if let (Some(a), Some(e)) = (na, ne) {
@@ -3772,6 +3831,12 @@ impl<'a> RustCodegen<'a> {
         let Some(expr_ut) = self.infer_expr_type_unified(expr, info) else { return syn_expr };
         let ret_s = ret_ut.to_rust_string();
         let expr_s = expr_ut.to_rust_string();
+        // enum → integer 戻り値キャスト
+        if self.is_rust_enum_type(&expr_ut) {
+            if let Some(nr) = normalize_integer_type(&ret_s) {
+                return crate::syn_codegen::cast_syn_expr(syn_expr, nr);
+            }
+        }
         if let (Some(nr), Some(ne)) = (normalize_integer_type(&ret_s), normalize_integer_type(&expr_s)) {
             if !integer_types_compatible(nr, ne) {
                 return crate::syn_codegen::cast_syn_expr(syn_expr, nr);
@@ -3808,7 +3873,12 @@ impl<'a> RustCodegen<'a> {
                     if let Some(rut) = self.infer_expr_type_unified(rhs, info) {
                         let ls = lut.to_rust_string();
                         let rs = rut.to_rust_string();
-                        if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
+                        // enum → integer 代入キャスト
+                        if self.is_rust_enum_type(&rut) {
+                            if let Some(nl) = normalize_integer_type(&ls) {
+                                r_syn = cast_syn_expr(r_syn, nl);
+                            }
+                        } else if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
                             if !integer_types_compatible(nl, nr) {
                                 r_syn = cast_syn_expr(r_syn, nl);
                             }
