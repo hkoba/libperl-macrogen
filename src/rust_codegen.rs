@@ -3113,6 +3113,10 @@ impl<'a> RustCodegen<'a> {
                 })
             }
             ExprKind::LogNot(inner) => {
+                // C の `!"literal"` は 0 (false)。文字列リテラルは常に非 NULL。
+                if matches!(&inner.kind, ExprKind::StringLit(_)) {
+                    return syn::parse_str("false").unwrap_or_else(|_| int_lit(0));
+                }
                 let e = self.build_syn_expr(inner, info);
                 let bool_e = if self.is_bool_expr_with_dict(inner) {
                     e
@@ -3354,6 +3358,20 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
 
+                // C 文字列リテラル vs 0 比較 → 常に非 NULL (c"..." は &CStr)
+                //   `c"..." == 0` → false / `c"..." != 0` → true
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    let s_eq = |s: &ExprKind| matches!(s, ExprKind::StringLit(_));
+                    let lhs_is_str = s_eq(&lhs.kind);
+                    let rhs_is_str = s_eq(&rhs.kind);
+                    if (lhs_is_str && is_null_literal(rhs))
+                       || (rhs_is_str && is_null_literal(lhs))
+                    {
+                        return syn::parse_str(
+                            if *op == BinOp::Eq { "false" } else { "true" }
+                        ).unwrap_or_else(|_| int_lit(0));
+                    }
+                }
                 // ポインタ == 0 / != 0 → .is_null()
                 if matches!(op, BinOp::Eq | BinOp::Ne) {
                     if is_null_literal(rhs) {
@@ -3517,6 +3535,27 @@ impl<'a> RustCodegen<'a> {
                 // 型キャスト挿入（整数幅、bool→int、float↔int、enum→int）
                 let lt = self.infer_expr_type_unified(lhs, info);
                 let rt = self.infer_expr_type_unified(rhs, info);
+
+                // 片側だけ判定可能でも enum は必ず integer にキャストする。
+                // `cs << 7` のように rhs が IntLit Binary で型推論 None の
+                // ケースを拾う（enum 単独で Shl/BitOr 等が定義されていない）。
+                let make_binary_op = |left: syn::Expr, right: syn::Expr| -> syn::Expr {
+                    syn::Expr::Binary(syn::ExprBinary {
+                        attrs: vec![], left: Box::new(left),
+                        op: crate::syn_codegen::to_syn_binop(*op),
+                        right: Box::new(right),
+                    })
+                };
+                match (&lt, &rt) {
+                    (Some(lut), None) if self.is_rust_enum_type(lut) => {
+                        return make_binary_op(cast_syn_expr(l, "u32"), r);
+                    }
+                    (None, Some(rut)) if self.is_rust_enum_type(rut) => {
+                        return make_binary_op(l, cast_syn_expr(r, "u32"));
+                    }
+                    _ => {}
+                }
+
                 if let (Some(lut), Some(rut)) = (&lt, &rt) {
                     let make_binary = |left: syn::Expr, right: syn::Expr| -> syn::Expr {
                         syn::Expr::Binary(syn::ExprBinary {
@@ -3932,6 +3971,14 @@ impl<'a> RustCodegen<'a> {
                 let actual_ut = self.infer_expr_type_unified(arg, info);
                 let actual_ty = actual_ut.as_ref().map(|ut| ut.to_rust_string());
                 let expected_ty = expected_ut.to_rust_string();
+                // C 文字列リテラル (`c"..."`, &CStr 型) を callee の `*const c_char` 等
+                // に変換する際に `.as_ptr()` を付加。これを忘れると
+                // `expected *const i8, found &CStr` エラーになる。
+                if matches!(&arg.kind, ExprKind::StringLit(_))
+                    && expected_ut.is_pointer()
+                {
+                    syn_expr = crate::syn_codegen::method_call(syn_expr, "as_ptr", vec![]);
+                }
                 syn_expr = self.cast_arg_syn_if_needed(syn_expr, actual_ty.as_deref(), &expected_ty);
             }
         }
@@ -4206,7 +4253,9 @@ impl<'a> RustCodegen<'a> {
                 }
             }
             AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign => {
-                // 整数幅が異なる場合 RHS を LHS 型にキャスト
+                // 整数幅が異なる場合 RHS を LHS 型にキャスト。
+                // RHS が enum (Named) の場合も LHS 整数型へキャストする
+                // (Rust enum は nominal 型で `|=` 等が直接働かない)。
                 let lt = &lhs_ut;
                 let rt = self.infer_expr_type_unified(rhs, info);
                 let r_final = {
@@ -4218,6 +4267,11 @@ impl<'a> RustCodegen<'a> {
                         let nl = normalize_integer_type(&ls);
                         let nr = normalize_integer_type(&rs);
                         if nl.is_some() && nr.is_some() && nl != nr {
+                            ret = cast_syn_expr(ret, nl.unwrap());
+                            casted = true;
+                        }
+                        // RHS が enum 型で LHS が整数 → `r as <lhs-int>`
+                        if !casted && self.is_rust_enum_type(rut) && nl.is_some() {
                             ret = cast_syn_expr(ret, nl.unwrap());
                             casted = true;
                         }
@@ -4375,6 +4429,9 @@ impl<'a> RustCodegen<'a> {
                     let nl = normalize_integer_type(&ls);
                     let nr = normalize_integer_type(&rs);
                     if nl.is_some() && nr.is_some() && nl != nr {
+                        r_syn = cast_syn_expr(r_syn, nl.unwrap());
+                    } else if self.is_rust_enum_type(rut) && nl.is_some() {
+                        // RHS が enum で LHS が整数 → `r as <lhs-int>`
                         r_syn = cast_syn_expr(r_syn, nl.unwrap());
                     }
                 } else if let (Some(lut), None) = (&lhs_ut, &rt) {
