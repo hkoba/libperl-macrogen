@@ -4342,6 +4342,19 @@ impl<'a> RustCodegen<'a> {
                                 r_expr = cast_syn_expr(r_expr, nl);
                             }
                         }
+                        // ポインタ const/mut 不一致 → LHS 型に明示キャスト
+                        else if lut.is_pointer() && rut.is_pointer()
+                            && lut.is_const_pointer() != rut.is_const_pointer()
+                        {
+                            r_expr = cast_syn_expr(r_expr, &ls);
+                        }
+                        // SV サブタイプ / void ポインタ間の変換
+                        else if lut.is_pointer() && rut.is_pointer()
+                            && ls != rs
+                            && is_sv_subtype_cast(&rut, lut)
+                        {
+                            r_expr = cast_syn_expr(r_expr, &ls);
+                        }
                     }
                 }
             }
@@ -4559,6 +4572,14 @@ impl<'a> RustCodegen<'a> {
                         // ポインタ const/mut 不一致 → LHS 型に明示キャスト
                         if lut.is_pointer() && rut.is_pointer()
                             && lut.is_const_pointer() != rut.is_const_pointer()
+                        {
+                            r_syn = cast_syn_expr(r_syn, &ls);
+                        }
+                        // SV サブタイプ / void ポインタ間の変換
+                        // (*sv_).sv_any = <XPVIV *> を受け入れるため)
+                        else if lut.is_pointer() && rut.is_pointer()
+                            && ls != rs
+                            && is_sv_subtype_cast(&rut, lut)
                         {
                             r_syn = cast_syn_expr(r_syn, &ls);
                         }
