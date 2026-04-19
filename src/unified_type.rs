@@ -347,8 +347,12 @@ impl UnifiedType {
             "u64" => Self::Int { signed: false, size: IntSize::LongLong },
             "i128" => Self::Int { signed: true, size: IntSize::Int128 },
             "u128" => Self::Int { signed: false, size: IntSize::Int128 },
-            "isize" => Self::Int { signed: true, size: IntSize::Long },
-            "usize" => Self::Int { signed: false, size: IntSize::Long },
+            // isize/usize は c_long/c_ulong と同じ 64bit だが Rust では別型。
+            // Int{Long} に詰めると to_rust_string で `c_long`/`c_ulong` に
+            // 戻ってしまい、比較・演算で「同じ型」と誤認される。
+            // Named にすることでラウンドトリップを保ち区別する。
+            "isize" => Self::Named("isize".to_string()),
+            "usize" => Self::Named("usize".to_string()),
 
             // 浮動小数点
             "c_float" | "f32" => Self::Float,
@@ -391,7 +395,15 @@ impl UnifiedType {
             Self::LongDouble => "c_double".to_string(), // Rust には long double がない
 
             Self::Pointer { inner, is_const } => {
-                let inner_str = inner.to_rust_string();
+                // void pointer (`Pointer { inner: Void }`) は Rust では
+                // `*mut c_void` / `*const c_void` と書く必要がある。
+                // `Self::Void` の to_rust_string は `()` を返すので、そのまま
+                // ラップすると `*mut ()` という invalid な型になる。
+                let inner_str = if matches!(inner.as_ref(), Self::Void) {
+                    "c_void".to_string()
+                } else {
+                    inner.to_rust_string()
+                };
                 if *is_const {
                     format!("*const {}", inner_str)
                 } else {

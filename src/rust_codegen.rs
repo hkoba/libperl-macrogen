@@ -1487,6 +1487,21 @@ impl<'a> RustCodegen<'a> {
     /// FieldsDict への参照を設定
     pub fn with_fields_dict(mut self, dict: &'a crate::fields_dict::FieldsDict) -> Self {
         self.fields_dict = Some(dict);
+        // bindings.rs に無い自動生成 struct (body_details 等) の
+        // フィールド型を field_type_map にマージし、Member 式の型推論で
+        // 利用できるようにする。bindings.rs 側で既に登録されている
+        // フィールドは優先する。
+        for (_name, def) in dict.iter_struct_defs() {
+            for m in &def.members {
+                let member_name = self.interner.get(m.name).to_string();
+                if self.field_type_map.contains_key(&member_name) {
+                    continue;
+                }
+                let rust_ty = m.type_repr.to_rust_string(self.interner);
+                self.field_type_map
+                    .insert(member_name, UnifiedType::from_rust_str(&rust_ty));
+            }
+        }
         self
     }
 
@@ -3284,7 +3299,11 @@ impl<'a> RustCodegen<'a> {
                 }
                 let e = self.build_syn_expr(inner, info);
                 let e_str = expr_to_string(&e);
-                syn::parse_str(&format!("std::mem::size_of_val(&{})", e_str))
+                // `&` 単項はフィールド/関数呼出より低優先なため、
+                // `&len + 1` は `(&len) + 1` と解釈される。
+                // 常に `&(expr)` と paren で包み、normalize_parens で
+                // 不要な括弧を除去する。
+                syn::parse_str(&format!("std::mem::size_of_val(&({}))", e_str))
                     .unwrap_or_else(|_| int_lit(0))
             }
             ExprKind::SizeofType(type_name) => {
