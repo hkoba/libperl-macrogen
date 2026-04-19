@@ -44,6 +44,42 @@ const LIBC_FUNCTIONS: &[&str] = &[
     "memset", "memchr", "memcpy", "memmove",
 ];
 
+/// 既知の libc 関数の引数型 (bindings.rs に登録されない関数を補完)。
+///
+/// 呼出側は `as *mut c_char` で渡しがちだが libc は `*mut c_void` を要求する。
+/// ハードコードした型を `get_callee_param_type_extended` 経由で引くと、
+/// 自動 as-cast (cast_arg_syn_if_needed の void-pointer 分岐) に乗る。
+fn libc_fn_param_type(func_name: &str, arg_index: usize) -> Option<UnifiedType> {
+    match (func_name, arg_index) {
+        // memset(void *s, int c, size_t n)
+        ("memset", 0) => Some(UnifiedType::from_rust_str("*mut c_void")),
+        ("memset", 1) => Some(UnifiedType::from_rust_str("c_int")),
+        ("memset", 2) => Some(UnifiedType::from_rust_str("usize")),
+        // memcpy(void *dest, const void *src, size_t n)
+        ("memcpy", 0) | ("memmove", 0) => Some(UnifiedType::from_rust_str("*mut c_void")),
+        ("memcpy", 1) | ("memmove", 1) => Some(UnifiedType::from_rust_str("*const c_void")),
+        ("memcpy", 2) | ("memmove", 2) => Some(UnifiedType::from_rust_str("usize")),
+        // memchr(const void *s, int c, size_t n)
+        ("memchr", 0) => Some(UnifiedType::from_rust_str("*const c_void")),
+        ("memchr", 1) => Some(UnifiedType::from_rust_str("c_int")),
+        ("memchr", 2) => Some(UnifiedType::from_rust_str("usize")),
+        // memcmp(const void *s1, const void *s2, size_t n)
+        ("memcmp", 0) | ("memcmp", 1) => Some(UnifiedType::from_rust_str("*const c_void")),
+        ("memcmp", 2) => Some(UnifiedType::from_rust_str("usize")),
+        // strcmp / strncmp: *const c_char
+        ("strcmp", 0) | ("strcmp", 1) | ("strncmp", 0) | ("strncmp", 1) =>
+            Some(UnifiedType::from_rust_str("*const c_char")),
+        ("strncmp", 2) => Some(UnifiedType::from_rust_str("usize")),
+        // strlen: *const c_char
+        ("strlen", 0) => Some(UnifiedType::from_rust_str("*const c_char")),
+        // strcpy/strncpy: dest *mut, src *const c_char
+        ("strcpy", 0) | ("strncpy", 0) => Some(UnifiedType::from_rust_str("*mut c_char")),
+        ("strcpy", 1) | ("strncpy", 1) => Some(UnifiedType::from_rust_str("*const c_char")),
+        ("strncpy", 2) => Some(UnifiedType::from_rust_str("usize")),
+        _ => None,
+    }
+}
+
 /// コード生成時に解決可能なシンボルの集合
 ///
 /// bindings.rs、マクロ辞書、inline 関数辞書、ビルトイン関数等から
@@ -2111,6 +2147,12 @@ impl<'a> RustCodegen<'a> {
 
     /// 呼び出し先関数のパラメータ型を取得（inline 関数/マクロ関数もフォールバック）
     fn get_callee_param_type_extended(&mut self, func_name: &str, arg_index: usize) -> Option<UnifiedType> {
+        // 0. 既知 libc 関数のハードコード型 (bindings.rs に無く、
+        //    呼出側が `*mut c_char` を渡すが実際は `*mut c_void` が期待される
+        //    ケースで as-cast を自動挿入するため)。
+        if let Some(ut) = libc_fn_param_type(func_name, arg_index) {
+            return Some(ut);
+        }
         // 1. bindings.rs
         if let Some(ut) = self.get_callee_param_type(func_name, arg_index) {
             return Some(ut.clone());
@@ -4023,6 +4065,16 @@ impl<'a> RustCodegen<'a> {
                         expected_ty.to_string()
                     };
                     return cast_syn_expr(arg_expr, &cast_ty);
+                }
+                // `*mut c_void` 受け取り: libc の memset/memcpy/memcmp 等は
+                // `*mut c_void` / `*const c_void` を取るが、呼出側は
+                // `*mut c_char` や `*mut T` を渡すことが多い。raw pointer
+                // の as-cast はいつでも合法なので、void pointer への変換を
+                // 汎用的に許可する。
+                if actual_ut.is_pointer() && expected_ut.is_pointer()
+                    && expected_ut.is_void_pointer()
+                {
+                    return cast_syn_expr(arg_expr, expected_ty);
                 }
             }
             return arg_expr;
