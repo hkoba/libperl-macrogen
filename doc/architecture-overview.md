@@ -13,6 +13,7 @@
 | [Inline 関数処理](./architecture-inline-function-processing.md) | Inline 関数の収集・変換・カスケード検出 | `inline_fn.rs`, `rust_codegen.rs` |
 | [THX 依存性検出](./architecture-thx-dependency.md) | THX（Thread Context）の検出と伝播 | `macro_infer.rs`, `rust_codegen.rs` |
 | [FieldsDict](./architecture-fields-dict.md) | 構造体フィールド辞書と型推論での活用 | `fields_dict.rs`, `semantic.rs` |
+| [Apidoc Patches](./architecture-apidoc-patches.md) | perl C ヘッダ既知バグの外部 JSON 駆動補正 | `apidoc_patches.rs`, `apidoc/v$X.$Y.patches.json` |
 
 ## 全体パイプライン
 

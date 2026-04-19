@@ -217,6 +217,8 @@ pub struct InferResult {
     pub typedefs: TypedefDict,
     /// global static const 配列宣言辞書（bodies_by_type 等）
     pub global_const_dict: crate::global_const_dict::GlobalConstDict,
+    /// apidoc patches（perl C ヘッダ既知バグの訂正データ）
+    pub apidoc_patches: crate::apidoc_patches::ApidocPatchSet,
     /// プリプロセッサ（マクロテーブル、StringInterner、FileRegistry へのアクセス用）
     pub preprocessor: Preprocessor,
     /// 統計情報
@@ -464,6 +466,37 @@ pub fn run_inference_with_preprocessor(
     let apidoc_from_comments = apidoc_collector.len();
     apidoc_collector.merge_into(&mut apidoc);
 
+    // apidoc patches を適用（merge 後 / type macro 展開前）
+    // perl の C ヘッダや apidoc に含まれる既知の誤りを訂正する。
+    // ファイル: apidoc_path と同じディレクトリの v$major.$minor.patches.json
+    // （存在しなければ no-op）
+    let apidoc_patches = if let Some(path) = apidoc_path {
+        let mut path_buf = path.to_path_buf();
+        let new_name = path.file_stem()
+            .map(|s| format!("{}.patches.json", s.to_string_lossy()))
+            .unwrap_or_else(|| String::from("patches.json"));
+        path_buf.set_file_name(new_name);
+        if path_buf.exists() {
+            crate::apidoc_patches::ApidocPatchSet::load_json(&path_buf)?
+        } else {
+            crate::apidoc_patches::ApidocPatchSet::empty()
+        }
+    } else {
+        crate::apidoc_patches::ApidocPatchSet::empty()
+    };
+    if !apidoc_patches.is_empty() {
+        let applied = apidoc_patches.apply_to_apidoc(&mut apidoc);
+        if let Some(p) = &apidoc_patches.source_path {
+            eprintln!(
+                "[apidoc-patches] loaded {} patch(es) from {} ({} return-type override applied, {} skip-codegen registered)",
+                apidoc_patches.count(),
+                p.display(),
+                applied.len(),
+                apidoc_patches.skip_codegen.len(),
+            );
+        }
+    }
+
     // apidoc 内の型マクロを展開 (Off_t → off_t, Size_t → size_t など)
     apidoc.expand_type_macros(pp.macros(), pp.interner());
 
@@ -547,6 +580,7 @@ pub fn run_inference_with_preprocessor(
         c_fn_decl_dict,
         typedefs,
         global_const_dict,
+        apidoc_patches,
         preprocessor: pp,
         stats,
     }))

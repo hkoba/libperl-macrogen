@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "comment": "Manual corrections for known perl 5.40.x C-source bugs that cause incorrect Rust binding generation. See src/apidoc_patches.rs for the schema.",
+  "patches": [
+    {
+      "name": "RCPV_LEN",
+      "kind": "return_type_override",
+      "value": "STRLEN",
+      "source_loc": "/usr/lib64/perl5/CORE/cop.h:560",
+      "reason": "perl cop.h apidoc declares `RCPV *` but the macro body `(RCPVx(pv)->len-1)` returns STRLEN (a usize), not a pointer. The apidoc return type is wrong.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "RCPV_REFCOUNT",
+      "kind": "return_type_override",
+      "value": "STRLEN",
+      "source_loc": "/usr/lib64/perl5/CORE/cop.h:540",
+      "reason": "perl cop.h apidoc declares `RCPV *` but the macro body `(RCPVx(pv)->refcount)` returns STRLEN (the refcount field), not a pointer.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "RCPV_REFCNT_inc",
+      "kind": "return_type_override",
+      "value": "char *",
+      "source_loc": "/usr/lib64/perl5/CORE/cop.h:546",
+      "reason": "perl cop.h apidoc declares `RCPV *` but the macro body calls rcpv_copy(pv) which returns `char *` per proto.h.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "RCPV_REFCNT_dec",
+      "kind": "return_type_override",
+      "value": "char *",
+      "source_loc": "/usr/lib64/perl5/CORE/cop.h:553",
+      "reason": "perl cop.h apidoc declares `RCPV *` but the macro body calls rcpv_free(pv) which returns `char *` per proto.h.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "Perl_custom_op_xop",
+      "kind": "skip_codegen",
+      "source_loc": "/usr/lib64/perl5/CORE/op.h:977",
+      "reason": "perl op.h macro definition `(Perl_custom_op_get_field(x, XOPe_xop_ptr).xop_ptr)` lacks `aTHX_`. The function expects 3 args (pTHX_ const OP *o, const xop_flags_enum field) but the macro only passes 2, causing Rust E0061 (function takes 3 arguments but 2 arguments were supplied). XopENTRYCUSTOM(o, xop_ptr) on line 967 is the correct alternative — it passes aTHX_ properly.",
+      "upstream_status": "to-report"
+    }
+  ]
+}

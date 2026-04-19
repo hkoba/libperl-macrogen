@@ -5397,11 +5397,20 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             CodegenError { code: String, errors: Vec<String> },
             Incomplete { code: String },
             Success { code: String, used_libc: HashSet<String> },
+            Suppressed { reason: String },
         }
 
         let mut gen_results: Vec<(InternedStr, InlineGenResult)> = Vec::new();
 
         for (name, func_def) in &fns {
+            // apidoc patches: skip_codegen 対象は早期に Suppressed
+            let n_str = self.interner.get(**name);
+            if let Some(reason) = result.apidoc_patches.skip_reason(n_str) {
+                gen_results.push((**name,
+                    InlineGenResult::Suppressed { reason: reason.to_string() }));
+                continue;
+            }
+
             // 事前に unavailable と判定された関数はスキップ
             if result.inline_fn_dict.is_calls_unavailable(**name) {
                 gen_results.push((**name, InlineGenResult::CallsUnavailable));
@@ -5517,6 +5526,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     writeln!(self.writer)?;
                     self.stats.inline_fns_contains_goto += 1;
                 }
+                InlineGenResult::Suppressed { reason } => {
+                    let name_str = self.interner.get(name);
+                    writeln!(self.writer,
+                        "// [CODEGEN_SUPPRESSED] {} - inline function (apidoc patch)",
+                        name_str)?;
+                    writeln!(self.writer, "// Reason: {}", reason)?;
+                    writeln!(self.writer)?;
+                }
                 InlineGenResult::UnresolvedNames { code, unresolved } => {
                     let name_str = self.interner.get(name);
                     writeln!(self.writer, "// [UNRESOLVED_NAMES] {} - inline function", name_str)?;
@@ -5615,6 +5632,18 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
 
         for name in sorted_names {
             let info = result.infer_ctx.macros.get(&name).unwrap();
+
+            // ── apidoc patches: skip_codegen 対象なら早期に [CODEGEN_SUPPRESSED] ──
+            let name_str_for_patch = self.interner.get(name);
+            if let Some(reason) = result.apidoc_patches.skip_reason(name_str_for_patch) {
+                let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+                writeln!(self.writer,
+                    "// [CODEGEN_SUPPRESSED] {}{} - macro function (apidoc patch)",
+                    name_str_for_patch, thx_info)?;
+                writeln!(self.writer, "// Reason: {}", reason)?;
+                writeln!(self.writer)?;
+                continue;
+            }
 
             // ── カスケード検査 ──
             // called_functions のうち、生成対象だが生成に失敗した関数があれば

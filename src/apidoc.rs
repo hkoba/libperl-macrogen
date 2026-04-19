@@ -567,6 +567,11 @@ impl ApidocDict {
         self.entries.get(name)
     }
 
+    /// 名前でエントリを mutable で検索（apidoc_patches で return_type 等を上書きする用途）
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut ApidocEntry> {
+        self.entries.get_mut(name)
+    }
+
     /// イテレータを取得
     pub fn iter(&self) -> impl Iterator<Item = (&String, &ApidocEntry)> {
         self.entries.iter()

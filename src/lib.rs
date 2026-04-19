@@ -5,6 +5,7 @@
 
 pub mod apidoc;
 pub mod apidoc_data;
+pub mod apidoc_patches;
 pub mod ast;
 pub mod c_fn_decl;
 pub mod error;
