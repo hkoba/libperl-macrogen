@@ -75,6 +75,10 @@ pub struct RustDeclDict {
     pub static_arrays: HashSet<String>,
     /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
     pub bitfield_methods: HashMap<String, HashSet<String>>,
+    /// ビットフィールドアクセサ getter の戻り値型
+    /// (構造体名, メソッド名) → 戻り値型文字列
+    /// 例: ("op", "op_type") → "U16"
+    pub bitfield_method_types: HashMap<(String, String), String>,
 }
 
 impl RustDeclDict {
@@ -189,6 +193,12 @@ impl RustDeclDict {
                             && method.sig.inputs.len() == 1  // getter: &self のみ
                         {
                             let method_name = method.sig.ident.to_string();
+                            // 戻り値型を捕獲（型推論で利用）。戻り値なし getter は対象外。
+                            if let syn::ReturnType::Type(_, ty) = &method.sig.output {
+                                let ret_ty = Self::type_to_string(ty);
+                                self.bitfield_method_types
+                                    .insert((struct_name.clone(), method_name.clone()), ret_ty);
+                            }
                             self.bitfield_methods
                                 .entry(struct_name.clone())
                                 .or_default()

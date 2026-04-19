@@ -956,6 +956,27 @@ fn build_field_type_map(dict: Option<&RustDeclDict>) -> HashMap<String, UnifiedT
                 }
             }
         }
+        // bitfield アクセサ getter の戻り値型を統合。
+        // C ソースの `(*o).op_type` （Member 式）は意味的に「op_type フィールド」
+        // 相当だが、bindings.rs では bitfield アクセサ getter (`pub fn op_type(&self) -> U16`)
+        // として現れる。型推論では同名のフィールドアクセスと同じ扱いで OK。
+        for ((_struct, method), ret_ty) in &dict.bitfield_method_types {
+            if conflicts.contains(method) {
+                continue;
+            }
+            let uty = UnifiedType::from_rust_str(ret_ty);
+            match map.entry(method.clone()) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(uty);
+                }
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    if e.get() != &uty {
+                        conflicts.insert(method.clone());
+                        e.remove();
+                    }
+                }
+            }
+        }
     }
     map
 }
