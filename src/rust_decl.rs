@@ -73,6 +73,9 @@ pub struct RustDeclDict {
     pub statics: HashSet<String>,
     /// 配列型の extern static 変数名の集合
     pub static_arrays: HashSet<String>,
+    /// static 変数の型マップ (名前 → Rust 型文字列)
+    /// 例: "PL_c9_utf8_dfa_tab" → "[U8; 0usize]"
+    pub static_types: HashMap<String, String>,
     /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
     pub bitfield_methods: HashMap<String, HashSet<String>>,
     /// ビットフィールドアクセサ getter の戻り値型
@@ -170,8 +173,9 @@ impl RustDeclDict {
                             let ty_str = Self::type_to_string(&static_item.ty);
                             self.statics.insert(name.clone());
                             if ty_str.starts_with("[") {
-                                self.static_arrays.insert(name);
+                                self.static_arrays.insert(name.clone());
                             }
+                            self.static_types.insert(name, ty_str);
                         }
                         _ => {}
                     }

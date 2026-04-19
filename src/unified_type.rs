@@ -295,6 +295,36 @@ impl UnifiedType {
                 is_const: true,
             };
         }
+        // 配列 `[T; N]` — 要素型を保持して inner_type() で取り出せるようにする。
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            // "[T; N]" の T と N を分ける (ネスト `[` を考慮)
+            let mut depth = 0i32;
+            let mut semi_pos: Option<usize> = None;
+            for (i, ch) in inner.char_indices() {
+                match ch {
+                    '[' | '(' | '<' => depth += 1,
+                    ']' | ')' | '>' => depth -= 1,
+                    ';' if depth == 0 => {
+                        semi_pos = Some(i);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(pos) = semi_pos {
+                let elem = inner[..pos].trim();
+                let size_str = inner[pos + 1..].trim();
+                let size = size_str
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.trim_end_matches("usize").parse::<usize>().ok());
+                return Self::Array {
+                    inner: Box::new(Self::from_rust_str(elem)),
+                    size,
+                };
+            }
+        }
 
         // 基本型
         Self::parse_rust_basic_type(trimmed)

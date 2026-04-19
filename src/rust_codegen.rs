@@ -724,6 +724,9 @@ fn normalize_integer_type(ty: &str) -> Option<&'static str> {
         "i64" | "I64" | "IV" | "c_long" | "c_longlong" => Some("i64"),
         "usize" | "STRLEN" => Some("usize"),
         "isize" | "SSize_t" | "ssize_t" | "PADOFFSET" => Some("isize"),
+        // Perl 固有の整数 typedef。Stack_off_t は 5.32+ で I32、それ以前は
+        // IV (i64) 相当だが、bindings.rs の型に合わせて i32 として扱う。
+        "Stack_off_t" => Some("i32"),
         _ => None,
     }
 }
@@ -1846,6 +1849,10 @@ impl<'a> RustCodegen<'a> {
                     let name_str = self.interner.get(*name);
                     if let Some(c) = dict.consts.get(name_str) {
                         return Some(c.uty.clone());
+                    }
+                    // extern static 変数の型 (PL_utf8skip など)
+                    if let Some(ty_str) = dict.static_types.get(name_str) {
+                        return Some(UnifiedType::from_rust_str(ty_str));
                     }
                 }
                 // enum バリアント（C 側 EnumDict 由来）。bindings.rs では nominal
