@@ -384,6 +384,32 @@ impl FieldsDict {
         self.struct_defs.get(&name)
     }
 
+    /// 指定 struct のメンバ型を取得。typedef 経由も考慮する。
+    pub fn member_type(&self, struct_name: InternedStr, member: InternedStr)
+        -> Option<&TypeRepr>
+    {
+        // まず直接ヒット
+        if let Some(def) = self.struct_defs.get(&struct_name) {
+            for m in &def.members {
+                if m.name == member {
+                    return Some(&m.type_repr);
+                }
+            }
+        }
+        // typedef で別名になっている可能性を追跡
+        let resolved = self.typedef_to_struct.get(&struct_name).copied().unwrap_or(struct_name);
+        if resolved != struct_name {
+            if let Some(def) = self.struct_defs.get(&resolved) {
+                for m in &def.members {
+                    if m.name == member {
+                        return Some(&m.type_repr);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// 全 struct/union 定義を返す（順序付き struct_defs に登録されたもの）
     pub fn iter_struct_defs(&self) -> impl Iterator<Item = (&InternedStr, &StructDef)> {
         self.struct_defs.iter()

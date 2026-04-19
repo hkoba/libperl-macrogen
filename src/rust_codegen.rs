@@ -657,19 +657,37 @@ fn decompose_assert_with_message(condition: &Expr) -> Option<(&Expr, String)> {
 
 /// Perl の SV サブタイプ（GV, HV, AV, CV, IO 等）から SV へのポインタキャストかどうかを判定
 fn is_sv_subtype_cast(from: &UnifiedType, to: &UnifiedType) -> bool {
-    let from_name = match from.inner_type() {
-        Some(UnifiedType::Named(name)) => name.as_str(),
-        _ => return false,
+    // inner 型を取得 (Named 以外は "c_void" 扱いにして void ポインタ互換を
+    // 拾う)。`Pointer { inner: Void }` は to_rust_string で c_void になる。
+    let inner_name = |ut: &UnifiedType| -> Option<String> {
+        match ut.inner_type()? {
+            UnifiedType::Named(name) => Some(name.clone()),
+            UnifiedType::Void => Some("c_void".to_string()),
+            _ => None,
+        }
     };
-    let to_name = match to.inner_type() {
-        Some(UnifiedType::Named(name)) => name.as_str(),
-        _ => return false,
+    let from_name = match inner_name(from) {
+        Some(n) => n,
+        None => return false,
     };
-    // SV サブタイプのリスト
-    const SV_SUBTYPES: &[&str] = &["GV", "HV", "AV", "CV", "IO", "p5rx", "REGEXP"];
+    let to_name = match inner_name(to) {
+        Some(n) => n,
+        None => return false,
+    };
+    // SV サブタイプのリスト (bindings.rs の構造体名は小文字版を出すケースが
+    // 多い: `pub type SV = sv;` などの typedef エイリアス関係のため、両方を
+    // 対象にする)
+    const SV_SUBTYPES: &[&str] = &[
+        "GV", "HV", "AV", "CV", "IO", "p5rx", "REGEXP",
+        "gv", "hv", "av", "cv", "io", "regexp",
+    ];
+    let sv_like = |n: &str| n == "SV" || n == "sv";
     // SV ↔ サブタイプ（双方向）
-    (SV_SUBTYPES.contains(&from_name) && to_name == "SV")
-        || (from_name == "SV" && SV_SUBTYPES.contains(&to_name))
+    (SV_SUBTYPES.contains(&from_name.as_str()) && sv_like(&to_name))
+        || (sv_like(&from_name) && SV_SUBTYPES.contains(&to_name.as_str()))
+        // サブタイプ ↔ サブタイプ (GV → CV など)
+        || (SV_SUBTYPES.contains(&from_name.as_str())
+            && SV_SUBTYPES.contains(&to_name.as_str()))
         // c_void ↔ 任意のポインタ
         || to_name == "c_void"
         || from_name == "c_void"
@@ -1822,7 +1840,51 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Cast { type_name, .. } => {
                 Some(UnifiedType::from_rust_str(&self.type_name_to_type_str_readonly(type_name)))
             }
-            ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => {
+            ExprKind::Member { expr: base, member } | ExprKind::PtrMember { expr: base, member } => {
+                // まず base 式の型から struct を特定し、fields_dict で
+                // メンバ型を正確に引く (同名フィールドが別 struct に存在する
+                // 場合の誤解決を避ける)。見つからなければ field_type_map に
+                // フォールバック。
+                let resolve_struct_name = |this: &Self| -> Option<String> {
+                    // マクロ推論の type_env を優先
+                    if let Some(info_ref) = info {
+                        if let Some(constraints) = info_ref.type_env.expr_constraints.get(&base.id) {
+                            if let Some(base_ty) = constraints.first().map(|c| &c.ty) {
+                                let sn = if matches!(&expr.kind, ExprKind::PtrMember { .. }) {
+                                    base_ty.pointee_name()
+                                } else {
+                                    base_ty.type_name()
+                                };
+                                if let Some(n) = sn {
+                                    return Some(this.interner.get(n).to_string());
+                                }
+                            }
+                        }
+                    }
+                    // inline 関数のローカル / パラメータ: UnifiedType 経由で
+                    // 推論して Named を取り出す
+                    let base_ut = this.infer_expr_type_unified(base, info)?;
+                    let target = if matches!(&expr.kind, ExprKind::PtrMember { .. }) {
+                        base_ut.inner_type()?
+                    } else {
+                        &base_ut
+                    };
+                    if let UnifiedType::Named(n) = target {
+                        return Some(n.clone());
+                    }
+                    None
+                };
+
+                if let Some(fd) = self.fields_dict {
+                    if let Some(struct_name_str) = resolve_struct_name(self) {
+                        if let Some(struct_name) = self.interner.lookup(&struct_name_str) {
+                            if let Some(member_ty) = fd.member_type(struct_name, *member) {
+                                let rust_ty = member_ty.to_rust_string(self.interner);
+                                return Some(UnifiedType::from_rust_str(&rust_ty));
+                            }
+                        }
+                    }
+                }
                 let member_str = self.interner.get(*member);
                 self.field_type_map.get(member_str).cloned()
             }
