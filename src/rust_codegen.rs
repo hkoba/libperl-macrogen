@@ -1999,6 +1999,25 @@ impl<'a> RustCodegen<'a> {
                             return Some(UnifiedType::from_rust_str(&ty.to_rust_string(self.interner)));
                         }
                     }
+                    // inline 関数の戻り値型 (自家生成 Perl_utf8_hop 等)
+                    if let Some(dict) = self.inline_fn_dict {
+                        if let Some(func_def) = dict.get(*name) {
+                            // 戻り値型を文字列組立 (読取専用 API を使用)
+                            let base = self.base_type_str_readonly(&func_def.specs.type_specs);
+                            let mut result = base;
+                            let pointer_count = func_def.declarator.derived.iter()
+                                .take_while(|d| !matches!(d, crate::ast::DerivedDecl::Function(_)))
+                                .filter(|d| matches!(d, crate::ast::DerivedDecl::Pointer(_)))
+                                .count();
+                            let is_const_ptr = pointer_count == 1
+                                && func_def.specs.qualifiers.is_const;
+                            for _ in 0..pointer_count {
+                                let prefix = if is_const_ptr { "*const " } else { "*mut " };
+                                result = format!("{}{}", prefix, result);
+                            }
+                            return Some(UnifiedType::from_rust_str(&result));
+                        }
+                    }
                 }
                 None
             }
