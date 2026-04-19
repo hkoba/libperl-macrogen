@@ -27,6 +27,14 @@ use crate::intern::{InternedStr, StringInterner};
 use crate::rust_decl::RustDeclDict;
 use crate::type_repr::TypeRepr;
 
+/// 出力結果と、正常に emit できた static 配列名の集合。
+/// 名前集合は下流の codegen で `.as_ptr()` 減衰判定 (is_array_like_expr)
+/// などに使う。
+pub struct EmittedStaticArrays {
+    pub source: String,
+    pub emitted_names: std::collections::HashSet<String>,
+}
+
 /// `GlobalConstDict` の全エントリを Rust ソースとして出力する。
 /// 要素型の StructDef が見つからない、bindings.rs に既存等の場合はスキップ。
 pub fn emit_static_arrays(
@@ -34,8 +42,9 @@ pub fn emit_static_arrays(
     fields_dict: &FieldsDict,
     rust_decl_dict: Option<&RustDeclDict>,
     interner: &StringInterner,
-) -> String {
+) -> EmittedStaticArrays {
     let mut out = String::new();
+    let mut emitted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let bindings_consts: std::collections::HashSet<String> = rust_decl_dict
         .map(|d| d.consts.keys().cloned().collect())
         .unwrap_or_default();
@@ -75,6 +84,7 @@ pub fn emit_static_arrays(
                 }
                 out.push_str(&s);
                 out.push('\n');
+                emitted_names.insert(name_str.to_string());
             }
             Err(reason) => {
                 if !header_emitted {
@@ -87,7 +97,7 @@ pub fn emit_static_arrays(
             }
         }
     }
-    out
+    EmittedStaticArrays { source: out, emitted_names }
 }
 
 fn emit_one_array(

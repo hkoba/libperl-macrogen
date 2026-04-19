@@ -2017,6 +2017,46 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// 式が「ポインタに減衰させて `.as_ptr()` を付けるべき配列値」か判定。
+    /// Ident (static 配列)、struct フィールドの配列型、どちらも対象。
+    ///
+    /// ただし flexible-array フィールド（`char data[]` 等）は
+    /// `maybe_decay_flex_array` が `&raw const field as *mut T` に既に
+    /// 変換済みであるため、ここでは配列扱いしない。そうしないと
+    /// `ptr.as_ptr()` の二重適用が発生する。
+    fn is_array_like_expr(&self, expr: &Expr, info: Option<&MacroInferInfo>) -> bool {
+        if self.is_static_array_expr(expr) {
+            return true;
+        }
+        // flex array のメンバアクセスは除外（既に pointer にデケイ済）
+        if let ExprKind::Member { expr: base, member }
+              | ExprKind::PtrMember { expr: base, member } = &expr.kind
+        {
+            if let (Some(fd), Some(info)) = (self.fields_dict, info) {
+                if let Some(constraints) = info.type_env.expr_constraints.get(&base.id) {
+                    if let Some(base_type) = constraints.first().map(|c| &c.ty) {
+                        let struct_name = match &expr.kind {
+                            ExprKind::PtrMember { .. } => base_type.pointee_name(),
+                            _ => base_type.type_name(),
+                        };
+                        if let Some(sn) = struct_name {
+                            if fd.is_flexible_array_field(sn, *member) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(ut) = self.infer_expr_type_unified(expr, info) {
+            let s = ut.to_rust_string();
+            if s.starts_with('[') && s.contains(';') {
+                return true;
+            }
+        }
+        false
+    }
+
     /// フィールド名がビットフィールドメソッドかどうかをチェック
     ///
     /// 構造体名が不明な場合は、全構造体のビットフィールドメソッド名を検索
@@ -3206,7 +3246,7 @@ impl<'a> RustCodegen<'a> {
                 use crate::syn_codegen::*;
                 let i = self.build_syn_expr(index, info);
                 let i_isize = cast_syn_expr(i, "isize");
-                let base_expr: syn::Expr = if self.is_static_array_expr(base) {
+                let base_expr: syn::Expr = if self.is_array_like_expr(base, info) {
                     let b = if let ExprKind::Ident(n) = &base.kind {
                         ident_expr(escape_rust_keyword(self.interner.get(*n)).as_str())
                     } else {
@@ -3385,12 +3425,26 @@ impl<'a> RustCodegen<'a> {
 
                 // ポインタ ± 整数 → .offset()
                 if matches!(op, BinOp::Add | BinOp::Sub) {
-                    let lp = self.is_pointer_expr_unified(lhs, info)
+                    // static 配列の Ident (`bodies_by_type` 等) は build_syn_expr
+                    // が既に `.as_ptr()` を付加するため、`l_arr` には含めない。
+                    // ここで再度 `.as_ptr()` を被せると *const T に対して呼ばれて
+                    // E0599 になる。非 Ident の「フィールド直値が配列型」に限定。
+                    let l_arr = !self.is_static_array_expr(lhs)
+                        && self.is_array_like_expr(lhs, info);
+                    let r_arr = !self.is_static_array_expr(rhs)
+                        && self.is_array_like_expr(rhs, info);
+                    let lp = l_arr
+                        || self.is_static_array_expr(lhs)
+                        || self.is_pointer_expr_unified(lhs, info)
                         || self.infer_expr_type_unified(lhs, info).is_some_and(|ut| ut.is_pointer());
-                    let rp = self.is_pointer_expr_unified(rhs, info)
+                    let rp = r_arr
+                        || self.is_static_array_expr(rhs)
+                        || self.is_pointer_expr_unified(rhs, info)
                         || self.infer_expr_type_unified(rhs, info).is_some_and(|ut| ut.is_pointer());
                     if lp && !rp {
                         let l = self.build_syn_expr(lhs, info);
+                        // 配列値 (非 Ident) は `.as_ptr()` でポインタ減衰させてから `.offset()`
+                        let l = if l_arr { crate::syn_codegen::method_call(l, "as_ptr", vec![]) } else { l };
                         let r = self.build_syn_expr(rhs, info);
                         let r_isize = crate::syn_codegen::cast_syn_expr(r, "isize");
                         let arg = if *op == BinOp::Add { r_isize } else {
@@ -3405,6 +3459,7 @@ impl<'a> RustCodegen<'a> {
                     if rp && !lp && *op == BinOp::Add {
                         let l = self.build_syn_expr(lhs, info);
                         let r = self.build_syn_expr(rhs, info);
+                        let r = if r_arr { crate::syn_codegen::method_call(r, "as_ptr", vec![]) } else { r };
                         let l_isize = crate::syn_codegen::cast_syn_expr(l, "isize");
                         return crate::syn_codegen::method_call(r, "offset", vec![l_isize]);
                     }
@@ -5295,6 +5350,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             result.rust_decl_dict.as_ref(),
             self.interner,
         );
+        // 自動生成した static 配列名を bindings_info.static_arrays に登録。
+        // これにより codegen が `.as_ptr()` 減衰を掛けるべき配列として認識する。
+        for n in &static_arrays.emitted_names {
+            self.bindings_info.static_arrays.insert(n.clone());
+        }
 
         // 既知シンボル集合を構築（未解決シンボル検出用）
         let mut known_symbols = KnownSymbols::new(result, self.interner);
@@ -5337,8 +5397,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         }
 
         // 自動生成 static const 配列を出力（事前算出済み）
-        if !static_arrays.is_empty() {
-            self.writer.write_all(static_arrays.as_bytes())?;
+        if !static_arrays.source.is_empty() {
+            self.writer.write_all(static_arrays.source.as_bytes())?;
         }
 
         // マクロの生成可能性を事前計算（inline→macro カスケード検出用）
