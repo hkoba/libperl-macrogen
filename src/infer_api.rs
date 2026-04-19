@@ -215,6 +215,8 @@ pub struct InferResult {
     pub c_fn_decl_dict: CFnDeclDict,
     /// typedef 辞書
     pub typedefs: TypedefDict,
+    /// global static const 配列宣言辞書（bodies_by_type 等）
+    pub global_const_dict: crate::global_const_dict::GlobalConstDict,
     /// プリプロセッサ（マクロテーブル、StringInterner、FileRegistry へのアクセス用）
     pub preprocessor: Preprocessor,
     /// 統計情報
@@ -261,6 +263,7 @@ pub fn run_inference_with_preprocessor(
 
     // フィールド辞書を作成（パースしながら収集）
     let mut fields_dict = FieldsDict::new();
+    let mut global_const_dict = crate::global_const_dict::GlobalConstDict::new();
 
     // Enum 辞書を作成（パースしながら収集）
     let mut enum_dict = EnumDict::new();
@@ -313,6 +316,10 @@ pub fn run_inference_with_preprocessor(
     parser.parse_each_with_pp(|decl, loc, path, pp| {
         let interner = pp.interner();
         fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
+
+        // global static const declarations を捕捉
+        // 例: `static const struct body_details bodies_by_type[] = {...}`
+        global_const_dict.try_collect(decl, decl.is_target(), interner);
 
         // enum 情報を収集
         enum_dict.collect_from_external_decl(decl, decl.is_target(), interner);
@@ -539,6 +546,7 @@ pub fn run_inference_with_preprocessor(
         rust_decl_dict,
         c_fn_decl_dict,
         typedefs,
+        global_const_dict,
         preprocessor: pp,
         stats,
     }))

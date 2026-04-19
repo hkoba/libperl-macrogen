@@ -10,6 +10,7 @@ pub mod c_fn_decl;
 pub mod error;
 pub mod enum_dict;
 pub mod fields_dict;
+pub mod global_const_dict;
 pub mod infer_api;
 pub mod inline_fn;
 pub mod intern;
