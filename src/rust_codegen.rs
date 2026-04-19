@@ -4419,6 +4419,12 @@ impl<'a> RustCodegen<'a> {
                                 r_syn = cast_syn_expr(r_syn, nl);
                             }
                         }
+                        // ポインタ const/mut 不一致 → LHS 型に明示キャスト
+                        if lut.is_pointer() && rut.is_pointer()
+                            && lut.is_const_pointer() != rut.is_const_pointer()
+                        {
+                            r_syn = cast_syn_expr(r_syn, &ls);
+                        }
                     }
                 }
             } else if matches!(op, AssignOp::AndAssign | AssignOp::OrAssign | AssignOp::XorAssign) {
@@ -4711,7 +4717,10 @@ impl<'a> RustCodegen<'a> {
     fn param_type_only(&mut self, param: &ParamDecl) -> String {
         let ty = self.decl_specs_to_rust(&param.specs);
         if let Some(ref declarator) = param.declarator {
-            self.apply_derived_to_type(&ty, &declarator.derived)
+            // specs の const 修飾子 (`const U8 *`) をポインタ const として
+            // 反映する。apply_derived_to_type は常に specs_is_const=false で
+            // 呼び出すため、ここで補正する。
+            self.apply_simple_derived_with_specs_const(&ty, &declarator.derived, param.specs.qualifiers.is_const)
         } else {
             ty
         }
@@ -4941,23 +4950,22 @@ impl<'a> RustCodegen<'a> {
                                 }
                             }
                         }
-                        let init_expr = normalize_parens(&crate::syn_codegen::expr_to_string(&init_syn));
-                        // ポインタの const/mut 不一致: 変数型を *const に変更
-                        let ty = if ty.contains("*mut") && !ty.contains("*const") {
-                            if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
-                                if expr_ut.is_const_pointer() {
-                                    ty.replace("*mut", "*const")
-                                } else {
-                                    ty
+                        // ポインタの const/mut 不一致は init 側に明示キャストを挿入する。
+                        // 旧実装は宣言型を *const に書換えていたが、それだと以降の
+                        // 代入で *mut 型が期待されるマクロ引数などで破綻する。
+                        // 例: `let s: *mut U8 = s0;` (s0: *const U8) → `s0 as *mut U8`
+                        let decl_is_mut_ptr = ty.contains("*mut ") && !ty.contains("*const ");
+                        let decl_is_const_ptr = ty.contains("*const ") && !ty.contains("*mut ");
+                        if let Some(expr_ut) = self.infer_expr_type_inline(expr) {
+                            if expr_ut.is_pointer() {
+                                if decl_is_mut_ptr && expr_ut.is_const_pointer() {
+                                    init_syn = crate::syn_codegen::cast_syn_expr(init_syn, &ty);
+                                } else if decl_is_const_ptr && !expr_ut.is_const_pointer() {
+                                    init_syn = crate::syn_codegen::cast_syn_expr(init_syn, &ty);
                                 }
-                            } else if init_expr.contains("as *const") {
-                                ty.replace("*mut", "*const")
-                            } else {
-                                ty
                             }
-                        } else {
-                            ty
-                        };
+                        }
+                        let init_expr = normalize_parens(&crate::syn_codegen::expr_to_string(&init_syn));
                         // null リテラルの場合は型推論に任せて std::ptr::null_mut()
                         let init_expr = if is_null_literal(expr) && ty.contains("*mut") {
                             "std::ptr::null_mut()".to_string()
@@ -5296,7 +5304,8 @@ impl<'a> RustCodegen<'a> {
         }
 
         // パス2: 収集した cases から match アームを生成
-        for case in cases {
+        let has_default = cases.iter().any(|c| c.is_default);
+        for case in &cases {
             let pattern = if case.is_default {
                 if case.patterns.is_empty() {
                     "_".to_string()
@@ -5314,6 +5323,12 @@ impl<'a> RustCodegen<'a> {
                 result.push_str("\n");
             }
             result.push_str(&format!("{}}}\n", indent));
+        }
+        // C の switch は default が無ければ該当しない値を素通しする。
+        // Rust match は網羅性が必要なため、default 無しのケースで
+        // `_ => {}` を自動挿入する。
+        if !has_default {
+            result.push_str(&format!("{}_ => {{}}\n", indent));
         }
     }
 
