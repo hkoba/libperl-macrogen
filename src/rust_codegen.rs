@@ -4430,14 +4430,28 @@ impl<'a> RustCodegen<'a> {
                     let method_name = mc.method.to_string();
                     if self.is_bitfield_method(&method_name) {
                         let setter_name = format!("set_{}", method_name);
+                        // setter が期待する型 (bitfield getter の戻り値型)
+                        // に RHS を cast する。bool や違う整数幅で渡される
+                        // ケースに対応 (`set_op_moresib(bool)` 等の E0308)。
+                        let arg_val = if let Some(dict) = self.rust_decl_dict {
+                            // bitfield_method_types: (struct, method) → ret_ty
+                            // struct 名が不明なケースは任意の一致で決める
+                            let ret_ty = dict.bitfield_method_types.iter()
+                                .find(|((_, m), _)| m == &method_name)
+                                .map(|(_, ty)| ty.clone());
+                            if let Some(ty) = ret_ty {
+                                cast_syn_expr(r, &ty)
+                            } else {
+                                r
+                            }
+                        } else {
+                            r
+                        };
                         let setter_call = method_call(
                             (*mc.receiver).clone(),
                             &setter_name,
-                            vec![r],
+                            vec![arg_val],
                         );
-                        // block_with_value: { setter(); getter() } を返し
-                        // 式として getter の値を評価可能にする（既存 Assign
-                        // と同じく `{ a = v; a }` の形）
                         let stmt = semi_stmt(setter_call);
                         return block_with_value(vec![stmt], l);
                     }
