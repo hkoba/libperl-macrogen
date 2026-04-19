@@ -165,5 +165,34 @@ pub fn emit_missing_structs(
             ));
         }
     }
+
+    // typedef alias: bindings.rs に既存の struct を別名で typedef している
+    // （例: `typedef struct xpvhv_with_aux XPVHV_WITH_AUX;`）が、
+    // typedef 名 (XPVHV_WITH_AUX) が bindings.rs に無い場合に補完する。
+    let bindings_struct_names: HashSet<String> = rust_decl_dict
+        .map(|d| d.structs.keys().cloned().collect())
+        .unwrap_or_default();
+    let bindings_type_names: HashSet<String> = rust_decl_dict
+        .map(|d| d.types.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut typedef_aliases: Vec<(String, String)> = fields_dict
+        .iter_typedefs()
+        .map(|(td, st)| (interner.get(*td).to_string(), interner.get(*st).to_string()))
+        .filter(|(td, st)| {
+            !bindings_struct_names.contains(td)
+                && !bindings_type_names.contains(td)
+                && bindings_struct_names.contains(st)
+        })
+        .collect();
+    typedef_aliases.sort();
+    if !typedef_aliases.is_empty() {
+        buf.push_str("// === Auto-generated typedef aliases ===\n");
+        buf.push_str("// `typedef struct foo NAME;` where struct foo is in bindings.rs\n");
+        buf.push_str("// but the typedef name NAME is not (e.g. XPVHV_WITH_AUX).\n\n");
+        for (td, st) in typedef_aliases {
+            buf.push_str(&format!("#[allow(non_camel_case_types)] pub type {} = {};\n", td, st));
+        }
+        buf.push('\n');
+    }
     buf
 }

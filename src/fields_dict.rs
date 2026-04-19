@@ -188,19 +188,69 @@ impl FieldsDict {
         // typedef struct xpv XPV; のような宣言を検出して typedef マッピングを登録
         if decl.specs.storage == Some(StorageClass::Typedef) {
             self.collect_typedef_aliases(decl, interner);
+            // typedef union { ... } NAME; のような anonymous struct/union 定義は
+            // 通常の collect_from_struct_spec が name=None で early-return するため
+            // 取り逃がす。declarator の typedef 名を struct 名として登録する。
+            self.collect_typedef_anonymous_struct(decl, interner);
         }
 
         for type_spec in &decl.specs.type_specs {
             match type_spec {
                 TypeSpec::Struct(spec) => {
-                    self.collect_from_struct_spec(spec, interner);
+                    self.collect_from_struct_spec_with_kind(spec, false, interner);
                 }
                 TypeSpec::Union(spec) => {
                     // 共用体も同様に収集
-                    self.collect_from_struct_spec(spec, interner);
+                    self.collect_from_struct_spec_with_kind(spec, true, interner);
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// `typedef union { ... } NAME;` のような anonymous struct/union 定義から
+    /// typedef 名を struct 名として `struct_defs` に登録する。
+    /// 例: `typedef union { regexp align_me; NV nv; IV iv; } regexp_aligned;`
+    /// これは sv_inline.h の `ALIGNED_TYPE` マクロ展開で多用される。
+    fn collect_typedef_anonymous_struct(&mut self, decl: &Declaration, interner: &StringInterner) {
+        // type_specs から anonymous struct/union を探す
+        let (anon_spec, is_union) = {
+            let mut found = None;
+            for ts in &decl.specs.type_specs {
+                match ts {
+                    TypeSpec::Struct(s) if s.name.is_none() && s.members.is_some() => {
+                        found = Some((s, false));
+                        break;
+                    }
+                    TypeSpec::Union(s) if s.name.is_none() && s.members.is_some() => {
+                        found = Some((s, true));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            match found {
+                Some(v) => v,
+                None => return,
+            }
+        };
+
+        // declarator から typedef 名を取得（pointer/array 修飾無しのみ）
+        for init_decl in &decl.declarators {
+            if !init_decl.declarator.derived.is_empty() {
+                continue;
+            }
+            let typedef_name = match init_decl.declarator.name {
+                Some(n) => n,
+                None => continue,
+            };
+            // 同名 spec として登録（`name` を持つ spec を仮構築して既存ロジックを再利用）
+            let synthetic_spec = StructSpec {
+                name: Some(typedef_name),
+                members: anon_spec.members.clone(),
+                loc: anon_spec.loc.clone(),
+            };
+            self.collect_from_struct_spec_with_kind(&synthetic_spec, is_union, interner);
         }
     }
 
@@ -234,11 +284,6 @@ impl FieldsDict {
                 }
             }
         }
-    }
-
-    /// 構造体指定からフィールド情報を収集
-    fn collect_from_struct_spec(&mut self, spec: &StructSpec, interner: &StringInterner) {
-        self.collect_from_struct_spec_with_kind(spec, false, interner);
     }
 
     /// `collect_from_struct_spec` の本体。union 識別を呼び出し側から受け取る。
@@ -554,6 +599,11 @@ impl FieldsDict {
     /// 登録された typedef の数を取得
     pub fn typedef_count(&self) -> usize {
         self.typedef_to_struct.len()
+    }
+
+    /// 全 typedef → struct マッピングを順に列挙
+    pub fn iter_typedefs(&self) -> impl Iterator<Item = (&InternedStr, &InternedStr)> {
+        self.typedef_to_struct.iter()
     }
 
     /// 収集されたフィールド型の数を取得
