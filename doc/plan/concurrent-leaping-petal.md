@@ -1,308 +1,274 @@
-# Plan: perl5 共通フィールドマクロの一級概念化（B 段階分割）
+# Plan: マクロ間呼び出し境界での SV→CV キャスト挿入の修正
 
 ## Context
 
-直接の動機は `xcv_xsub` のような関数ポインタフィールド呼び出しの正しい
-Rust codegen だが、根本にあるのは perl5 ヘッダの **「マクロを介した共通
-フィールド宣言」** （`_SV_HEAD` / `_XPV_HEAD` / `_XPVCV_COMMON` 等）
-を本プロジェクトの一級概念として扱うこと。`_SV_HEAD` には既に
-`MacroCallWatcher` 経由のサポートがあるので、その同型を `_XPV_HEAD` /
-`_XPVCV_COMMON` にも与え、最終的にフィールドアクセスの型情報を C
-ソース側のマクロ定義から canonical に取得できるようにする。
+直前の作業で「共通フィールドマクロ (`_XPVCV_COMMON` 等) からの SV
+ファミリー型逆推論」を導入し、`CvHASGV` などの xpvcv 専用マクロが
+`*const CV` と正しく推論されるようになった
+(`src/semantic.rs` の `try_infer_sv_family_from_member`,
+`CTypeSource::CommonMacroFieldInference` Tier 3)。
 
-サポートする情報を一段ずつ厚くする「B 段階分割」で進める:
+しかし統合ビルドでは **エラー数が 113 → 126 (+13)** と退行した。原因は
+**マクロ→マクロ呼び出しの境界で、必要な SV-subtype キャストが挿入されない**
+ことにある。
 
-| Step | 達成 | 主な変更 |
-|------|------|---------|
-| **B-1** | 共通フィールドマクロ呼び出しの観測 | `src/infer_api.rs`, `src/fields_dict.rs` |
-| **B-2** | マクロ本体の解析と canonical field set 抽出 | `src/fields_dict.rs`, 必要に応じて `src/parser.rs` |
-| **B-3** | codegen を `field → defining_macro → canonical type` 経由に切替し fn ポインタ呼び出しを正しく出力 | `src/rust_codegen.rs` |
+### 症状例
 
-各 Step は独立にビルド可能で価値を出せる。
+`tmp/build-error.log` より:
 
-観測対象マクロは perl5 専用ハードコード:
-- `_SV_HEAD` (既存、変更なし)
-- `_XPV_HEAD`
-- `_XPVCV_COMMON`
-
-将来 `_XPVHV_COMMON` 等の追加が必要になれば同所に列挙を増やす。
-
-## Step B-1: 共通フィールドマクロ呼び出しの観測
-
-### 変更ファイル
-
-- `src/fields_dict.rs`
-- `src/infer_api.rs`
-
-### 変更内容
-
-**`FieldsDict` に追加するフィールド** (`src/fields_dict.rs:25-40` 周辺):
-
-```rust
-/// 構造体 → そこで展開された共通フィールドマクロ集合
-struct_to_common_macros: HashMap<InternedStr, Vec<InternedStr>>,
-/// 共通フィールドマクロ → それを使う構造体集合
-common_macro_to_structs: HashMap<InternedStr, Vec<InternedStr>>,
+```
+19649 | if ! CopFILE (c) . is_null () { GvAV (gv_fetchfile (my_perl , CopFILE (c))) } ...
+      | ----  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `*const sv`, found `*mut gv`
+      |       arguments to this function are incorrect
+note: function defined here
+14852 | pub unsafe fn GvAV(gv: *const SV) -> *mut AV {
 ```
 
-公開アクセサ:
+`GvAV` は宣言上 `gv: *const SV` だが、`gv_fetchfile()` の戻り値は
+`*mut gv`。`is_sv_subtype_cast` (src/rust_codegen.rs:457) が
+`*mut gv → *const SV` を許す対象になっているはずだが、**キャストが挿入
+されない**。
+
+### 真因 (root cause)
+
+`build_arg_string_unified` (`src/rust_codegen.rs:3452`) は引数式の
+キャスト要否を判定するため `get_callee_param_type_extended` で
+**callee が期待する型** を取得する。callee がマクロ関数の場合
+(method 3, `src/rust_codegen.rs:1920-1953`) 以下の挙動になっている:
 
 ```rust
-pub fn add_struct_uses_common_macro(&mut self, struct_name: InternedStr, macro_name: InternedStr);
-pub fn structs_using_common_macro(&self, macro_name: InternedStr) -> &[InternedStr];
-pub fn common_macros_used_by_struct(&self, struct_name: InternedStr) -> &[InternedStr];
-```
-
-**`src/infer_api.rs` の Watcher 登録** (現行 line 245-253 周辺):
-
-```rust
-let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
-pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
-let xpv_head_id = pp.interner_mut().intern("_XPV_HEAD");
-pp.set_macro_called_callback(xpv_head_id, Box::new(MacroCallWatcher::new()));
-let xpvcv_common_id = pp.interner_mut().intern("_XPVCV_COMMON");
-pp.set_macro_called_callback(xpvcv_common_id, Box::new(MacroCallWatcher::new()));
-// ... 既存の pthx_id 等
-```
-
-ハードコードされたマクロ ID 集合を `static` 配列にしておき、新規追加は
-1 行追加で済むようにする:
-
-```rust
-const COMMON_FIELD_MACROS: &[&str] = &[
-    "_SV_HEAD",       // 既存（fields_dict.add_sv_family_member_with_type も並行）
-    "_XPV_HEAD",
-    "_XPVCV_COMMON",
-];
-```
-
-**struct 通過時の検出** (現行 line 301-321 周辺):
-
-`_SV_HEAD` を扱う既存ロジックの隣で、`_XPV_HEAD` / `_XPVCV_COMMON` に
-ついても Watcher のフラグをチェックし、立っていれば
-`fields_dict.add_struct_uses_common_macro(struct_name, macro_id)` を呼ぶ。
-`_SV_HEAD` のみ持つ既存処理（typedef 引数の登録）は変更しない。
-
-### 検証
-
-- `cargo test`（全 350 テスト）が pass。
-- 既存の sv_family / FieldsDict 関連テストに regression なし。
-- 手動確認: dump_types で `xpvcv` / `xpvfm` が `_XPVCV_COMMON` を、
-  `xpv*` 系が `_XPV_HEAD` を使用していることが何らかの形で確認できる
-  （unit test を追加しても良い）。
-
-## Step B-2: マクロ本体パースと canonical field set 抽出
-
-### 変更ファイル
-
-- `src/fields_dict.rs`
-- 必要に応じて `src/infer_api.rs`（マクロ本体取得経路）
-
-### 変更内容
-
-**`FieldsDict` 拡張**:
-
-```rust
-pub struct CommonFieldMacro {
-    pub name: InternedStr,             // "_XPVCV_COMMON"
-    pub fields: Vec<CommonField>,      // 順序保持
-}
-pub struct CommonField {
-    pub name: InternedStr,             // "xcv_xsub"
-    pub ty: TypeRepr,                  // void(*)(pTHX_ CV*)
-    pub origin: CommonFieldOrigin,
-}
-pub enum CommonFieldOrigin {
-    Direct,                                   // 直接のフィールド
-    InsideUnion { union_field: InternedStr }, // union 内
-}
-
-pub struct FieldsDict {
-    // ... existing
-    common_macros: HashMap<InternedStr, CommonFieldMacro>,
-    field_to_defining_macro: HashMap<InternedStr, InternedStr>,
-}
-```
-
-公開アクセサ:
-
-```rust
-pub fn defining_macro_of(&self, field_name: InternedStr) -> Option<InternedStr>;
-pub fn common_macro(&self, macro_name: InternedStr) -> Option<&CommonFieldMacro>;
-pub fn canonical_field(&self, field_name: InternedStr) -> Option<(&CommonFieldMacro, &CommonField)>;
-```
-
-**マクロ本体の取得とパース**:
-
-`MacroDefCallback` で `_XPVCV_COMMON` 等のマクロ定義を捕捉、または
-`pp.macros()` 経由で `MacroDef` を取得できる。トークン列を
-`parser.rs` の struct member 宣言パーサ（既存）に投入し、
-`Vec<StructMember>` AST を取得する。
-
-union 内のフィールド（例: `xcv_root_u` の中の `xcv_xsub`）は
-`CommonFieldOrigin::InsideUnion` で記録する。最も深いフィールド名を
-`field_to_defining_macro` に登録する（`xcv_xsub` → `_XPVCV_COMMON`）。
-union メンバー名（`xcv_root_u`）も同マクロを差すよう登録する。
-
-**Build タイミング**:
-
-B-1 で `_SV_HEAD` 等の Watcher が立っている関係上、struct 通過時点では
-マクロ本体は既に展開済みだが、`MacroDef` は `pp.macros()` に保持されている。
-Phase 2 終了時（`build_consistent_type_cache` の隣）で
-`fields_dict.build_common_macro_fields(&pp)` を呼んで一括構築する。
-
-### 検証
-
-- `cargo test` 全 pass。
-- 新規 unit test: `_XPVCV_COMMON` をパースして `xcv_xsub` の型が
-  `void (*)(pTHX_ CV*)` 相当（`TypeRepr` 表現で fn ポインタ）になることを確認。
-- `field_to_defining_macro["xcv_xsub"] == "_XPVCV_COMMON"` の確認。
-
-## Step B-3: codegen を canonical type 経由にして fn ポインタ呼び出し対応
-
-### 変更ファイル
-
-- `src/rust_codegen.rs`
-
-### 変更内容
-
-**`build_syn_expr` の `Call` arm に検出を追加** (現行 `src/rust_codegen.rs:3099-3198` 付近):
-
-```rust
-ExprKind::Call { func, args } => {
-    // 既存: __builtin_expect 等の特殊処理
-    // ...
-
-    // 追加: 共通マクロの fn ポインタフィールド呼び出しを検出
-    if let Some(syn_call) = self.try_build_common_macro_fn_call(func, args, info) {
-        return syn_call;
+// src/rust_codegen.rs:1932-1943 (method 1)
+if let Some(expr_ids) = macro_info.type_env.param_to_exprs.get(&param.name) {
+    for expr_id in expr_ids {
+        if let Some(constraints) = macro_info.type_env.expr_constraints.get(expr_id) {
+            for c in constraints {
+                if !c.ty.is_void() {
+                    let ty = c.ty.to_rust_string(self.interner);
+                    return Some(UnifiedType::from_rust_str(&ty));   // ←最初の非voidを採用
+                }
+            }
+        }
     }
-
-    // 既存: 通常の関数呼び出し
-    // ...
 }
 ```
 
-新メソッド:
+これは「**最初に見つかった非 void 制約**」を返す。一方、宣言型を決める
+`get_param_type` (`src/rust_codegen.rs:2395-2446`) は **Tier-best** 選択:
 
 ```rust
-fn try_build_common_macro_fn_call(
-    &mut self,
-    func: &Expr,
-    args: &[Expr],
-    info: Option<&MacroInferInfo>,
-) -> Option<syn::Expr> {
-    use crate::syn_codegen::*;
+// src/rust_codegen.rs:2422-2432 (best-tier)
+for c in constraints {
+    if c.ty.is_void() { continue; }
+    let tier = c.ty.confidence_tier();
+    if best.is_none() || tier < best.unwrap().1 {
+        best = Some((&c.ty, tier));
+    }
+}
+```
 
-    let member_id = match &func.kind {
-        ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } => *member,
-        _ => return None,
+結果として、同じパラメータに対する callee の見え方が二系統に分裂する:
+
+| 用途 | 関数 | 選択方式 | 例: `Cv*` 系の `cv` |
+|------|------|---------|-------------------|
+| 宣言生成 | `get_param_type` | Tier-best | `*const CV` (Tier 3, CommonMacroFieldInference) |
+| 呼出側のキャスト判定 | `get_callee_param_type_extended` | First-non-void | `*const SV` (Tier 4, SvFamilyCast) ← 古い制約 |
+
+callee 宣言は `*const CV` で固定されているのに、呼出側では `*const SV`
+を期待していると見做すため、引数 `*mut gv` を `*const SV` にキャスト
+する判断が出される — しかし実体は `*const CV` を期待。
+あるいは「`*const SV` と一致するから cast 不要」と判断され、何も挿入
+されないまま `*mut gv → *const CV` のずれが残る。
+
+### ゴール
+
+`get_callee_param_type_extended` の **method 3 (自家生成マクロパス)** を
+`get_param_type` と同じ Tier-best 選択に揃え、宣言と呼出時の callee
+パラメータ型観測を一貫させる。これにより:
+
+- callee が `*const CV` 宣言 → 呼出側でも「`*const CV` 期待」と判定
+- 引数 actual が `*const SV` または `*mut sv` 等 → `is_sv_subtype_cast`
+  発火 → `*const CV` への as-cast が挿入される
+- `+13` 退行が解消し、できれば 113 エラー以下になる
+
+## アプローチ概要
+
+「**全 ExprId に対する全制約を Tier 順走査して非 void の最良を採用**」
+する共通ヘルパを `rust_codegen.rs` に追加し、`get_param_type` と
+`get_callee_param_type_extended` (method 3) の双方で使用する。ヘルパは
+TypeRepr を返し、呼出側で `to_rust_string` して必要なフォーマット (UnifiedType
+or String) に変換する。
+
+副次的効果として `callee_param_is_bool` (`src/rust_codegen.rs:1959-`)
+の判定方式も best-tier に揃えると、bool 引数判定の安定性も向上する
+(別タスクとして optional)。
+
+## 設計
+
+### 1. 共通ヘルパ追加
+
+`src/rust_codegen.rs` の private 関連関数として:
+
+```rust
+/// 自家生成マクロの param に対する全制約のうち、Tier が最も高い
+/// (=数値が小さい) 非 void TypeRepr のクローンを返す。
+/// param.expr_id() および param_to_exprs から得た全 ExprId を走査する。
+fn best_constraint_for_macro_param(
+    info: &MacroInferInfo,
+    param: &MacroParam,
+) -> Option<crate::type_repr::TypeRepr> {
+    let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
+
+    let mut all_expr_ids: Vec<ExprId> = info
+        .type_env
+        .param_to_exprs
+        .get(&param.name)
+        .map(|ids| ids.iter().cloned().collect())
+        .unwrap_or_default();
+    all_expr_ids.push(param.expr_id());
+
+    for expr_id in &all_expr_ids {
+        if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+            for c in constraints {
+                if c.ty.is_void() { continue; }
+                let tier = c.ty.confidence_tier();
+                if best.is_none() || tier < best.unwrap().1 {
+                    best = Some((&c.ty, tier));
+                }
+            }
+        }
+    }
+    best.map(|(t, _)| t.clone())
+}
+```
+
+`MacroInferInfo` / `MacroParam` / `TypeRepr` / `ExprId` のインポートは
+既存ファイル内で利用可能。`self` 不要 (free function でも可)。
+
+### 2. `get_callee_param_type_extended` method 3 を best-tier に置き換え
+
+`src/rust_codegen.rs:1920-1953` の方法1 + 方法2 を以下に置換:
+
+```rust
+// 3. 自家生成マクロ関数の type_env から best-tier 制約を取得
+if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
+    let macro_param_idx = if macro_info.is_thx_dependent {
+        if arg_index == 0 {
+            return Some(UnifiedType::from_rust_str("*mut PerlInterpreter"));
+        }
+        arg_index - 1
+    } else {
+        arg_index
     };
-
-    // canonical 型をマクロ経由で取得
-    let dict = self.fields_dict?; // 既存の参照経路を要確認
-    let (_macro, canonical_field) = dict.canonical_field(member_id)?;
-    if !canonical_field.ty.is_function_pointer() {
-        return None;
+    if let Some(param) = macro_info.params.get(macro_param_idx) {
+        if let Some(ty) = best_constraint_for_macro_param(macro_info, param) {
+            let rust_ty = ty.to_rust_string(self.interner);
+            return Some(UnifiedType::from_rust_str(&rust_ty));
+        }
     }
-
-    // <receiver>.<field> までを syn::Expr で組む
-    let field_access = self.build_syn_expr(func, info);
-
-    // bindgen は fn ポインタフィールドを Option<fn> にラップするため、
-    // unwrap_unchecked を介してから呼ぶ。生成コードは既に unsafe 内なので
-    // C 側の「null fn ptr 呼び出し = UB」と等価。
-    let callee = method_call(field_access, "unwrap_unchecked", vec![]);
-
-    // 引数: 既存ヘルパで構築（callee 名なし）
-    let arg_syns: Vec<syn::Expr> = args.iter().enumerate().map(|(i, arg)| {
-        let s = self.build_arg_string_unified(arg, info, None, i);
-        syn::parse_str(&s).unwrap_or_else(|_| int_lit(0))
-    }).collect();
-    let mut punctuated = syn::punctuated::Punctuated::new();
-    for a in arg_syns { punctuated.push(a); }
-
-    Some(syn::Expr::Call(syn::ExprCall {
-        attrs: vec![],
-        func: Box::new(callee),
-        paren_token: Default::default(),
-        args: punctuated,
-    }))
 }
 ```
 
-**`TypeRepr::is_function_pointer`** が無ければ追加（`src/type_repr.rs`）:
+これで宣言側 (`get_param_type`) と完全に同じ「Tier-best」観測になる。
+
+### 3. `get_param_type` をヘルパで置き換え (任意・推奨)
+
+`src/rust_codegen.rs:2410-2443` のループも `best_constraint_for_macro_param`
+で書き換えると重複が解消する:
 
 ```rust
-impl TypeRepr {
-    pub fn is_function_pointer(&self) -> bool {
-        // 既存の TypeRepr バリアントを見て fn ptr を判定
-        // 必要なら専用バリアントを追加
+let best = best_constraint_for_macro_param(info, param);
+if let Some(mut ty) = best {
+    if should_be_const {
+        ty.make_outer_pointer_const();
+    } else if ty.has_outer_pointer() {
+        ty.make_outer_pointer_mut();
     }
+    return self.type_repr_to_rust(&ty);
 }
+self.unknown_marker().to_string()
 ```
 
-`TypeRepr` の現行構造を見て妥当な実装を選ぶ（B-2 で fn 型を表現する
-バリアントが既に必要なはず）。
+リテラル文字列パラメータ判定や generic 判定はその前段で行うため変化なし。
 
-### 検証
+### 4. `callee_param_is_bool` も同手法で揃える (任意)
 
-#### `Perl_rpp_invoke_xs` の出力確認
+`src/rust_codegen.rs:1959-` の bool 判定パスも、全制約走査ではなく
+「best-tier の制約が bool か」に揃えると一貫性が高まる。ただしこの修正は
+別 PR としても良い。最初は触らず、先に method 3 と get_param_type だけ
+揃えて整合性を確認する。
+
+## 影響範囲と検証
+
+### 単体テスト
+
+- `cargo test`: 既存 350+ tests が通ることを確認
+
+### 統合ビルド
 
 ```bash
 ~/blob/libperl-rs/12-macrogen-2-build.zsh
-grep -A6 "fn Perl_rpp_invoke_xs" ~/db/github/exp-rstinycc-take2/tmp/macro_bindings.rs
 ```
 
-期待:
+期待される変化:
+- エラー数: 126 → **113 以下** (退行解消、できれば改善)
+- `GvAV (gv_fetchfile (...))` のような呼出に `*const CV` 等への
+  as-cast が挿入される
+- `Cv*` 系で `*const SV` を期待していた呼出が `*const CV` 期待に
+  変わる (callee の真の宣言と一致)
 
-```rust
-pub unsafe fn Perl_rpp_invoke_xs(my_perl: *mut PerlInterpreter, cv: *mut CV) -> () {
-    unsafe {
-        assert!(!(cv).is_null());
-        (*((*cv).sv_any as *mut XPVCV)).xcv_root_u.xcv_xsub.unwrap_unchecked()(my_perl, cv);
-    }
-}
-```
-
-#### `field, not a method` エラーの消失
+### スポットチェック
 
 ```bash
-grep -c "field, not a method" ~/db/github/exp-rstinycc-take2/tmp/build-error.log
-# 0 を期待
+# 改善前後で diff
+grep -n "GvAV\|CvGV\|CvSTASH" tmp/macro_bindings.rs | head
 ```
 
-#### regression なし
+`gv as *const CV` 等の cast 挿入を確認。
 
-```bash
-cargo test
-# 350 / 350 pass
-tail -1 ~/db/github/exp-rstinycc-take2/tmp/build-error.log
-# error 件数が baseline (~128) ± noise band 内
-```
+### 想定される連鎖改善
 
-## 想定外のケース・フォローアップ
+- `MUTABLE_SV(...)`, `MUTABLE_HV(...)`, `MUTABLE_AV(...)` 系統の
+  type-coercion マクロでも一致が改善する可能性あり
+- 過去にコメントアウトしていた SV-family 関連の error 群が消える
+- `Cv*` macro 同士のチェーン呼出
+  (`CvISXSUB(cv) ? ... : CvSTART(cv)` 等) で型が揃う
 
-- **bare `fn` フィールド（Option ラップなし）**: bindgen が
-  `--no-rustfmt-bindings` 等の特殊設定で出力した場合、Option を介さない fn
-  ポインタフィールドが現れる可能性がある。canonical type が fn pointer
-  であれば `unwrap_unchecked` を挟まず Paren で囲んで呼ぶ分岐が必要。
-  本計画では現サンプル全件が Option<fn> 形式であるため対応しない。
-- **`_XPV_HEAD` の活用**: B-2 で field set を取得済みなので、xpv 系構造体間
-  のフィールド共通性を type inference に活かす拡張は将来余地。本計画では
-  fn ポインタ問題に絞る。
-- **typedef 経由の fn 型**: bindings 側で `typedef Perl_ophook_t = ...` の
-  ような形になった場合、`field_type_map` の文字列に `fn` が現れない可能性。
-  canonical macro 由来で判定する本計画方式ではこの問題は発生しない。
+## リスク
 
-## 実施順序まとめ
+1. **bool 判定波及**: `get_callee_param_type_extended` の戻り値を bool
+   として再解釈する箇所はない (bool 判定は別経路 `callee_param_is_bool`
+   が担う) ため、bool 関連の波及は理論上ない。念のため `bool` が含まれた
+   テストも回す。
 
-| Step | 内容 | 主な変更ファイル | コミット |
-|------|------|-----------------|---------|
-| B-1 | MacroCallWatcher で `_XPV_HEAD` / `_XPVCV_COMMON` 監視、struct↔macro マップ追加 | `src/fields_dict.rs`, `src/infer_api.rs` | 1 |
-| B-2 | マクロ本体パース、`CommonFieldMacro` / `field_to_defining_macro` 構築 | `src/fields_dict.rs` (+ 必要に応じ `src/parser.rs` / `src/type_repr.rs`) | 1〜2 |
-| B-3 | codegen `Call` arm に `try_build_common_macro_fn_call` 追加 | `src/rust_codegen.rs` | 1 |
-| 検証 | 統合ビルドで `Perl_rpp_invoke_xs` 修正確認、cargo test 全 pass | （検証のみ） | — |
+2. **inline 関数 callee**: method 2 (`inline_fn_dict`) と method 1
+   (`bindings.rs`) は今回触らない。これらはもともと宣言ベースのため
+   一貫している。method 3 のみが「内部 type_env を peek する」性質を
+   持つので不一致が起きていた。
 
-各 Step は独立にコミット可能。B-1 はコード生成出力に影響しない（観測のみ）。
-B-2 はデータ構築のみで挙動変化なし。B-3 で初めて生成コードが変わる。
+3. **`*const` vs `*mut` の取り違え**: `get_param_type` では
+   `should_be_const` (`const_pointer_positions`) によって最終的な
+   const/mut を決めている。`get_callee_param_type_extended` の戻り値も
+   厳密にはこの後処理が必要かもしれないが、現行コードがすでに後処理を
+   行っていない (best-tier 直前で `c.ty` をそのまま返す) ため、一旦は
+   ヘルパの戻り値をそのまま返す。const/mut の問題は別途対処する余地を
+   残すが、SV-subtype キャストの判定 (`is_sv_subtype_cast`) は const/mut
+   差を許容するロジックなので、本タスクの解決には十分。
+
+4. **constraint 走査の順序非決定性**: `expr_constraints` は HashMap だが、
+   Tier-best は順序非依存 (純粋に最小値選択) なので、結果は決定的。
+   first-non-void から best-tier への変更でテスト出力差分は出るが、
+   それは想定通り。
+
+## 実施順序
+
+| Step | 内容 | 主な変更ファイル |
+|------|------|-----------------|
+| 1 | `best_constraint_for_macro_param` ヘルパを `rust_codegen.rs` に追加 | `src/rust_codegen.rs` |
+| 2 | `get_callee_param_type_extended` method 3 を best-tier 採用に置換 | `src/rust_codegen.rs` |
+| 3 | `cargo test` で全 unit test pass を確認 | (検証のみ) |
+| 4 | 統合ビルドで `+13` 退行が解消することを確認 | (検証のみ) |
+| 5 | (任意) `get_param_type` 内ループもヘルパに置換し重複削減 | `src/rust_codegen.rs` |
+| 6 | (任意・別タスク) `callee_param_is_bool` も同様に best-tier 化 | `src/rust_codegen.rs` |
+
+Step 1-4 で本来の目的 (退行解消) は達成。Step 5-6 はリファクタ要素のため
+別 commit に分けると安全。

@@ -385,6 +385,37 @@ fn is_type_repr_pointer(ty: &crate::type_repr::TypeRepr) -> bool {
     }
 }
 
+/// 自家生成マクロの param に対する全制約のうち、Tier が最も高い
+/// (=数値が小さい) 非 void TypeRepr のクローンを返す。
+/// `param.expr_id()` および `param_to_exprs` から得た全 ExprId を走査する。
+fn best_constraint_for_macro_param(
+    info: &MacroInferInfo,
+    param: &MacroParam,
+) -> Option<crate::type_repr::TypeRepr> {
+    let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
+
+    let mut all_expr_ids: Vec<crate::ast::ExprId> = info
+        .type_env
+        .param_to_exprs
+        .get(&param.name)
+        .map(|ids| ids.iter().cloned().collect())
+        .unwrap_or_default();
+    all_expr_ids.push(param.expr_id());
+
+    for expr_id in &all_expr_ids {
+        if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
+            for c in constraints {
+                if c.ty.is_void() { continue; }
+                let tier = c.ty.confidence_tier();
+                if best.is_none() || tier < best.unwrap().1 {
+                    best = Some((&c.ty, tier));
+                }
+            }
+        }
+    }
+    best.map(|(t, _)| t.clone())
+}
+
 /// unsigned 型へのキャスト式かどうか判定
 /// 例: "(x as usize)", "(x as u32)"
 fn is_unsigned_cast_expr(expr_str: &str) -> bool {
@@ -1928,26 +1959,22 @@ impl<'a> RustCodegen<'a> {
                     arg_index
                 };
                 if let Some(param) = macro_info.params.get(macro_param_idx) {
-                    // 方法1: param_to_exprs 逆引き辞書
-                    if let Some(expr_ids) = macro_info.type_env.param_to_exprs.get(&param.name) {
-                        for expr_id in expr_ids {
-                            if let Some(constraints) = macro_info.type_env.expr_constraints.get(expr_id) {
-                                for c in constraints {
-                                    if !c.ty.is_void() {
-                                        let ty = c.ty.to_rust_string(self.interner);
-                                        return Some(UnifiedType::from_rust_str(&ty));
-                                    }
-                                }
-                            }
+                    // best-tier 制約 (param.expr_id() + param_to_exprs 全 ExprId 走査)
+                    // 宣言型 (`get_param_type`) と同じ選択方式に揃え、
+                    // 呼出側のキャスト判定が真の宣言と一致するようにする。
+                    if let Some(mut ty) = best_constraint_for_macro_param(macro_info, param) {
+                        // const/mut も callee 側の最終宣言と一致させる
+                        // (get_param_type と同じロジック: const_pointer_positions に含まれていれば const)
+                        let should_be_const = macro_info
+                            .const_pointer_positions
+                            .contains(&macro_param_idx);
+                        if should_be_const {
+                            ty.make_outer_pointer_const();
+                        } else if ty.has_outer_pointer() {
+                            ty.make_outer_pointer_mut();
                         }
-                    }
-                    // 方法2: MacroParam の ExprId
-                    let expr_id = param.expr_id();
-                    if let Some(constraints) = macro_info.type_env.expr_constraints.get(&expr_id) {
-                        if let Some(first) = constraints.first() {
-                            let ty = first.ty.to_rust_string(self.interner);
-                            return Some(UnifiedType::from_rust_str(&ty));
-                        }
+                        let rust_ty = ty.to_rust_string(self.interner);
+                        return Some(UnifiedType::from_rust_str(&rust_ty));
                     }
                 }
             }
@@ -2403,36 +2430,9 @@ impl<'a> RustCodegen<'a> {
             return "&str".to_string();
         }
 
-        let param_name = param.name;
         let should_be_const = self.const_pointer_positions.contains(&param_index);
 
-        // 全制約を Tier 順（高い方優先）で収集し、最高 Tier の型を採用
-        let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
-
-        let expr_ids_from_param_to_exprs: Vec<_> = info.type_env.param_to_exprs
-            .get(&param_name)
-            .map(|ids| ids.iter().cloned().collect())
-            .unwrap_or_default();
-        let all_expr_ids = {
-            let mut ids = expr_ids_from_param_to_exprs;
-            ids.push(param.expr_id());
-            ids
-        };
-
-        for expr_id in &all_expr_ids {
-            if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
-                for c in constraints {
-                    if c.ty.is_void() { continue; }
-                    let tier = c.ty.confidence_tier();
-                    if best.is_none() || tier < best.unwrap().1 {
-                        best = Some((&c.ty, tier));
-                    }
-                }
-            }
-        }
-
-        if let Some((ty, _tier)) = best {
-            let mut ty = ty.clone();
+        if let Some(mut ty) = best_constraint_for_macro_param(info, param) {
             if should_be_const {
                 ty.make_outer_pointer_const();
             } else if ty.has_outer_pointer() {
