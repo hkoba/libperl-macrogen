@@ -1305,6 +1305,26 @@ fn block_items_contain_goto(items: &[BlockItem]) -> bool {
     })
 }
 
+/// 文がトップレベルで `break;` を含むか検査
+/// (ネストされた loop/switch 内の break は除外)。
+fn stmt_contains_top_level_break(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break(_) => true,
+        Stmt::Compound(cs) => cs.items.iter().any(|item| match item {
+            BlockItem::Stmt(s) => stmt_contains_top_level_break(s),
+            BlockItem::Decl(_) => false,
+        }),
+        Stmt::If { then_stmt, else_stmt, .. } => {
+            stmt_contains_top_level_break(then_stmt)
+                || else_stmt.as_ref().is_some_and(|s| stmt_contains_top_level_break(s))
+        }
+        Stmt::Label { stmt, .. } => stmt_contains_top_level_break(stmt),
+        // ネストした loop/switch 内の break は「外側ループ」に関係ないので
+        // 再帰しない
+        _ => false,
+    }
+}
+
 /// コード生成統計
 #[derive(Debug, Clone, Default)]
 pub struct CodegenStats {
@@ -1896,6 +1916,12 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Deref(inner) => {
                 let inner_ut = self.infer_expr_type_unified(inner, info)?;
                 inner_ut.inner_type().cloned()
+            }
+            ExprKind::Index { expr: base, .. } => {
+                // C の `a[i]` は `*(a + i)` と等価。base が配列 / ポインタ
+                // 型なら要素型を返す。
+                let base_ut = self.infer_expr_type_unified(base, info)?;
+                base_ut.inner_type().cloned()
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 match op {
@@ -5310,6 +5336,18 @@ impl<'a> RustCodegen<'a> {
                 // do { ... } while (0) パターンは一度だけ実行される loop として出力
                 // これにより内部の break; が正しく動作する
                 if is_zero_constant(cond) {
+                    // 内部 body に `break;` が含まれなければ単なる block で十分。
+                    // STMT_START/STMT_END 由来なら break なしのケースがほとんど。
+                    // その方が `loop {...break;}` の `()`-型による tail 型不一致
+                    // (fn が usize 等を返す場合の E0308) を避けられる。
+                    if !stmt_contains_top_level_break(body) {
+                        let mut result = format!("{}{{\n", indent);
+                        let nested_indent = format!("{}    ", indent);
+                        result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
+                        result.push_str("\n");
+                        result.push_str(&format!("{}}}", indent));
+                        return result;
+                    }
                     let mut result = format!("{}loop {{\n", indent);
                     let nested_indent = format!("{}    ", indent);
                     result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
