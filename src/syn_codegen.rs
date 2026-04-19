@@ -305,13 +305,23 @@ fn is_rust_keyword(name: &str) -> bool {
 /// 結果が多行になる場合やパース失敗時は、
 /// 単純な外側括弧除去（strip_outer_parens 相当）にフォールバックする。
 pub fn normalize_parens(s: &str) -> String {
-    // syn ベースの正規化を試行（単行結果のみ）
-    if let Some(normalized) = try_normalize_parens(s) {
-        if !normalized.contains('\n') {
-            return normalized;
+    // syn ベースの正規化を試行
+    // - prettyplease で整形された単行結果を優先
+    // - 多行の場合は parenthesize 後の token-stream (単行) を使う
+    // - パース失敗時は外側括弧のみ除去にフォールバック
+    if let Some(parsed) = syn::parse_str::<syn::Expr>(s).ok() {
+        let stripped = strip_all_parens(parsed);
+        let paren_added = parenthesize(stripped);
+        let pretty = pretty_expr(&paren_added);
+        if !pretty.is_empty() && !pretty.contains('\n') {
+            return pretty;
+        }
+        // 多行 → token-stream の単行化で代用
+        let toks = quote::quote! { #paren_added }.to_string();
+        if !toks.is_empty() {
+            return toks;
         }
     }
-    // フォールバック: 外側の括弧のみ除去（strip_outer_parens と同等）
     fallback_strip_outer_parens(s)
 }
 
@@ -340,18 +350,6 @@ fn fallback_strip_outer_parens(s: &str) -> String {
         }
     }
     if depth == 0 { inner.to_string() } else { s.to_string() }
-}
-
-fn try_normalize_parens(s: &str) -> Option<String> {
-    let parsed = syn::parse_str::<syn::Expr>(s).ok()?;
-    let stripped = strip_all_parens(parsed);
-    let normalized = parenthesize(stripped);
-    let result = pretty_expr(&normalized);
-    // 結果が空や明らかにおかしい場合はフォールバック
-    if result.is_empty() {
-        return None;
-    }
-    Some(result)
 }
 
 /// syn::Expr ツリーからすべての Paren ラッパーノードを除去する。

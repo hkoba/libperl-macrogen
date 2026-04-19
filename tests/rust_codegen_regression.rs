@@ -46,11 +46,14 @@ fn extract_function(output: &str, fn_name: &str) -> Option<String> {
         {
             in_function = true;
 
-            // 直前の doc コメントと #[inline] を含める
+            // 直前の doc コメント、#[inline]、#[allow(...)] を含める
             let mut start = i;
             for j in (0..i).rev() {
                 let prev = lines[j].trim();
-                if prev.starts_with("///") || prev.starts_with("#[inline]") {
+                if prev.starts_with("///")
+                    || prev.starts_with("#[inline]")
+                    || prev.starts_with("#[allow")
+                {
                     start = j;
                 } else if !prev.is_empty() {
                     break;

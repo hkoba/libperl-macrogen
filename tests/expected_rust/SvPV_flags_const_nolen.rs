@@ -1,5 +1,6 @@
 /// SvPV_flags_const_nolen [THX] - macro function
 #[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe fn SvPV_flags_const_nolen(
     my_perl: *mut PerlInterpreter,
     sv: *const SV,

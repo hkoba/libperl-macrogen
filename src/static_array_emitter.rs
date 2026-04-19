@@ -177,8 +177,9 @@ fn build_struct_literal(
                 let val_expr = values[value_idx + gi];
                 let val_rust = translate_const_expr(val_expr, interner);
                 let mask = (1u64 << w) - 1;
-                parts.push(format!("(({}) as {} & {:#x}) << {}",
-                    val_rust, pack_ty, mask, shift));
+                let part = format!("(({}) as {} & {:#x}) << {}",
+                    val_rust, pack_ty, mask, shift);
+                parts.push(crate::syn_codegen::normalize_parens(&part));
                 shift += w;
             }
             field_strs.push(format!("_bitfield_{}: {}",
@@ -198,6 +199,7 @@ fn build_struct_literal(
             if is_integer_target(&target_ty) {
                 val_rust = format!("({}) as {}", val_rust, target_ty);
             }
+            let val_rust = crate::syn_codegen::normalize_parens(&val_rust);
             field_strs.push(format!("{}: {}", interner.get(m.name), val_rust));
             value_idx += 1;
             i += 1;

@@ -1,5 +1,6 @@
 /// Perl_cx_topblock [THX] - inline function
 #[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe fn Perl_cx_topblock(my_perl: *mut PerlInterpreter, cx: *mut PERL_CONTEXT) -> () {
     unsafe {
         assert!(!(cx).is_null());

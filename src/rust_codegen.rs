@@ -304,6 +304,28 @@ fn escape_string(s: &[u8]) -> String {
     s.iter().map(|&c| escape_char(c)).collect()
 }
 
+/// C の `(void)` 単独パラメータ = 引数なし、を判定する。
+///
+/// K&R 方式との互換のため、C では明示的に `void` を単一パラメータとして
+/// 書くことで「引数なし」を宣言する慣習がある (例: `int foo(void)`)。
+/// Rust には対応する概念がなく、そのまま `_: ()` に訳すと呼出側との
+/// 食い違いが起きるため、**パラメータなし** として生成する。
+fn is_void_only_param_list(params: &[ParamDecl]) -> bool {
+    if params.len() != 1 {
+        return false;
+    }
+    let p = &params[0];
+    // 名前付きでない（無名引数）こと、ポインタ派生していないこと、
+    // かつ単独の TypeSpec::Void であること。
+    let declarator_is_trivial = match &p.declarator {
+        None => true,
+        Some(d) => d.name.is_none() && d.derived.is_empty(),
+    };
+    let specs_is_void = p.specs.type_specs.len() == 1
+        && matches!(p.specs.type_specs[0], TypeSpec::Void);
+    declarator_is_trivial && specs_is_void
+}
+
 /// 式がゼロ定数かどうかを判定
 fn is_zero_constant(expr: &Expr) -> bool {
     match &expr.kind {
@@ -2525,6 +2547,7 @@ impl<'a> RustCodegen<'a> {
         let generic_info = if !generic_clause.is_empty() { " [generic]" } else { "" };
         self.writeln(&format!("/// {}{}{} - macro function", name_str, thx_info, generic_info));
         self.writeln("#[inline]");
+        self.writeln("#[allow(unsafe_op_in_unsafe_fn)]");
 
         // 関数定義（ジェネリック句付き）
         self.writeln(&format!("pub unsafe fn {}{}({}) -> {} {{", name_str, generic_clause, params_str, return_type));
@@ -4614,6 +4637,7 @@ impl<'a> RustCodegen<'a> {
         // ドキュメントコメント
         self.writeln(&format!("/// {}{} - inline function", name_str, thx_info));
         self.writeln("#[inline]");
+        self.writeln("#[allow(unsafe_op_in_unsafe_fn)]");
 
         // 関数定義
         self.writeln(&format!("pub unsafe fn {}({}) -> {} {{", name_str, params_str, return_type));
@@ -4641,6 +4665,12 @@ impl<'a> RustCodegen<'a> {
     fn build_fn_param_list(&mut self, derived: &[DerivedDecl], mut_params: &HashSet<InternedStr>) -> String {
         for d in derived {
             if let DerivedDecl::Function(param_list) = d {
+                // C の `fn(void)` は「引数なし」の同義。単独の void パラメータは
+                // Rust の 0 引数に変換する（そうしないと `fn(_: ())` となり呼出側
+                // が 0 引数と食い違って E0061 を起こす）。
+                if is_void_only_param_list(&param_list.params) {
+                    return String::new();
+                }
                 let params: Vec<_> = param_list.params.iter()
                     .map(|p| self.param_decl_to_rust(p, mut_params))
                     .collect();

@@ -1,5 +1,6 @@
 /// Perl_CvDEPTH - inline function
 #[inline]
+#[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe fn Perl_CvDEPTH(sv: *const CV) -> *mut I32 {
     unsafe {
         assert!(!(sv).is_null());
