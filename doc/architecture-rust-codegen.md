@@ -265,22 +265,55 @@ pub struct RustCodegen<'a> {
 | `expr_to_rust_inline()` | 式を Rust コードに変換（inline 関数用） |
 | `stmt_to_rust()` | 文を Rust コードに変換 |
 | `type_repr_to_rust()` | TypeRepr を Rust 型文字列に変換 |
-| `get_param_type()` | パラメータの型を制約から取得 |
+| `get_param_type()` | パラメータの宣言型を best-tier 制約から取得 |
+| `get_callee_param_type_extended()` | 呼び出し先パラメータ型を取得（bindings → inline → マクロ type_env、最後の段は best-tier + 自前の const 調整） |
+| `best_constraint_for_macro_param()` *(自由関数)* | param の全 ExprId 制約から void を除き Tier 最良の TypeRepr を返す共通ヘルパ |
 | `try_expand_call_as_lvalue()` | Call 式の lvalue 展開（マクロ用） |
 | `try_expand_call_as_lvalue_inline()` | Call 式の lvalue 展開（inline 用） |
 
 #### パラメータ型の解決
 
-`get_param_type()` は `param_to_exprs` 逆引き辞書を使用して、パラメータを参照する
-式の型制約から型を取得する。複数の制約がある場合、**void 型はスキップ**して
-より具体的な型を優先する。
+`get_param_type()` はパラメータを参照する全 ExprId
+（`param.expr_id()` ＋ `type_env.param_to_exprs[param.name]`）の型制約を
+収集し、**void 型はスキップ** して **`confidence_tier()` の最良 Tier**
+（=数値が最小）を採用する。同タスクは `get_callee_param_type_extended()`
+の自家生成マクロ callee パスでも必要なため、共通の自由関数
+`best_constraint_for_macro_param(info, param) -> Option<TypeRepr>`
+として `src/rust_codegen.rs` 上部に切り出されている。
 
 ```rust
-// 例: CopLABEL(c) の場合
-// c に対する制約:
-//   - void (symbol lookup)        ← スキップ
-//   - *mut COP (arg 1 of func())  ← 採用
+// 例: CvHASGV(cv) の cv パラメータに対する制約:
+//   - *mut SV  (Tier 4, SvFamilyCast)              ← 旧来の総称
+//   - *mut CV  (Tier 3, CommonMacroFieldInference) ← 採用 (best tier)
+//   - void     (symbol lookup)                     ← スキップ
 ```
+
+選択後、`const_pointer_positions` に応じて `make_outer_pointer_const()` /
+`make_outer_pointer_mut()` で const/mut を最終調整する。
+
+#### マクロ呼出時の callee パラメータ型解決
+
+`get_callee_param_type_extended(func_name, arg_index) -> Option<UnifiedType>`
+は呼び出し先の引数型をルックアップし、`build_arg_string_unified` から
+キャスト要否判定（`cast_arg_syn_if_needed`）に渡される。優先順は:
+
+1. `bindings.rs` (`RustDeclDict`)
+2. inline 関数の AST (`inline_fn_dict`)
+3. **自家生成マクロの type_env** — `best_constraint_for_macro_param`
+   と **callee 自身の `const_pointer_positions`** で const/mut 調整
+
+3 番目の段で `get_param_type` と **同じ Tier-best 選択 + 同じ const 調整**
+を適用するのが重要。これにより:
+
+- **callee 宣言**: `pub unsafe fn CvHASGV(cv: *const CV)`
+- **caller 側の callee 期待型ルックアップ**: `*const CV`
+
+が一致する。以前は callee パスが「最初の非 void 制約」を返していたため、
+callee の真の宣言型と乖離して SV→CV 自動キャストが挿入されない不具合
+（`expected *const sv, found *mut gv` 系の連鎖エラー）が発生していた。
+
+詳細は `architecture-type-inference-and-cast.md` の「マクロ間呼出境界での
+キャスト挿入」節を参照。
 
 #### 不完全マーカー
 

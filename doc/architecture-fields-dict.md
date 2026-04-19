@@ -67,8 +67,59 @@ pub struct FieldsDict {
     /// sv_u ユニオンフィールドの型
     /// 例: svu_pv → "char*", svu_hash → "HE**"
     sv_u_field_types: HashMap<InternedStr, String>,
+
+    // ── 共通フィールドマクロ系（perl5 `_XPV_HEAD` / `_XPVCV_COMMON` 等） ──
+
+    /// 構造体名 → そこで展開された共通フィールドマクロ集合
+    /// 例: xpvcv → [_XPV_HEAD, _XPVCV_COMMON]
+    struct_to_common_macros: HashMap<InternedStr, Vec<InternedStr>>,
+
+    /// 共通フィールドマクロ → それを使う構造体集合
+    /// 例: _XPVCV_COMMON → [xpvcv, xpvfm]
+    common_macro_to_structs: HashMap<InternedStr, Vec<InternedStr>>,
+
+    /// 共通フィールドマクロ名 → そこで宣言されるフィールド情報
+    /// 例: _XPVCV_COMMON → [{ name: xcv_xsub, is_fn_pointer: true, ... }, ...]
+    common_macros: HashMap<InternedStr, CommonFieldMacro>,
+
+    /// フィールド名 → そのフィールドを定義している共通マクロ名
+    /// 例: xcv_xsub → _XPVCV_COMMON
+    /// （無名 union 内のフィールドも含む）
+    field_to_defining_macro: HashMap<InternedStr, InternedStr>,
+
+    /// 共通フィールドマクロ宣言フィールド名 → 整合性のある Rust 型
+    /// （bindings.rs 由来）。`build_common_field_rust_types` で構築。
+    common_field_rust_types: HashMap<InternedStr, TypeRepr>,
+
+    /// 共通フィールドマクロ → 一意な SV ファミリー typedef 名
+    /// 例: `_XPVCV_COMMON` → `CV` （xpvcv ボディ → struct cv → typedef CV、
+    /// xpvfm 側は対応 SV 構造体無しで除外、結果一意）
+    /// `build_common_macro_sv_family` で構築。
+    common_macro_to_sv_family: HashMap<InternedStr, InternedStr>,
 }
 ```
+
+#### 共通フィールドマクロ系フィールドの背景
+
+perl5 ヘッダーには `_XPV_HEAD` / `_XPVCV_COMMON` 等の **共通フィールド宣言マクロ** が
+あり、複数の `xpv*` ボディ構造体で **同一フィールド集合** を共有している。
+これらのマクロは perl.h で `#undef` されてしまい、通常のパース時には
+構造として残らない。FieldsDict は `Preprocessor` に `MacroDefCallback`
+（`infer_api.rs::CommonMacroBodyCollector`）を仕込んで `#define` 時点で
+本体トークンを捕獲し、後段で `parse_struct_members_from_tokens_ref` で
+パースしてフィールド集合を再構築する。
+
+これにより以下が可能になる:
+
+- **フィールド型の整合性解決**: 共通マクロが宣言するフィールドは
+  全ボディで同じ型 → bindings.rs から canonical な Rust 型を一意に決定可能
+  （`build_common_field_rust_types` で構築する `common_field_rust_types`）
+- **SV ファミリー型の逆推論**: `_XPVCV_COMMON` 由来フィールドへのアクセス
+  経路は `xpvcv` ボディに限定 → 対応する SV 構造体は `cv` のみ（typedef `CV`）
+  と一意に推論できる（`build_common_macro_sv_family` の
+  `common_macro_to_sv_family`）。`semantic.rs::try_infer_sv_family_from_member`
+  がこれを使って `CvHASGV(cv)` のような未キャストマクロから
+  `cv: *const CV` を逆推論する
 
 ### FieldType
 
@@ -88,19 +139,40 @@ pub struct FieldType {
 ```
 run_pipeline()
     │
-    ├─ FieldsDict::new()                    // 1. 空の辞書を作成
+    ├─ FieldsDict::new()                          // 1. 空の辞書を作成
     │
-    ├─ parser.parse_each_with_pp(|decl| {   // 2. パース時に収集
+    ├─ pp.set_macro_def_callback(                 // 2a. 共通マクロ #define 観測
+    │      CommonMacroBodyCollector::new(...))
+    │
+    ├─ parser.parse_each_with_pp(|decl| {         // 2b. パース時に収集
     │      fields_dict.collect_from_external_decl(decl, ...)
     │
     │      // _SV_HEAD マクロが呼ばれたかチェック
     │      if _SV_HEAD was called {
     │          fields_dict.add_sv_family_member_with_type(name, type)
     │      }
+    │      // 共通マクロが struct 内で呼ばれたかチェック (B-1)
+    │      if e.g. _XPVCV_COMMON was called {
+    │          fields_dict.add_struct_uses_common_macro(struct, macro)
+    │      }
     │  })
     │
-    └─ fields_dict.build_consistent_type_cache()  // 3. キャッシュ構築
+    ├─ fields_dict.build_consistent_type_cache()  // 3. 型一致キャッシュ構築
+    │
+    ├─ fields_dict.build_common_macro_fields(     // 4. 共通マクロ本体パース (B-2)
+    │      &macro_bodies, parse_struct_members)
+    │
+    ├─ fields_dict.build_common_field_rust_types( // 5. bindings.rs 連携
+    │      rust_decl_dict, interner)
+    │
+    └─ fields_dict.build_common_macro_sv_family(  // 6. SV ファミリー逆引き
+           interner)
 ```
+
+`CommonMacroBodyCollector` (`src/infer_api.rs`) は `MacroDefCallback`
+trait を実装しており、`Preprocessor` がプリプロセスドライバ中に `#define` を
+観測した際に呼び出される。`#undef` で失われる前に共通マクロ本体トークンを
+保持しておくのが目的。`take_macro_def_callback()` でドライバ終了後に取り出す。
 
 ### 詳細な収集プロセス
 
@@ -354,6 +426,36 @@ pub fn get_field_type_by_name(
     interner: &StringInterner,
 ) -> Option<&FieldType>
 ```
+
+### 共通フィールドマクロ系アクセサ
+
+```rust
+/// フィールド名 → そのフィールドを宣言した共通マクロ名
+/// 例: xcv_xsub → _XPVCV_COMMON
+pub fn defining_macro_of(&self, field_name: InternedStr) -> Option<InternedStr>;
+
+/// 共通マクロ名 → そのマクロが宣言する CommonField 集合
+pub fn common_macro_info(&self, macro_name: InternedStr) -> Option<&CommonFieldMacro>;
+
+/// フィールド名 → そのフィールド本体（CommonField）
+pub fn common_field_for_field(&self, field_name: InternedStr) -> Option<&CommonField>;
+
+/// 構造体が直接展開している共通マクロ集合
+pub fn common_macros_used_by_struct(&self, struct_name: InternedStr) -> &[InternedStr];
+
+/// 共通マクロ宣言フィールドの canonical Rust 型（bindings.rs 由来、`build_common_field_rust_types` で構築）
+/// 例: xcv_xsub → `Option<unsafe extern "C" fn(...) -> ()>`
+pub fn common_field_rust_type(&self, field_name: InternedStr) -> Option<&TypeRepr>;
+
+/// 共通マクロ → 一意な SV ファミリー typedef（`build_common_macro_sv_family` で構築）
+/// 例: _XPVCV_COMMON → "CV"
+pub fn sv_family_of_common_macro(&self, macro_name: InternedStr) -> Option<InternedStr>;
+```
+
+`sv_family_of_common_macro` は `semantic.rs::try_infer_sv_family_from_member`
+から呼ばれ、`CvHASGV(cv)` のような未キャストマクロから `cv: *const CV` を
+逆推論するための核となる。詳細は `architecture-semantic-type-inference.md`
+の「共通フィールドマクロからの SV ファミリー逆推論」節を参照。
 
 ## 統計情報
 

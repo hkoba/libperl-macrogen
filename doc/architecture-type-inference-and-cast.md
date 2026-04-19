@@ -66,11 +66,33 @@ collect_call_constraints() が Perl_sv_dup_inc の bindings を参照:
 |------|--------|-----------|
 | 1 | bindings.rs (FnParam, FnReturn, Const) | 変更不可 |
 | 2 | C ヘッダー宣言 (InlineFn, Header) | 変更不可 |
-| 3 | apidoc (embed.fnc), Parsed | 参考情報 |
-| 4 | 推論 (Cast, SvFamilyCast, FieldInference) | 変更可能 |
+| 3 | apidoc (embed.fnc), CommonMacroFieldInference, RustType{Parsed} | 参考情報 |
+| 4 | 推論 (Cast, SvFamilyCast, FieldInference, Parser, Inferred) | 変更可能 |
 
-`get_param_type()` と `get_return_type()` は全制約を走査し、
-最小の Tier (最高の確度) を持つ制約を採用する。
+`get_param_type()` と `get_callee_param_type_extended()` は全 ExprId
+（`param.expr_id()` ＋ `param_to_exprs[param.name]`）の制約から void を
+除外し、最小 Tier (=最高確度) を持つ制約を採用する。
+両者は共通自由関数 `best_constraint_for_macro_param()`（rust_codegen.rs）
+を呼ぶ。
+
+#### Tier 3 内の二系統
+
+Tier 3 には性質の異なる 2 つの source が同居する:
+
+- `Apidoc` — embed.fnc に書かれた公式パラメータ型
+- `CommonMacroFieldInference` — `_XPVCV_COMMON` 等の共通フィールドマクロ
+  宣言フィールド経由で逆推論された SV ファミリー型（`*mut CV` 等）
+
+例えば `CvHASGV(cv)` の `cv` には:
+
+```
+*mut SV  (Tier 4, SvFamilyCast)              ← 旧来の総称制約
+*mut CV  (Tier 3, CommonMacroFieldInference) ← 採用 (best tier)
+```
+
+の 2 つが付与され、より specific な後者が prevailing する。
+詳細は `architecture-semantic-type-inference.md` の
+「共通フィールドマクロからの SV ファミリー逆推論」節を参照。
 
 ### 型の具体性 (Specificity)
 
@@ -136,12 +158,18 @@ else: *mut CV     (gp_cv フィールド)
 ```
 1. ジェネリック型パラメータチェック → "T" 等を返す
 2. リテラル文字列パラメータチェック → "&str" を返す
-3. 全制約を Tier 順で走査、最高 Tier の型を採用
+3. best_constraint_for_macro_param() で Tier 最良の非 void 制約を取得
 4. const/mut 調整:
    - const_pointer_positions に含まれる → make_outer_pointer_const()
    - 含まれない＋ポインタ型 → make_outer_pointer_mut()
 5. type_repr_to_rust() で Rust 型文字列に変換
 ```
+
+`get_callee_param_type_extended()` の自家生成マクロ callee パスも同じ
+`best_constraint_for_macro_param()` を呼び、callee 自身の
+`const_pointer_positions` で同様の const/mut 調整を行う。
+これにより宣言型と呼出時の期待型が一致する（「マクロ間呼出境界での
+キャスト挿入」節参照）。
 
 ### 戻り値型の最終決定
 
@@ -158,19 +186,37 @@ else: *mut CV     (gp_cv フィールド)
 
 ### 関数引数のキャスト挿入
 
-`cast_integer_arg_if_needed()` (rust_codegen.rs):
+`cast_arg_syn_if_needed()` (rust_codegen.rs):
+
+`build_arg_string_unified()` から呼ばれる syn::Expr ベースのキャスト挿入。
+旧 `cast_integer_arg_if_needed`（文字列ベース）と論理は同等だが、`as`
+演算子の優先順位崩壊を起こさない。
 
 ```
 actual_ty (推論) vs expected_ty (呼び出し先) を比較:
 
 1. 整数型の幅不一致 → "arg as target_type"
-2. SV subtype キャスト (GV→SV, HV→SV 等):
-   - is_sv_subtype_cast() で判定
+2. enum → integer キャスト (actual が Rust enum、expected が整数型)
+3. SV subtype キャスト (GV→SV, HV→SV, CV→SV 等):
+   - is_sv_subtype_cast() で判定（c_void も両方向許可）
    - actual が *const → expected を *const に変換して cast
-3. SV subtype フォールバック:
-   - actual 不明でも expected が SV 系ポインタなら cast 試行
 4. ※ const→mut キャストは安全でないため行わない
 ```
+
+### マクロ間呼出境界でのキャスト挿入
+
+callee がマクロ関数（自家生成）の場合、`get_callee_param_type_extended()`
+の **最終段（method 3）** が `best_constraint_for_macro_param()` で
+Tier-best 制約を採り、callee 自身の `const_pointer_positions` で const/mut
+を調整する。これにより:
+
+- callee 宣言: `pub unsafe fn CvHASGV(cv: *const CV)` (`get_param_type` 経由)
+- caller 側の callee 期待型ルックアップ: `*const CV` (同じ best-tier + const 調整)
+
+の二者が一致する。両者の選択方式が異なっていた頃は、callee が `*const CV`
+を宣言しているのに caller は「first-non-void」で `*const SV` を期待型と
+見做し、`is_sv_subtype_cast` 経由のキャストが挿入されない（`expected
+*const sv, found *mut gv` 系）連鎖エラーが発生していた。
 
 ### 戻り値のキャスト挿入
 

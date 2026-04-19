@@ -190,6 +190,8 @@ pub struct SemanticAnalyzer<'a> {
    - `collect_expr_constraints()` - 式から型制約を収集
    - `collect_stmt_constraints()` - 文から型制約を収集
    - `register_macro_params_from_apidoc()` - apidoc 型情報でパラメータを登録
+   - `try_infer_sv_family_from_member()` - 共通フィールドマクロ宣言フィールド経由で
+     SV ファミリー型を逆推論（後述「共通フィールドマクロからの SV ファミリー逆推論」節）
 
 4. **ネストしたマクロ呼び出しからの型伝播**
    - `set_macro_return_types()` - 確定済みマクロの戻り値型キャッシュを設定
@@ -298,7 +300,8 @@ pub enum CTypeSource {
     Parser,                          // parser.rs の parse_type_from_string を使用
     FieldInference { field_name: InternedStr }, // フィールドアクセスからの逆推論
     Cast,                            // キャスト式の型名（AST から直接変換）
-    SvFamilyCast,                    // SV ファミリーキャストからの型推論
+    SvFamilyCast,                    // SV ファミリー明示キャストからの型推論（旧方式）
+    CommonMacroFieldInference,       // 共通フィールドマクロ宣言フィールド経由の SV ファミリー逆推論
 }
 
 pub enum RustTypeSource {
@@ -308,6 +311,26 @@ pub enum RustTypeSource {
     Parsed { raw: String },
 }
 ```
+
+#### 信頼度ティア (`confidence_tier`)
+
+`TypeRepr::confidence_tier(&self) -> u8` は型情報の信頼度を 0–4 で返す。
+**数値が小さいほど信頼度が高い**。
+
+| Tier | source                                          | 用途・信頼度 |
+|------|-------------------------------------------------|--------------|
+| 1    | `RustType { FnParam / FnReturn / Const }`       | bindings.rs 由来。最も高い |
+| 2    | `CType { Header / InlineFn }`                   | C ヘッダー宣言。高い |
+| 3    | `CType { Apidoc / CommonMacroFieldInference }`  | apidoc 文字列、共通マクロ逆推論 |
+| 3    | `RustType { Parsed }`                           | bindings.rs 由来の文字列パース |
+| 4    | `CType { Cast / SvFamilyCast / FieldInference / Parser }`, `Inferred(_)` | コード上の構造からの推論 |
+
+`SemanticAnalyzer` がパラメータ型を確定する際、`get_param_type` および
+`get_callee_param_type_extended` (`src/rust_codegen.rs`) は同一パラメータに
+対する複数制約を **Tier-best** で選択する（`best_constraint_for_macro_param`
+ヘルパが共通実装）。
+これにより `CvHASGV(cv)` のような共通マクロ由来パラメータは、より一般的な
+`*mut SV`（Tier 4）よりも `*mut CV`（Tier 3）が優先される。
 
 #### InferredType
 
@@ -448,12 +471,59 @@ MacroInferContext.infer_macro_types()
         └─ 戻り値型を取得
 ```
 
+## 共通フィールドマクロからの SV ファミリー逆推論
+
+**目的**: `CvHASGV(cv)` のような perl5 マクロが `cv: *const SV`（generic）
+ではなく `cv: *const CV`（specific）と推論されるようにする。
+
+### 背景
+
+perl5 ヘッダーの `_XPVCV_COMMON` のような共通フィールド宣言マクロは、
+複数の `xpv*` ボディ構造体で同じフィールド集合（`xcv_gv_u` 等）を共有する。
+あるフィールドが `_XPVCV_COMMON` 由来であれば、そのフィールドにアクセスする
+コードは `xpvcv` ボディを持つ struct（perl5 では `cv` のみ） を扱っている
+ことになる。`FieldsDict.common_macro_to_sv_family` がこの一意マッピングを
+事前計算する（`architecture-fields-dict.md` 参照）。
+
+### 仕組み
+
+`semantic.rs::try_infer_sv_family_from_member` は Member/PtrMember 制約
+収集時に呼ばれ、以下を行う:
+
+1. `fields_dict.defining_macro_of(field)` で leaf field がどの共通マクロ
+   由来かを引く（`xcv_gv_u → _XPVCV_COMMON`）
+2. `fields_dict.sv_family_of_common_macro(macro_id)` で対応する SV typedef
+   を引く（`_XPVCV_COMMON → "CV"`）
+3. base 連鎖を `leftmost_param_ident` で遡り、leftmost の Ident が
+   macro param なら、そのノードに `*mut <typedef>`（`CTypeSource::CommonMacroFieldInference`、
+   Tier 3）を制約として追加
+
+### `leftmost_param_ident` ヘルパ
+
+`(cv)->sv_any->xcv_gv_u` のような連鎖を遡って leftmost Ident を探す。
+`Member`, `PtrMember`, `Deref`, `Cast` を透過するほか、GCC StmtExpr による
+MUTABLE_PTR 展開 `({ void *p_ = (e); p_; })` も `mutable_ptr_inner_expr`
+ヘルパで透過する（perl5 の `MUTABLE_PTR` マクロが展開後この形になる）。
+
+`Call` ノードに到達したり、leftmost が macro param でない場合は `None` を
+返す（誤推論を避ける）。
+
+### 既存 SV ファミリー推論との関係
+
+`(SV_FAMILY_TYPE *)param` のような **明示キャスト** からの推論は別経路で
+行われ、`CTypeSource::SvFamilyCast`（Tier 4）を付与する。共通フィールド
+マクロ経由の方は Tier 3 なので、両者の制約が同一パラメータに同時に付与
+された場合は specific な後者（例: `*mut CV`）が prevailing する。
+
 ## 型情報の優先順位
 
-1. **bindings.rs** (RustDeclDict) - 最も信頼性が高い
-2. **apidoc** (embed.fnc) - Perl 公式ドキュメント
-3. **inline 関数の AST** - C ヘッダーからパース
-4. **推論** - 式の構造から導出
+`TypeRepr::confidence_tier()` の値に基づき、より小さい Tier が優先される
+（前述「信頼度ティア」参照）:
+
+1. **bindings.rs** (RustDeclDict) — Tier 1
+2. **C ヘッダー / inline 関数** — Tier 2
+3. **apidoc / 共通マクロ逆推論 / RustType{Parsed}** — Tier 3
+4. **キャスト/フィールド推論/Inferred** — Tier 4
 
 ## 関連ファイル
 
