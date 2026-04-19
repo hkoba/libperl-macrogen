@@ -440,6 +440,11 @@ pub fn run_inference_with_preprocessor(
         fields_dict.build_common_field_rust_types(dict, pp.interner_mut());
     }
 
+    // 共通フィールドマクロ → 一意な SV ファミリー typedef の事前マッピング
+    // を構築。`CvHASGV(cv)` のように `_XPVCV_COMMON` 由来フィールドへの
+    // アクセス経路から `cv: *const CV` を逆推論するために使う。
+    fields_dict.build_common_macro_sv_family(pp.interner());
+
     // sv_u フィールド型は parse_each で動的に収集済み
     // （SV ファミリー構造体の sv_u union から自動検出）
 

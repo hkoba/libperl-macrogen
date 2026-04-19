@@ -94,6 +94,11 @@ pub struct FieldsDict {
     /// 共通フィールドマクロが宣言したフィールド名 → 整合性のある Rust 型
     /// （bindings.rs 由来）。`build_common_field_rust_types` で構築。
     common_field_rust_types: HashMap<InternedStr, TypeRepr>,
+    /// 共通フィールドマクロ → 一意な SV ファミリー typedef 名
+    /// 例: `_XPVCV_COMMON` → `CV` （xpvcv ボディ → struct cv → typedef CV、
+    /// xpvfm 側は対応 SV 構造体無しで除外、結果一意）
+    /// `build_common_macro_sv_family` で構築。
+    common_macro_to_sv_family: HashMap<InternedStr, InternedStr>,
 }
 
 impl FieldsDict {
@@ -568,6 +573,44 @@ impl FieldsDict {
     /// （`build_common_field_rust_types` で構築）
     pub fn rust_type_of_common_field(&self, field_name: InternedStr) -> Option<&TypeRepr> {
         self.common_field_rust_types.get(&field_name)
+    }
+
+    /// 共通フィールドマクロから一意な SV ファミリー typedef 名を取得
+    /// （`build_common_macro_sv_family` で構築）
+    pub fn sv_family_of_common_macro(&self, macro_name: InternedStr) -> Option<InternedStr> {
+        self.common_macro_to_sv_family.get(&macro_name).copied()
+    }
+
+    /// 共通フィールドマクロ → 対応する SV ファミリー typedef 名の事前マッピング
+    /// を構築する。
+    ///
+    /// 各 xpv ボディ構造体（例 xpvcv）について:
+    ///   xpv struct → typedef "XPVCV" → sv_head_type_to_struct で SV 構造体 cv
+    ///     → typedef "CV"
+    /// と辿り、全ての xpv について typedef が一意に決まる場合のみ登録する。
+    pub fn build_common_macro_sv_family(&mut self, interner: &StringInterner) {
+        let mut new_map: HashMap<InternedStr, InternedStr> = HashMap::new();
+        for (&macro_id, struct_names) in &self.common_macro_to_structs {
+            let mut sv_typedefs: HashSet<InternedStr> = HashSet::new();
+            for &xpv_struct in struct_names {
+                let xpv_typedef = match self.get_typedef_for_struct(xpv_struct) {
+                    Some(td) => td,
+                    None => continue,
+                };
+                let xpv_typedef_str = interner.get(xpv_typedef);
+                let sv_struct = match self.sv_head_type_to_struct.get(xpv_typedef_str) {
+                    Some(&s) => s,
+                    None => continue, // 対応する SV ファミリー無し
+                };
+                if let Some(td) = self.get_typedef_for_struct(sv_struct) {
+                    sv_typedefs.insert(td);
+                }
+            }
+            if sv_typedefs.len() == 1 {
+                new_map.insert(macro_id, *sv_typedefs.iter().next().unwrap());
+            }
+        }
+        self.common_macro_to_sv_family = new_map;
     }
 
     /// `RustDeclDict.structs` (bindgen の Item::Struct と Item::Union を含む)
