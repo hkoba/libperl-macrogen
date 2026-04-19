@@ -551,6 +551,17 @@ fn is_unsigned_cast_expr(expr_str: &str) -> bool {
     }
 }
 
+/// 指定された型名が unsigned 整数型（プリミティブ + 既知エイリアス）か判定。
+/// 真なら `{ty}::MAX` のような associated const が使える。
+fn is_unsigned_integer_target(ty: &str) -> bool {
+    matches!(ty,
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" |
+        "U8" | "U16" | "U32" | "U64" |
+        "UV" | "STRLEN" | "Size_t" | "size_t" | "PERL_UINTMAX_T" |
+        "c_uchar" | "c_ushort" | "c_uint" | "c_ulong" | "c_ulonglong"
+    )
+}
+
 
 /// 式文字列の最外レベルの不要な括弧を除去する。
 /// "(expr)" → "expr" （先頭の '(' と末尾の ')' が対応する場合のみ）
@@ -1969,7 +1980,11 @@ impl<'a> RustCodegen<'a> {
         }
         if self.is_pointer_expr_unified(expr, info)
             || self.infer_expr_type_unified(expr, info).is_some_and(|ut| ut.is_pointer()) {
-            return format!("!{}.is_null()", expr_str);
+            // `!{expr}.is_null()` 直付けだと expr が Cast の場合に
+            // `x as T.is_null()` となり E0001 系 (cast cannot be followed
+            // by method call)。必ず paren で包んで method chain の対象を
+            // 明確化する。
+            return format!("!({}).is_null()", expr_str);
         }
         format!("({} != 0)", strip_outer_parens(expr_str))
     }
@@ -2574,7 +2589,9 @@ impl<'a> RustCodegen<'a> {
                     if self.is_pointer_expr_unified(expr, Some(info))
                         || self.infer_expr_type_unified(expr, Some(info)).is_some_and(|ut| ut.is_pointer()) {
                         let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
-                        self.writeln(&format!("{}!{}.is_null()", body_indent, s));
+                        // `!x.is_null()` 直付けだと x が cast の場合に
+                        // `x as T.is_null()` と解釈される。必ず括弧で包む。
+                        self.writeln(&format!("{}!({}).is_null()", body_indent, s));
                     } else {
                         syn_expr = crate::syn_codegen::wrap_as_bool(syn_expr);
                         let s = normalize_parens(&crate::syn_codegen::expr_to_string(&syn_expr));
@@ -3083,6 +3100,19 @@ impl<'a> RustCodegen<'a> {
             }
             ExprKind::Cast { type_name, expr: inner } => {
                 let t = self.type_name_to_rust(type_name);
+                // C の慣用表現 `(unsigned)-1` は最大値を意味する。
+                // `-1 as T` では E0600 (usize に対する単項 - は不可) になるため、
+                // `T::MAX` に置換する。`-N` 一般は今は扱わず、`-1` のみ対応。
+                if is_unsigned_integer_target(&t) {
+                    if let ExprKind::UnaryMinus(minus_inner) = &inner.kind {
+                        if matches!(&minus_inner.kind,
+                            ExprKind::IntLit(1) | ExprKind::UIntLit(1))
+                        {
+                            return syn::parse_str(&format!("{}::MAX", t))
+                                .unwrap_or_else(|_| int_lit(0));
+                        }
+                    }
+                }
                 // C の const-cast パターン `(T*)&place`:
                 // place が `*const` ポインタ deref 経由（例: `(c)->field` で
                 // `c: *const PERL_CONTEXT`）だと `&raw mut place` が E0596
@@ -4959,9 +4989,11 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
                 let cond_str = self.build_expr_string(cond, None);
-                // bool 式なら !cond、そうでなければ cond == 0
+                // bool 式なら !(cond)、そうでなければ cond == 0
+                // `!{}` 直付けだと `!a < b` のように優先順位で Lt が bind され、
+                // `cannot apply ! to pointer` 等の誤生成になる。
                 let break_cond = if is_boolean_expr(cond) {
-                    format!("!{}", cond_str)
+                    normalize_parens(&format!("!({})", cond_str))
                 } else {
                     format!("{} == 0", cond_str)
                 };
