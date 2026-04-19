@@ -24,6 +24,7 @@ pub mod pp_expr;
 pub mod preprocessor;
 pub mod rust_codegen;
 pub mod rust_decl;
+pub mod static_array_emitter;
 pub mod struct_emitter;
 pub mod semantic;
 pub mod sexp;

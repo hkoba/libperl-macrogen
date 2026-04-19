@@ -139,6 +139,14 @@ impl KnownSymbols {
             names.insert(name.to_string());
         }
 
+        // 自動生成 static const 配列名（`static_array_emitter.rs` 由来）
+        // 注: struct/typedef alias 名は `generate()` 側で実際に出力できた名前のみ
+        // 後から `insert()` する。事前にここで全部入れると未生成の型を参照する
+        // コードを「既知」とみなして compile error を起こす可能性がある。
+        for (name_id, _) in result.global_const_dict.iter() {
+            names.insert(interner.get(*name_id).to_string());
+        }
+
         // Rust プリミティブ / 標準識別子
         let rust_primitives = [
             "true", "false", "std", "crate", "self", "super",
@@ -155,6 +163,11 @@ impl KnownSymbols {
     /// シンボル名が既知かどうかチェック
     fn contains(&self, name: &str) -> bool {
         self.names.contains(name)
+    }
+
+    /// 既知シンボルとして名前を追加
+    pub fn insert(&mut self, name: String) {
+        self.names.insert(name);
     }
 }
 
@@ -5080,8 +5093,30 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     // const BUILD_TIMESTAMP: &'static str = "2025-01-24T17:50:00+09:00";
 
     pub fn generate(&mut self, result: &InferResult) -> io::Result<()> {
+        // 自動生成 struct/typedef を先に決定（known_symbols 構築前）
+        // 実際に出力される名前のみ known_symbols に登録するため、emit を先行実施。
+        let missing_structs = crate::struct_emitter::emit_missing_structs(
+            &result.fields_dict,
+            result.rust_decl_dict.as_ref(),
+            self.interner,
+        );
+        let static_arrays = crate::static_array_emitter::emit_static_arrays(
+            &result.global_const_dict,
+            &result.fields_dict,
+            result.rust_decl_dict.as_ref(),
+            self.interner,
+        );
+
         // 既知シンボル集合を構築（未解決シンボル検出用）
-        let known_symbols = KnownSymbols::new(result, self.interner);
+        let mut known_symbols = KnownSymbols::new(result, self.interner);
+        for n in &missing_structs.emitted_struct_names {
+            known_symbols.insert(n.clone());
+        }
+        for n in &missing_structs.emitted_typedef_names {
+            known_symbols.insert(n.clone());
+        }
+        // global_const_dict 由来の static 配列は既に KnownSymbols::new 内で
+        // 登録済みなので追加不要
 
         // ヘッダーコメント
         writeln!(self.writer, "// Auto-generated Rust bindings")?;
@@ -5096,15 +5131,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // target enum のバリアントを import
         self.generate_enum_imports(result)?;
 
-        // bindings.rs に存在しない struct/union を Rust 定義として出力
-        // （例: sv_inline.h の body_details、ALIGNED_TYPE_NAME(*) の typedef union）
-        let missing_structs = crate::struct_emitter::emit_missing_structs(
-            &result.fields_dict,
-            result.rust_decl_dict.as_ref(),
-            self.interner,
-        );
-        if !missing_structs.is_empty() {
-            self.writer.write_all(missing_structs.as_bytes())?;
+        // 自動生成 struct/union 定義を出力
+        if !missing_structs.source.is_empty() {
+            self.writer.write_all(missing_structs.source.as_bytes())?;
+        }
+
+        // 自動生成 static const 配列を出力（事前算出済み）
+        if !static_arrays.is_empty() {
+            self.writer.write_all(static_arrays.as_bytes())?;
         }
 
         // マクロの生成可能性を事前計算（inline→macro カスケード検出用）

@@ -137,16 +137,27 @@ pub fn type_repr_to_rust_struct_field(ty: &TypeRepr, interner: &StringInterner) 
     ty.to_rust_string(interner)
 }
 
+/// 出力結果と実際に出力した名前集合のペア
+pub struct EmittedStructs {
+    pub source: String,
+    /// syn::parse_str を通った struct/union 名
+    pub emitted_struct_names: HashSet<String>,
+    /// 出力した typedef alias 名（左辺）
+    pub emitted_typedef_names: HashSet<String>,
+}
+
 /// `missing_struct_defs` 全件を 1 つの Rust ソース文字列にする。
 /// セクションヘッダコメントを冒頭に付与。
 pub fn emit_missing_structs(
     fields_dict: &FieldsDict,
     rust_decl_dict: Option<&RustDeclDict>,
     interner: &StringInterner,
-) -> String {
+) -> EmittedStructs {
     let defs = missing_struct_defs(fields_dict, rust_decl_dict, interner);
+    let mut emitted_struct_names: HashSet<String> = HashSet::new();
+    let mut emitted_typedef_names: HashSet<String> = HashSet::new();
     if defs.is_empty() {
-        return String::new();
+        return EmittedStructs { source: String::new(), emitted_struct_names, emitted_typedef_names };
     }
     let mut buf = String::new();
     buf.push_str("// === Auto-generated struct definitions ===\n");
@@ -158,6 +169,7 @@ pub fn emit_missing_structs(
         if syn::parse_str::<syn::Item>(&formatted).is_ok() {
             buf.push_str(&formatted);
             buf.push('\n');
+            emitted_struct_names.insert(interner.get(name).to_string());
         } else {
             buf.push_str(&format!(
                 "// [SKIPPED] struct/union {} — failed to format as valid Rust\n\n",
@@ -191,8 +203,9 @@ pub fn emit_missing_structs(
         buf.push_str("// but the typedef name NAME is not (e.g. XPVHV_WITH_AUX).\n\n");
         for (td, st) in typedef_aliases {
             buf.push_str(&format!("#[allow(non_camel_case_types)] pub type {} = {};\n", td, st));
+            emitted_typedef_names.insert(td);
         }
         buf.push('\n');
     }
-    buf
+    EmittedStructs { source: buf, emitted_struct_names, emitted_typedef_names }
 }
