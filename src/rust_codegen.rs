@@ -5096,6 +5096,17 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         // target enum のバリアントを import
         self.generate_enum_imports(result)?;
 
+        // bindings.rs に存在しない struct/union を Rust 定義として出力
+        // （例: sv_inline.h の body_details、ALIGNED_TYPE_NAME(*) の typedef union）
+        let missing_structs = crate::struct_emitter::emit_missing_structs(
+            &result.fields_dict,
+            result.rust_decl_dict.as_ref(),
+            self.interner,
+        );
+        if !missing_structs.is_empty() {
+            self.writer.write_all(missing_structs.as_bytes())?;
+        }
+
         // マクロの生成可能性を事前計算（inline→macro カスケード検出用）
         self.precompute_macro_generability(result, &known_symbols);
 

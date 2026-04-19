@@ -132,6 +132,31 @@ pub struct FieldsDict {
     /// C 慣用句で可変長バッファとして使われ、ポインタとして扱うべきもの。
     /// 例: `(struct hek, hek_key)` → `char` の TypeRepr
     flexible_array_fields: HashMap<(InternedStr, InternedStr), TypeRepr>,
+    /// 構造体・union 定義の順序付き取得用。
+    /// bindings.rs に存在しない struct（例: `body_details`、`ALIGNED_TYPE` 系
+    /// typedef union）の Rust 定義生成に使う。メンバー順を保持し、bitfield 幅も
+    /// 持つ。同名 struct/union を複数回見た場合は最初の定義を保持する。
+    struct_defs: HashMap<InternedStr, StructDef>,
+}
+
+/// 構造体・union 定義の順序付き表現（`StructEmitter` 用）。
+///
+/// `FieldsDict.field_types` は HashMap でメンバー順が失われるため、こちらに
+/// `Vec` で順序付き保存する。bitfield 幅は `bitfield_width` で表現する。
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub name: InternedStr,
+    pub is_union: bool,
+    pub members: Vec<StructMemberInfo>,
+}
+
+/// `StructDef` のメンバー要素
+#[derive(Debug, Clone)]
+pub struct StructMemberInfo {
+    pub name: InternedStr,
+    pub type_repr: TypeRepr,
+    /// `T name : N` 形式のときの N。通常メンバーは None。
+    pub bitfield_width: Option<u32>,
 }
 
 impl FieldsDict {
@@ -213,6 +238,13 @@ impl FieldsDict {
 
     /// 構造体指定からフィールド情報を収集
     fn collect_from_struct_spec(&mut self, spec: &StructSpec, interner: &StringInterner) {
+        self.collect_from_struct_spec_with_kind(spec, false, interner);
+    }
+
+    /// `collect_from_struct_spec` の本体。union 識別を呼び出し側から受け取る。
+    fn collect_from_struct_spec_with_kind(
+        &mut self, spec: &StructSpec, is_union: bool, interner: &StringInterner,
+    ) {
         // 名前付き構造体のみ対象
         let struct_name = match spec.name {
             Some(name) => name,
@@ -225,16 +257,19 @@ impl FieldsDict {
             None => return,
         };
 
+        // 順序付き struct_def を構築（既存があれば後で skip）
+        let mut ordered_members: Vec<StructMemberInfo> = Vec::new();
+
         let last_idx = members.len().saturating_sub(1);
         for (m_idx, member) in members.iter().enumerate() {
             // メンバーの型指定子にネストした構造体があれば再帰的に処理
             for type_spec in &member.specs.type_specs {
                 match type_spec {
                     TypeSpec::Struct(nested) => {
-                        self.collect_from_struct_spec(nested, interner);
+                        self.collect_from_struct_spec_with_kind(nested, false, interner);
                     }
                     TypeSpec::Union(nested) => {
-                        self.collect_from_struct_spec(nested, interner);
+                        self.collect_from_struct_spec_with_kind(nested, true, interner);
                         // sv_u union を検出して C 型を収集
                         if self.is_sv_u_union_member(member, interner) {
                             self.collect_sv_u_union_fields(nested, interner);
@@ -258,6 +293,18 @@ impl FieldsDict {
 
                         // フィールド型の収集
                         if let Some(type_repr) = self.extract_field_type(&member.specs, declarator, interner) {
+                            // 順序付き struct_def 用に追加（bitfield 幅も保持）
+                            let bitfield_width = decl.bitfield.as_ref().and_then(|e| {
+                                if let crate::ast::ExprKind::IntLit(n) = &e.kind {
+                                    Some(*n as u32)
+                                } else { None }
+                            });
+                            ordered_members.push(StructMemberInfo {
+                                name: field_name,
+                                type_repr: type_repr.clone(),
+                                bitfield_width,
+                            });
+
                             // flexible array member の検出: 構造体の真の末尾メンバーで
                             // size 1 / 0 の固定長配列、または C99 [] 構文の可変長配列
                             let is_struct_last = is_last_member && d_idx == last_decl_idx;
@@ -276,6 +323,25 @@ impl FieldsDict {
                 }
             }
         }
+
+        // 順序付き struct_def を登録（先勝ち）
+        if !ordered_members.is_empty() {
+            self.struct_defs.entry(struct_name).or_insert_with(|| StructDef {
+                name: struct_name,
+                is_union,
+                members: ordered_members,
+            });
+        }
+    }
+
+    /// 構造体・union 定義（順序付き）を取得
+    pub fn get_struct_def(&self, name: InternedStr) -> Option<&StructDef> {
+        self.struct_defs.get(&name)
+    }
+
+    /// 全 struct/union 定義を返す（順序付き struct_defs に登録されたもの）
+    pub fn iter_struct_defs(&self) -> impl Iterator<Item = (&InternedStr, &StructDef)> {
+        self.struct_defs.iter()
     }
 
     /// メンバーが sv_u という名前の union かどうかを判定
