@@ -3678,10 +3678,39 @@ impl<'a> RustCodegen<'a> {
                         || self.is_static_array_expr(rhs)
                         || self.is_pointer_expr_unified(rhs, info)
                         || self.infer_expr_type_unified(rhs, info).is_some_and(|ut| ut.is_pointer());
+                    // 配列値に対して `(arr.as_ptr() as *mut ELEM)` で mut pointer を
+                    // 作るヘルパ。l_arr は field-access の配列（build_syn_expr が
+                    // `.as_ptr()` を付けない）、is_static_array は Ident の static
+                    // 配列（build_syn_expr が既に `.as_ptr()` を付ける）。どちらの
+                    // ケースでも結果が `*const T` にならないよう `*mut T` へ cast
+                    // する。
+                    let l_is_static_arr = self.is_static_array_expr(lhs);
+                    let r_is_static_arr = self.is_static_array_expr(rhs);
+                    let cast_to_mut = |this: &mut Self, expr: syn::Expr, arr_expr: &Expr,
+                                        needs_as_ptr: bool| -> syn::Expr {
+                        let elem = this.infer_expr_type_unified(arr_expr, info)
+                            .and_then(|ut| ut.inner_type().cloned())
+                            .map(|u| u.to_rust_string());
+                        let base = if needs_as_ptr {
+                            crate::syn_codegen::method_call(expr, "as_ptr", vec![])
+                        } else {
+                            expr
+                        };
+                        if let Some(e) = elem {
+                            crate::syn_codegen::cast_syn_expr(base, &format!("*mut {}", e))
+                        } else {
+                            base
+                        }
+                    };
                     if lp && !rp {
                         let l = self.build_syn_expr(lhs, info);
-                        // 配列値 (非 Ident) は `.as_ptr()` でポインタ減衰させてから `.offset()`
-                        let l = if l_arr { crate::syn_codegen::method_call(l, "as_ptr", vec![]) } else { l };
+                        let l = if l_arr {
+                            cast_to_mut(self, l, lhs, /*needs_as_ptr=*/true)
+                        } else if l_is_static_arr {
+                            cast_to_mut(self, l, lhs, /*needs_as_ptr=*/false)
+                        } else {
+                            l
+                        };
                         let r = self.build_syn_expr(rhs, info);
                         let r_isize = crate::syn_codegen::cast_syn_expr(r, "isize");
                         let arg = if *op == BinOp::Add { r_isize } else {
@@ -3696,7 +3725,13 @@ impl<'a> RustCodegen<'a> {
                     if rp && !lp && *op == BinOp::Add {
                         let l = self.build_syn_expr(lhs, info);
                         let r = self.build_syn_expr(rhs, info);
-                        let r = if r_arr { crate::syn_codegen::method_call(r, "as_ptr", vec![]) } else { r };
+                        let r = if r_arr {
+                            cast_to_mut(self, r, rhs, /*needs_as_ptr=*/true)
+                        } else if r_is_static_arr {
+                            cast_to_mut(self, r, rhs, /*needs_as_ptr=*/false)
+                        } else {
+                            r
+                        };
                         let l_isize = crate::syn_codegen::cast_syn_expr(l, "isize");
                         return crate::syn_codegen::method_call(r, "offset", vec![l_isize]);
                     }
