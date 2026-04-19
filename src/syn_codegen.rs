@@ -642,12 +642,21 @@ pub fn deref(expr: syn::Expr) -> syn::Expr {
     })
 }
 
-/// `&mut expr` を構築
+/// `&raw mut expr` を構築（C の `&` 演算子に対応する生ポインタ取得）。
+///
+/// C では `&x` は「アドレスを取る」= 生ポインタを得る操作で、
+/// Rust の `&mut T` 参照とは意味論が異なる。FFI コードでは生ポインタが正解。
+/// `&raw mut expr` は Rust 2024 で安定化された構文で、`*mut T` を直接生成する。
+///
+/// これにより `(SV**)&sv` のような C コードが
+/// `&raw mut sv as *mut *mut SV` に翻訳され、E0606（参照→生ポインタの直接 cast）
+/// が回避される。
 pub fn addr_of_mut(expr: syn::Expr) -> syn::Expr {
-    syn::Expr::Reference(syn::ExprReference {
+    syn::Expr::RawAddr(syn::ExprRawAddr {
         attrs: vec![],
         and_token: Default::default(),
-        mutability: Some(Default::default()),
+        raw: Default::default(),
+        mutability: syn::PointerMutability::Mut(Default::default()),
         expr: Box::new(expr),
     })
 }
@@ -1237,10 +1246,12 @@ mod tests {
 
     #[test]
     fn test_addr_of_mut() {
+        // C の `&x` は生ポインタを得る操作なので `&raw mut x` を生成する
+        // （Rust 2024 で安定化）。詳細は addr_of_mut のドキュメント参照。
         let expr: syn::Expr = parse_quote!(x);
         let result = addr_of_mut(expr);
         let s = expr_to_string(&result);
-        assert_eq!(s, "& mut x");
+        assert_eq!(s, "& raw mut x");
     }
 
     #[test]
