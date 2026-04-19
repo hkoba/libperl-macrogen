@@ -1178,6 +1178,16 @@ impl<'a> SemanticAnalyzer<'a> {
             .map(|c| c.ty.clone())
     }
 
+    /// type_env から式の TypeRepr を取得、無ければ "<unknown>" 由来の Void を返す。
+    /// 旧 `get_expr_type_str` + `from_apidoc_string` round-trip を置き換える。
+    /// round-trip だと RustType（"*mut T" 等の Rust 表記）が C 専用パーサに
+    /// 渡されて Void に潰れていたため、TypeRepr を直接保持することで型情報を
+    /// 維持する。
+    fn get_expr_type_repr_or_unknown(&self, expr_id: ExprId, type_env: &TypeEnv) -> TypeRepr {
+        self.get_expr_type_repr(expr_id, type_env)
+            .unwrap_or_else(|| TypeRepr::from_apidoc_string("<unknown>", self.interner))
+    }
+
     /// type_env から式の型文字列を取得
     fn get_expr_type_str(&self, expr_id: ExprId, type_env: &TypeEnv) -> String {
         if let Some(constraints) = type_env.expr_constraints.get(&expr_id) {
@@ -1446,11 +1456,11 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(cond, type_env);
                 self.collect_expr_constraints(then_expr, type_env);
                 self.collect_expr_constraints(else_expr, type_env);
-                let then_ty_str = self.get_expr_type_str(then_expr.id, type_env);
-                let else_ty_str = self.get_expr_type_str(else_expr.id, type_env);
+                let then_type = self.get_expr_type_repr_or_unknown(then_expr.id, type_env);
+                let else_type = self.get_expr_type_repr_or_unknown(else_expr.id, type_env);
+                // result_type は void* と具体型の選択など文字列ベースのルールが
+                // 残っているため当面 from_apidoc_string 経由のままとする
                 let result_ty_str = self.compute_conditional_type_str(then_expr.id, else_expr.id, type_env);
-                let then_type = TypeRepr::from_apidoc_string(&then_ty_str, self.interner);
-                let else_type = TypeRepr::from_apidoc_string(&else_ty_str, self.interner);
                 let result_type = TypeRepr::from_apidoc_string(&result_ty_str, self.interner);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
@@ -1675,8 +1685,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(lhs, type_env);
                 self.collect_expr_constraints(rhs, type_env);
                 // 代入式の型は左辺の型
-                let lhs_ty_str = self.get_expr_type_str(lhs.id, type_env);
-                let lhs_type = TypeRepr::from_apidoc_string(&lhs_ty_str, self.interner);
+                let lhs_type = self.get_expr_type_repr_or_unknown(lhs.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::Assignment {
@@ -1691,8 +1700,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_expr_constraints(lhs, type_env);
                 self.collect_expr_constraints(rhs, type_env);
                 // コンマ式の型は右辺の型
-                let rhs_ty_str = self.get_expr_type_str(rhs.id, type_env);
-                let rhs_type = TypeRepr::from_apidoc_string(&rhs_ty_str, self.interner);
+                let rhs_type = self.get_expr_type_repr_or_unknown(rhs.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::Comma {
@@ -1706,8 +1714,7 @@ impl<'a> SemanticAnalyzer<'a> {
             ExprKind::PreInc(inner) | ExprKind::PreDec(inner) |
             ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                let inner_ty_str = self.get_expr_type_str(inner.id, type_env);
-                let inner_type = TypeRepr::from_apidoc_string(&inner_ty_str, self.interner);
+                let inner_type = self.get_expr_type_repr_or_unknown(inner.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::IncDec {
@@ -1720,8 +1727,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // アドレス取得
             ExprKind::AddrOf(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                let inner_ty_str = self.get_expr_type_str(inner.id, type_env);
-                let inner_type = TypeRepr::from_apidoc_string(&inner_ty_str, self.interner);
+                let inner_type = self.get_expr_type_repr_or_unknown(inner.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::AddressOf {
@@ -1734,8 +1740,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // 間接参照
             ExprKind::Deref(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                let inner_ty_str = self.get_expr_type_str(inner.id, type_env);
-                let pointer_type = TypeRepr::from_apidoc_string(&inner_ty_str, self.interner);
+                let pointer_type = self.get_expr_type_repr_or_unknown(inner.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::Dereference {
@@ -1748,8 +1753,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // 単項プラス/マイナス
             ExprKind::UnaryPlus(inner) | ExprKind::UnaryMinus(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                let inner_ty_str = self.get_expr_type_str(inner.id, type_env);
-                let inner_type = TypeRepr::from_apidoc_string(&inner_ty_str, self.interner);
+                let inner_type = self.get_expr_type_repr_or_unknown(inner.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::UnaryArithmetic {
@@ -1762,8 +1766,7 @@ impl<'a> SemanticAnalyzer<'a> {
             // ビット反転
             ExprKind::BitNot(inner) => {
                 self.collect_expr_constraints(inner, type_env);
-                let inner_ty_str = self.get_expr_type_str(inner.id, type_env);
-                let inner_type = TypeRepr::from_apidoc_string(&inner_ty_str, self.interner);
+                let inner_type = self.get_expr_type_repr_or_unknown(inner.id, type_env);
                 type_env.add_constraint(TypeEnvConstraint::new(
                     expr.id,
                     TypeRepr::Inferred(InferredType::UnaryArithmetic {
@@ -1830,8 +1833,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.collect_compound_constraints(compound, type_env);
                 // 最後の式の型を取得
                 if let Some(last_expr_id) = self.get_last_expr_id(compound) {
-                    let last_ty_str = self.get_expr_type_str(last_expr_id, type_env);
-                    let last_expr_type = TypeRepr::from_apidoc_string(&last_ty_str, self.interner);
+                    let last_expr_type = self.get_expr_type_repr_or_unknown(last_expr_id, type_env);
                     type_env.add_constraint(TypeEnvConstraint::new(
                         expr.id,
                         TypeRepr::Inferred(InferredType::StmtExpr {

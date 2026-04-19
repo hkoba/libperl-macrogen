@@ -199,6 +199,38 @@ pub struct SemanticAnalyzer<'a> {
    - `get_macro_return_type()` - マクロの戻り値型を取得
    - `get_macro_param_types()` - マクロのパラメータ型を取得
 
+#### 内側式の型情報ハンドリング
+
+単項演算子（`AddrOf` / `Deref` / `UnaryPlus/Minus` / `BitNot` / `IncDec`）、
+`Comma`、`Assign`、`Conditional` then/else、`StmtExpr` の最後の式 — つまり
+「**内側の式の型をそのまま箱で包んで自分の constraint にする**」系の
+コレクタは、内側の TypeRepr を **直接** クローンして `InferredType::*`
+にラップする (`get_expr_type_repr_or_unknown` ヘルパ経由)。
+
+旧実装は `get_expr_type_str()` で表示文字列に落として
+`from_apidoc_string()` で再パースする round-trip だった。これは
+`from_apidoc_string` の内部パーサ (`parse_c_type_string`) が
+**C 表記専用** （`PADLIST *` を解釈、`*mut PADLIST` は解釈不能）
+のため、`bindings.rs` 由来の `RustType{*mut T}` フィールド型が
+round-trip 後 `Void` に潰れる事故を引き起こしていた。
+
+具体例: `CvPADLIST(sv) → *(assert_(...) &(...).xcv_padlist_u.xcv_padlist)`
+
+- `xcv_padlist` は無名 union メンバーで `FieldsDict.common_field_rust_types`
+  経由でしか型解決できず、`*mut PADLIST`（Rust 表記）として保持される
+- 旧 round-trip: `MemberAccess.to_display_string() = "*mut PADLIST"` →
+  `from_apidoc_string("*mut PADLIST")` → `Void` フォールバック → AddrOf →
+  `void *` → Deref → `c_void` （戻り値型として誤出力）
+- 新パス: `get_expr_type_repr` で `RustType{*mut PADLIST}` を直接保持 →
+  AddressOf でそのまま wrap → Deref で `to_rust_string` の `*mut ` prefix
+  を strip → `*mut PADLIST` （正しい）
+
+例外として `Conditional` の `result_type`（then/else から「より具体的な
+方を選ぶ」ロジック）と、二項演算の `compute_binary_type_str`、
+`Index` の base 型 `*` 末尾 strip 等は依然として文字列ベースのルールが
+残っているため当面 `from_apidoc_string` を経由している。これらも将来的に
+TypeRepr 直接化したいが、ロジック移植コストが大きいため段階移行とする。
+
 #### Type 列挙型
 
 C 言語の型を表現:
