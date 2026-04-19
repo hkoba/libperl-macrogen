@@ -1812,7 +1812,11 @@ impl<'a> RustCodegen<'a> {
             ExprKind::BitNot(inner) | ExprKind::UnaryMinus(inner) => self.infer_expr_type_unified(inner, info),
             ExprKind::CharLit(_) => Some(UnifiedType::from_rust_str("i8")),
             ExprKind::UIntLit(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::LongLong }),
-            ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Int { signed: false, size: crate::unified_type::IntSize::Long }),
+            // Rust の std::mem::size_of / size_of_val は `usize` を返す。
+            // 旧実装は Int{false, Long} を返していたが、これは to_rust_string
+            // で "c_ulong" になり usize と混同できず `u64 * usize` 等の
+            // E0277 を起こした。明示的に Named("usize") にして区別する。
+            ExprKind::Sizeof(_) | ExprKind::SizeofType(_) => Some(UnifiedType::Named("usize".to_string())),
             ExprKind::Call { func, .. } => {
                 // メソッド呼び出し: offset/wrapping_add 等はレシーバと同じ型
                 if let ExprKind::Member { expr: receiver, member, .. } = &func.kind {
