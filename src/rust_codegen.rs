@@ -1902,23 +1902,35 @@ impl<'a> RustCodegen<'a> {
                     None
                 };
 
-                if let Some(fd) = self.fields_dict {
-                    if let Some(struct_name_str) = resolve_struct_name(self) {
-                        if let Some(struct_name) = self.interner.lookup(&struct_name_str) {
-                            if let Some(member_ty) = fd.member_type(struct_name, *member) {
-                                let rust_ty = member_ty.to_rust_string(self.interner);
-                                // 関数ポインタ (`*mut /* fn */` 形式) は正しい
-                                // `Option<fn(...)>` に解決できないので bindings.rs の
-                                // field_type_map にフォールバック。
-                                if !rust_ty.contains("/* fn */") {
-                                    return Some(UnifiedType::from_rust_str(&rust_ty));
-                                }
-                            }
-                        }
-                    }
-                }
                 let member_str = self.interner.get(*member);
-                self.field_type_map.get(member_str).cloned()
+                // fields_dict の C ソース由来型を第一優先 (同名フィールドが
+                // 別 struct に存在するケースの誤解決を避けるため struct 名で
+                // 限定)。ただし C 側で `[T; SVt_LAST]` のようにサイズが定数式で
+                // 未解決の場合は `*mut T` になり配列情報を失うので、
+                // field_type_map (bindings.rs 由来の Array) の方を優先する
+                // フォールバックを組み合わせる。
+                let fd_ty: Option<UnifiedType> = self.fields_dict.and_then(|fd| {
+                    let struct_name_str = resolve_struct_name(self)?;
+                    let struct_name = self.interner.lookup(&struct_name_str)?;
+                    let member_ty = fd.member_type(struct_name, *member)?;
+                    let rust_ty = member_ty.to_rust_string(self.interner);
+                    if rust_ty.contains("/* fn */") {
+                        return None;
+                    }
+                    Some(UnifiedType::from_rust_str(&rust_ty))
+                });
+                let ftm_ty = self.field_type_map.get(member_str).cloned();
+                // field_type_map が配列で fields_dict がポインタなら ftm を採用。
+                // (SVt_LAST のような unresolved サイズで fields_dict が配列情報を失うケース)
+                match (&fd_ty, &ftm_ty) {
+                    (Some(fd_ut), Some(ftm_ut))
+                        if fd_ut.is_pointer() && ftm_ut.to_rust_string().starts_with('[') =>
+                    {
+                        return ftm_ty;
+                    }
+                    _ => {}
+                }
+                fd_ty.or(ftm_ty)
             }
             ExprKind::Deref(inner) => {
                 let inner_ut = self.infer_expr_type_unified(inner, info)?;
@@ -3421,7 +3433,20 @@ impl<'a> RustCodegen<'a> {
                     } else {
                         self.build_syn_expr(base, info)
                     };
-                    method_call(b, "as_ptr", vec![])
+                    // 要素型を可能な限り抽出して `as_mut_ptr()` を使う。
+                    // `as_ptr()` だと const ポインタが返り `&mut a[i]` が E0596。
+                    // 要素型が分からない場合は `as_ptr()` で妥協する。
+                    let elem_str = self.infer_expr_type_unified(base, info)
+                        .and_then(|ut| ut.inner_type().cloned())
+                        .map(|inner| inner.to_rust_string());
+                    if let Some(elem) = elem_str {
+                        // `(array.as_ptr() as *mut ELEM).offset(i)` を組み立て、
+                        // mutable pointer 経由で offset する。
+                        let as_ptr = method_call(b, "as_ptr", vec![]);
+                        cast_syn_expr(as_ptr, &format!("*mut {}", elem))
+                    } else {
+                        method_call(b, "as_ptr", vec![])
+                    }
                 } else {
                     self.build_syn_expr(base, info)
                 };
