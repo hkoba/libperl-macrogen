@@ -96,8 +96,31 @@ pub struct FieldsDict {
     /// xpvfm 側は対応 SV 構造体無しで除外、結果一意）
     /// `build_common_macro_sv_family` で構築。
     common_macro_to_sv_family: HashMap<InternedStr, InternedStr>,
+
+    /// 構造体最終メンバーが flexible array member（`char foo[1]`、`[0]`、または
+    /// C99 `[]` 構文）である場合の (struct_name, field_name) → 要素型
+    /// （配列を剥がした TypeRepr）。C 慣用句で可変長バッファとして使われ、
+    /// 配列名→ポインタ decay を Rust に翻訳するために必要。
+    /// 例: `(struct hek, hek_key)` → `char` の TypeRepr
+    flexible_array_fields: HashMap<(InternedStr, InternedStr), TypeRepr>,
 }
 ```
+
+#### Flexible Array Member の背景
+
+C ヘッダーには `struct hek { ... char hek_key[1]; }` のように **構造体末尾に
+サイズ 1 (or 0、C99 `[]`) の配列**を持ち、実際は **可変長バッファの先頭**として
+使う慣用句が頻出する。`HEK_KEY(hek) = (hek)->hek_key` のような アクセス時、
+C では配列名→ポインタ decay により `char *` として扱われる。
+
+bindings.rs では `pub hek_key: [c_char; 1]` のまま生成されるため、Rust 側で
+そのまま `(*hek).hek_key` を返すと **配列値**になり、`.offset()` 呼び出しや
+`as *mut U` cast が型エラー (E0599 / E0605) になる。
+
+`flexible_array_fields` は parse 時に「最終メンバーかつ size 1/0 配列、または
+`[]`」を検出して登録し、`semantic.rs` / `rust_codegen.rs` でアクセスを
+**ポインタ decay** に翻訳する基盤を提供する。`flexible_array_element` アクセサ
+は typedef 解決付き（例: `HEK` で問い合わせても `hek` のエントリを返す）。
 
 #### 共通フィールドマクロ系フィールドの背景
 

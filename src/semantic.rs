@@ -84,6 +84,21 @@ fn mutable_ptr_inner_expr(compound: &CompoundStmt) -> Option<&Expr> {
     None
 }
 
+/// 既存の `TypeRepr` の最も外側に Pointer derived を一段被せた新しい
+/// `TypeRepr` を返す。flexible array member (`T[1]`) を `T*` として扱う際に使う。
+/// 元が `RustType` や `Inferred` の場合はサポート外として `None` 相当ではなく
+/// 安全側で元をそのまま返す（呼び出し側は CType 由来のみ渡す想定）。
+fn wrap_with_outer_pointer(ty: TypeRepr, is_const: bool) -> TypeRepr {
+    use crate::type_repr::CDerivedType;
+    match ty {
+        TypeRepr::CType { specs, mut derived, source } => {
+            derived.push(CDerivedType::Pointer { is_const, is_volatile: false, is_restrict: false });
+            TypeRepr::CType { specs, derived, source }
+        }
+        other => other,
+    }
+}
+
 /// 型変数 ID (制約ベース型推論用)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(usize);
@@ -1566,9 +1581,17 @@ impl<'a> SemanticAnalyzer<'a> {
                     // TypeRepr ベースのフィールドルックアップ
                     let base_type_repr = self.get_expr_type_repr(base.id, type_env);
                     let struct_name = base_type_repr.as_ref().and_then(|t| t.type_name());
-                    let direct = struct_name
-                        .and_then(|n| self.fields_dict?.get_field_type(n, *member))
-                        .map(|ft| Box::new(ft.type_repr.clone()));
+                    // flexible array member の特別扱い: 配列ではなく要素型へのポインタ
+                    let flex_ptr = struct_name.and_then(|n| {
+                        self.fields_dict?
+                            .flexible_array_element(n, *member)
+                            .map(|elem| Box::new(wrap_with_outer_pointer(elem.clone(), false)))
+                    });
+                    let direct = flex_ptr.or_else(|| {
+                        struct_name
+                            .and_then(|n| self.fields_dict?.get_field_type(n, *member))
+                            .map(|ft| Box::new(ft.type_repr.clone()))
+                    });
                     // フォールバック: 共通フィールドマクロ × bindings.rs マッピング
                     // （無名 union メンバ等、上の経路で解決できないケース）
                     direct.or_else(|| {
@@ -1638,10 +1661,17 @@ impl<'a> SemanticAnalyzer<'a> {
                 let base_type_repr = self.get_expr_type_repr(base.id, type_env);
                 let pointee = base_type_repr.as_ref().and_then(|t| t.pointee_name());
                 let (field_type, used_consistent_type) = if let Some(name) = pointee {
+                    // flexible array member の特別扱い: 配列ではなく要素型へのポインタ
+                    let flex_ptr = self.fields_dict.and_then(|fd| {
+                        fd.flexible_array_element(name, *member)
+                            .map(|elem| Box::new(wrap_with_outer_pointer(elem.clone(), false)))
+                    });
                     // ベース型が既知のポインタ型：構造体名で直接ルックアップ
-                    let direct = self.fields_dict
-                        .and_then(|fd| fd.get_field_type(name, *member))
-                        .map(|ft| Box::new(ft.type_repr.clone()));
+                    let direct = flex_ptr.or_else(|| {
+                        self.fields_dict
+                            .and_then(|fd| fd.get_field_type(name, *member))
+                            .map(|ft| Box::new(ft.type_repr.clone()))
+                    });
                     let ty = direct.or_else(|| {
                         // 共通フィールドマクロ × bindings.rs マッピング（無名 union 等）
                         self.fields_dict

@@ -2654,6 +2654,50 @@ impl<'a> RustCodegen<'a> {
     // syn::Expr ベースの式構築 (Step 1+)
     // ================================================================
 
+    /// flexible array member の field access を `&raw const place as *mut T`
+    /// に変換する。配列名→ポインタ decay の C 慣用句を Rust で正しく表現する。
+    ///
+    /// 検出条件: base 式の TypeRepr から typedef/struct 名を取り、
+    /// `FieldsDict::flexible_array_element` が要素型を返した場合のみ変換。
+    /// それ以外は `access` をそのまま返す。
+    fn maybe_decay_flex_array(
+        &self,
+        access: syn::Expr,
+        base: &Expr,
+        member: InternedStr,
+        info: Option<&MacroInferInfo>,
+        is_ptr_member: bool,
+    ) -> syn::Expr {
+        let Some(fd) = self.fields_dict else { return access; };
+        let Some(info) = info else { return access; };
+        let Some(constraints) = info.type_env.expr_constraints.get(&base.id) else {
+            return access;
+        };
+        let Some(base_type) = constraints.first().map(|c| &c.ty) else {
+            return access;
+        };
+        let struct_name = if is_ptr_member {
+            base_type.pointee_name()
+        } else {
+            base_type.type_name()
+        };
+        let Some(struct_name) = struct_name else { return access; };
+        let Some(elem) = fd.flexible_array_element(struct_name, member) else {
+            return access;
+        };
+        // `&raw const access as *mut <element>` を生成
+        let elem_str = elem.to_rust_string(self.interner);
+        let target_ty_str = format!("*mut {}", elem_str);
+        let raw_const = syn::Expr::RawAddr(syn::ExprRawAddr {
+            attrs: vec![],
+            and_token: Default::default(),
+            raw: Default::default(),
+            mutability: syn::PointerMutability::Const(Default::default()),
+            expr: Box::new(access),
+        });
+        crate::syn_codegen::insert_cast(raw_const, crate::syn_codegen::parse_type(&target_ty_str))
+    }
+
     /// `&MACRO(args)` の AddrOf inner が「自家生成マクロへの Call」で、
     /// 呼び出し先が **Expression body**（lvalue chain として展開可能）なら、
     /// 本体式を引数で alpha 置換した `Expr` を返す。
@@ -2811,7 +2855,8 @@ impl<'a> RustCodegen<'a> {
                         args: syn::punctuated::Punctuated::new(),
                     })
                 } else {
-                    field_access(e, m)
+                    let access = field_access(e, m);
+                    self.maybe_decay_flex_array(access, base, *member, info, /*is_ptr_member=*/false)
                 }
             }
             ExprKind::PtrMember { expr: base, member } => {
@@ -2829,7 +2874,8 @@ impl<'a> RustCodegen<'a> {
                         args: syn::punctuated::Punctuated::new(),
                     })
                 } else {
-                    field_access(derefed, m)
+                    let access = field_access(derefed, m);
+                    self.maybe_decay_flex_array(access, base, *member, info, /*is_ptr_member=*/true)
                 }
             }
             ExprKind::Comma { lhs, rhs } => {

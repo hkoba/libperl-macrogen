@@ -302,6 +302,43 @@ mut/const を問わず通る。
 (&raw const (*c).cx_u.cx_blk.blk_u.blku_loop.itervar_u.gv) as *mut *mut SV
 ```
 
+#### Flexible Array Member の pointer decay
+
+C 慣用句で構造体最終メンバーが `T name[1]` (or `[0]`、C99 `[]`) になっている
+ものは、実体は可変長バッファの先頭で C では配列名→ポインタ decay により
+`T *` として扱われる。Rust にそのまま `(*hek).hek_key` を生成すると
+`[c_char; 1]` 値になり、後続の `.offset()` や `as *mut c_uchar` cast が
+型エラーになる。
+
+`FieldsDict::flexible_array_fields`（`architecture-fields-dict.md` 参照）で
+parse 時に検出し、以下の処理で正しく decay させる:
+
+1. **`semantic.rs` Member/PtrMember**: フィールド型ルックアップ時に
+   flex-array なら配列ではなく **要素型へのポインタ** (`wrap_with_outer_pointer`)
+   を `MemberAccess.field_type` に格納する。これにより上位式の型推論
+   （マクロ戻り値型など）が `*mut T` として伝播する。
+2. **`rust_codegen.rs` Member/PtrMember**: `maybe_decay_flex_array` ヘルパが
+   通常の field_access に対して `&raw const <access> as *mut <element>` を
+   被せる。`&raw const` を選ぶ理由は前項「Cast(AddrOf)」と同じ
+   （base が `*const Struct` deref のとき E0596 を回避）。
+
+```c
+// C
+#define HEK_KEY(hek)  (hek)->hek_key
+```
+
+```rust
+// 旧出力 (E0605: [c_char; 1] as *mut c_uchar invalid)
+pub unsafe fn HEK_KEY(hek: *const HEK) -> [c_char; 1] {
+    unsafe { (*hek).hek_key }
+}
+
+// 現行
+pub unsafe fn HEK_KEY(hek: *const HEK) -> *mut c_char {
+    unsafe { (&raw const (*hek).hek_key) as *mut c_char }
+}
+```
+
 #### `&MACRO(args)` の inline 展開
 
 C で `&MACRO(args)` は token 置換で `&<inlined_body>` になり、

@@ -48,6 +48,34 @@ fn is_fn_pointer_declarator(derived: &[DerivedDecl]) -> bool {
     has_fn && has_ptr
 }
 
+/// `TypeRepr` が C 慣用句の flexible array member 型（`T[1]`、`T[0]`、または
+/// C99 `T[]`）かを判定し、該当すれば配列を剥がした要素型を返す。
+///
+/// 検出条件: 最も外側の derived が `Array { size: Some(0|1) | None }`。
+/// （`Array { size: Some(N>=2) }` は通常の固定長配列なので除外）
+fn flexible_array_element_type(ty: &TypeRepr) -> Option<TypeRepr> {
+    use crate::type_repr::CDerivedType;
+    let TypeRepr::CType { specs, derived, source } = ty else {
+        return None;
+    };
+    let last = derived.last()?;
+    let is_flex = match last {
+        CDerivedType::Array { size: None } => true,
+        CDerivedType::Array { size: Some(0) } | CDerivedType::Array { size: Some(1) } => true,
+        _ => false,
+    };
+    if !is_flex {
+        return None;
+    }
+    let mut new_derived = derived.clone();
+    new_derived.pop();
+    Some(TypeRepr::CType {
+        specs: specs.clone(),
+        derived: new_derived,
+        source: source.clone(),
+    })
+}
+
 /// フィールドの型情報
 #[derive(Debug, Clone)]
 pub struct FieldType {
@@ -99,6 +127,11 @@ pub struct FieldsDict {
     /// xpvfm 側は対応 SV 構造体無しで除外、結果一意）
     /// `build_common_macro_sv_family` で構築。
     common_macro_to_sv_family: HashMap<InternedStr, InternedStr>,
+    /// 構造体最終メンバーが flexible array member（`char foo[1]` や `[0]`、`[]`）
+    /// である場合の (struct_name, field_name) → 要素型（配列を剥がした TypeRepr）。
+    /// C 慣用句で可変長バッファとして使われ、ポインタとして扱うべきもの。
+    /// 例: `(struct hek, hek_key)` → `char` の TypeRepr
+    flexible_array_fields: HashMap<(InternedStr, InternedStr), TypeRepr>,
 }
 
 impl FieldsDict {
@@ -192,7 +225,8 @@ impl FieldsDict {
             None => return,
         };
 
-        for member in members {
+        let last_idx = members.len().saturating_sub(1);
+        for (m_idx, member) in members.iter().enumerate() {
             // メンバーの型指定子にネストした構造体があれば再帰的に処理
             for type_spec in &member.specs.type_specs {
                 match type_spec {
@@ -211,7 +245,9 @@ impl FieldsDict {
             }
 
             // フィールド名と型を収集
-            for decl in &member.declarators {
+            let is_last_member = m_idx == last_idx;
+            let last_decl_idx = member.declarators.len().saturating_sub(1);
+            for (d_idx, decl) in member.declarators.iter().enumerate() {
                 if let Some(ref declarator) = decl.declarator {
                     if let Some(field_name) = declarator.name {
                         // フィールド名 -> 構造体名のマッピング
@@ -222,6 +258,15 @@ impl FieldsDict {
 
                         // フィールド型の収集
                         if let Some(type_repr) = self.extract_field_type(&member.specs, declarator, interner) {
+                            // flexible array member の検出: 構造体の真の末尾メンバーで
+                            // size 1 / 0 の固定長配列、または C99 [] 構文の可変長配列
+                            let is_struct_last = is_last_member && d_idx == last_decl_idx;
+                            if is_struct_last {
+                                if let Some(elem) = flexible_array_element_type(&type_repr) {
+                                    self.flexible_array_fields
+                                        .insert((struct_name, field_name), elem);
+                                }
+                            }
                             self.field_types.insert(
                                 (struct_name, field_name),
                                 FieldType { type_repr },
@@ -579,6 +624,26 @@ impl FieldsDict {
     /// （`build_common_macro_sv_family` で構築）
     pub fn sv_family_of_common_macro(&self, macro_name: InternedStr) -> Option<InternedStr> {
         self.common_macro_to_sv_family.get(&macro_name).copied()
+    }
+
+    /// (struct_name, field_name) が flexible array member であれば、
+    /// その要素型 (`T[1]` の `T`) を返す。typedef 解決付き
+    /// （例: 引数に `HEK` を渡しても `hek` のエントリを返す）。
+    /// `collect_from_struct_spec` で構造体最終メンバーが size 1/0 配列、または
+    /// C99 `[]` の場合に登録される。
+    pub fn flexible_array_element(&self, struct_name: InternedStr, field_name: InternedStr)
+        -> Option<&TypeRepr>
+    {
+        if let Some(t) = self.flexible_array_fields.get(&(struct_name, field_name)) {
+            return Some(t);
+        }
+        let resolved = self.resolve_typedef(struct_name)?;
+        self.flexible_array_fields.get(&(resolved, field_name))
+    }
+
+    /// `flexible_array_element` の便利版（要素型が不要な場合）
+    pub fn is_flexible_array_field(&self, struct_name: InternedStr, field_name: InternedStr) -> bool {
+        self.flexible_array_element(struct_name, field_name).is_some()
     }
 
     /// 共通フィールドマクロ → 対応する SV ファミリー typedef 名の事前マッピング
