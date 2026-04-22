@@ -771,6 +771,43 @@ fn wider_integer_type(a: &str, b: &str) -> Option<&'static str> {
     }
 }
 
+/// 2 つのポインタ型の inner が Rust として「同じ型」か判定する
+/// （const/mut は無視）。
+///
+/// `*mut c_char` と `*mut i8`、`*const c_int` と `*const i32` のように、
+/// C 別名と Rust プリミティブの対応関係を吸収する。
+/// 二重ポインタ `**const T` vs `**mut T` にも再帰的に対応する。
+pub fn pointer_inner_compatible(a: &UnifiedType, b: &UnifiedType) -> bool {
+    let a_inner = match a { UnifiedType::Pointer { inner, .. } => inner.as_ref(), _ => return false };
+    let b_inner = match b { UnifiedType::Pointer { inner, .. } => inner.as_ref(), _ => return false };
+    type_inner_compatible(a_inner, b_inner)
+}
+
+/// `pointer_inner_compatible` の再帰ヘルパ。ポインタ以外の inner も扱える。
+fn type_inner_compatible(a: &UnifiedType, b: &UnifiedType) -> bool {
+    // 両方ポインタなら再帰
+    if a.is_pointer() && b.is_pointer() {
+        return pointer_inner_compatible(a, b);
+    }
+    // 整数型は normalize_integer_type で正規化して比較
+    let a_s = a.to_rust_string();
+    let b_s = b.to_rust_string();
+    if let (Some(na), Some(nb)) = (normalize_integer_type(&a_s), normalize_integer_type(&b_s)) {
+        return na == nb;
+    }
+    // void は双方で吸収
+    if a.is_void() && b.is_void() { return true; }
+    // それ以外は文字列一致で判定
+    a_s == b_s
+}
+
+/// 両方ポインタで、inner は compatible だが const/mut が違う場合に true。
+pub fn pointer_const_differs(a: &UnifiedType, b: &UnifiedType) -> bool {
+    if !(a.is_pointer() && b.is_pointer()) { return false; }
+    if a.is_const_pointer() == b.is_const_pointer() { return false; }
+    pointer_inner_compatible(a, b)
+}
+
 /// マクロ本体を走査し、`&mut param` や代入先として使用されるパラメータを検出する
 /// ポインタパラメータが *mut である必要があるかを判定する。
 /// callee_const_params: 呼び出し先マクロで *const に確定したパラメータ情報
@@ -4697,6 +4734,14 @@ impl<'a> RustCodegen<'a> {
                 return crate::syn_codegen::cast_syn_expr(syn_expr, nr);
             }
         }
+        // ポインタ戻り値: inner が Rust 上 compatible（c_char≡i8 等）だが文字列
+        // 表現が違う場合は return 型に合わせて as cast を入れる。
+        // const/mut 違いも同時に吸収する。
+        if ret_ut.is_pointer() && expr_ut.is_pointer() && ret_s != expr_s
+            && pointer_inner_compatible(ret_ut, &expr_ut)
+        {
+            return crate::syn_codegen::cast_syn_expr(syn_expr, &ret_s);
+        }
         syn_expr
     }
 
@@ -4747,9 +4792,13 @@ impl<'a> RustCodegen<'a> {
                                 r_syn = cast_syn_expr(r_syn, nl);
                             }
                         }
-                        // ポインタ const/mut 不一致 → LHS 型に明示キャスト
-                        if lut.is_pointer() && rut.is_pointer()
-                            && lut.is_const_pointer() != rut.is_const_pointer()
+                        // ポインタ const/mut 不一致、あるいは inner 別名違い
+                        // （c_char≡i8 等の Rust レベル同型）→ LHS 型に明示 cast
+                        if pointer_const_differs(lut, &rut) {
+                            r_syn = cast_syn_expr(r_syn, &ls);
+                        } else if lut.is_pointer() && rut.is_pointer()
+                            && ls != rs
+                            && pointer_inner_compatible(lut, &rut)
                         {
                             r_syn = cast_syn_expr(r_syn, &ls);
                         }
