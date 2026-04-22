@@ -2168,6 +2168,48 @@ impl<'a> RustCodegen<'a> {
         }
     }
 
+    /// 式の型が `Option<fn(...)>` / `Option<unsafe extern "C" fn(...)>`
+    /// または同型の typedef エイリアスかを判定する。
+    ///
+    /// bindgen 由来の関数ポインタフィールドは `Option<fn(...)>` で包まれる。
+    /// この形式は整数 0 との `==`/`!=` 比較で `expected Option<...>` エラーを
+    /// 起こすため、呼出側で `.is_some()`/`.is_none()` に変換する。
+    fn is_option_fn_pointer_expr(&self, expr: &Expr, info: Option<&MacroInferInfo>) -> bool {
+        // Member/PtrMember の直接フォールバック: infer が None を返す
+        // （inline 関数のローカル変数など）場合に備えて、field_type_map で
+        // フィールド名から直接 fn pointer 型か確認する。
+        if let ExprKind::Member { member, .. } | ExprKind::PtrMember { member, .. } = &expr.kind {
+            let member_str = self.interner.get(*member);
+            if let Some(ut) = self.field_type_map.get(member_str) {
+                let ty_str = ut.to_rust_string();
+                if type_str_is_fn_pointer(&ty_str) {
+                    return true;
+                }
+                if let Some(dict) = self.rust_decl_dict {
+                    if let Some(alias) = dict.types.get(&ty_str) {
+                        if type_str_is_fn_pointer(&alias.ty) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(ut) = self.infer_expr_type_unified(expr, info) else { return false };
+        let ty_str = ut.to_rust_string();
+        if type_str_is_fn_pointer(&ty_str) {
+            return true;
+        }
+        // typedef エイリアス経由: dict.types で展開して fn 形式か確認
+        if let Some(dict) = self.rust_decl_dict {
+            if let Some(alias) = dict.types.get(&ty_str) {
+                if type_str_is_fn_pointer(&alias.ty) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// ポインタ式をbool条件に変換するラッパー（macro/inline 統一版）
     fn wrap_as_bool_condition(&self, expr: &Expr, expr_str: &str, info: Option<&MacroInferInfo>) -> String {
         if self.is_bool_expr_with_dict(expr) {
@@ -2200,6 +2242,11 @@ impl<'a> RustCodegen<'a> {
         }
         if expr_str.ends_with(" as bool)") || expr_str.ends_with("!= 0)") || expr_str.ends_with(".is_null()") {
             return expr_str.to_string();
+        }
+        // Option<fn(...)> は `!= 0` で比較できず、真偽判定は .is_some()。
+        // field_type_map 経由でフィールド名から検出する。
+        if self.is_option_fn_pointer_expr(expr, info) {
+            return format!("{}.is_some()", expr_str);
         }
         if self.is_pointer_expr_unified(expr, info)
             || self.infer_expr_type_unified(expr, info).is_some_and(|ut| ut.is_pointer()) {
@@ -3645,6 +3692,25 @@ impl<'a> RustCodegen<'a> {
                         return syn::parse_str(
                             if *op == BinOp::Eq { "false" } else { "true" }
                         ).unwrap_or_else(|_| int_lit(0));
+                    }
+                }
+                // Option<fn(...)> == 0 / != 0 → .is_none() / .is_some()
+                // bindgen の関数ポインタフィールドは Option で包まれるため、
+                // ポインタ null 比較より先に Option 判定を行う。
+                if matches!(op, BinOp::Eq | BinOp::Ne) {
+                    let opt_lhs = (is_null_literal(rhs) || matches!(&rhs.kind, ExprKind::IntLit(0)))
+                        && self.is_option_fn_pointer_expr(lhs, info);
+                    let opt_rhs = (is_null_literal(lhs) || matches!(&lhs.kind, ExprKind::IntLit(0)))
+                        && self.is_option_fn_pointer_expr(rhs, info);
+                    if opt_lhs || opt_rhs {
+                        let receiver_expr = if opt_lhs { lhs } else { rhs };
+                        let r = self.build_syn_expr(receiver_expr, info);
+                        let method = if *op == BinOp::Eq { "is_none" } else { "is_some" };
+                        return syn::Expr::MethodCall(syn::ExprMethodCall {
+                            attrs: vec![], receiver: Box::new(r), dot_token: Default::default(),
+                            method: ident(method), turbofish: None,
+                            paren_token: Default::default(), args: syn::punctuated::Punctuated::new(),
+                        });
                     }
                 }
                 // ポインタ == 0 / != 0 → .is_null()
