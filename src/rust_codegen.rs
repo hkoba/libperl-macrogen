@@ -4340,6 +4340,26 @@ impl<'a> RustCodegen<'a> {
                 {
                     return cast_syn_expr(arg_expr, expected_ty);
                 }
+                // const/mut のみ違い、または inner 別名違い（c_char≡i8 等）
+                // の自動キャスト。Rust は単一レベルの `*mut T → *const T` を
+                // 自動強制するため、その場合だけ cast を挿入しない。
+                // ネストした二重ポインタの const 違い（例: `*mut *mut T`
+                // → `*mut *const T`）は強制されないので cast が必要。
+                if pointer_inner_compatible(&actual_ut, &expected_ut) {
+                    let top_mut_to_const = !actual_ut.is_const_pointer()
+                        && expected_ut.is_const_pointer();
+                    let top_const_same = actual_ut.is_const_pointer()
+                        == expected_ut.is_const_pointer();
+                    // 内側まで完全一致（文字列レベル）か
+                    let inner_exact_match = actual_ut.inner_type()
+                        .zip(expected_ut.inner_type())
+                        .is_some_and(|(a, b)| a.to_rust_string() == b.to_rust_string());
+                    let auto_coerces = (top_mut_to_const || top_const_same)
+                        && inner_exact_match;
+                    if !auto_coerces {
+                        return cast_syn_expr(arg_expr, expected_ty);
+                    }
+                }
             }
             return arg_expr;
         }
