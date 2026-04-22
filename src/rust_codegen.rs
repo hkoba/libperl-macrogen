@@ -2003,6 +2003,17 @@ impl<'a> RustCodegen<'a> {
                         Some(UnifiedType::Bool)
                     }
                     _ => {
+                        // C のポインタ減算（同型ポインタ同士）は ptrdiff_t/isize を返す。
+                        // `offset_from` メソッド呼び出しに変換されるので isize 扱い。
+                        if *op == BinOp::Sub {
+                            let lp = self.is_pointer_expr_unified(lhs, info)
+                                || self.infer_expr_type_unified(lhs, info).is_some_and(|ut| ut.is_pointer());
+                            let rp = self.is_pointer_expr_unified(rhs, info)
+                                || self.infer_expr_type_unified(rhs, info).is_some_and(|ut| ut.is_pointer());
+                            if lp && rp {
+                                return Some(UnifiedType::Named("isize".to_string()));
+                            }
+                        }
                         let lt = self.infer_expr_type_unified(lhs, info);
                         if lt.is_some() { return lt; }
                         self.infer_expr_type_unified(rhs, info)
@@ -3890,6 +3901,32 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
 
+                // ポインタ比較で const/mut が違う場合の cast。
+                // `*mut T < *const T` は Rust で E0308（types differ in mutability）。
+                // rhs を lhs の型に合わせる（wrapper の呼出規約で lhs が mut、
+                // callee 由来の rhs が const になりやすい）。
+                if matches!(op, BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
+                    if let (Some(lut), Some(rut)) =
+                        (self.infer_expr_type_unified(lhs, info),
+                         self.infer_expr_type_unified(rhs, info))
+                    {
+                        if lut.is_pointer() && rut.is_pointer()
+                            && pointer_inner_compatible(&lut, &rut)
+                            && (lut.is_const_pointer() != rut.is_const_pointer()
+                                || lut.to_rust_string() != rut.to_rust_string())
+                        {
+                            let l = self.build_syn_expr(lhs, info);
+                            let r = self.build_syn_expr(rhs, info);
+                            let target = lut.to_rust_string();
+                            return syn::Expr::Binary(syn::ExprBinary {
+                                attrs: vec![], left: Box::new(l),
+                                op: crate::syn_codegen::to_syn_binop(*op),
+                                right: Box::new(crate::syn_codegen::cast_syn_expr(r, &target)),
+                            });
+                        }
+                    }
+                }
+
                 let l = self.build_syn_expr(lhs, info);
                 let r = self.build_syn_expr(rhs, info);
 
@@ -4874,7 +4911,9 @@ impl<'a> RustCodegen<'a> {
                                 r_syn = cast_syn_expr(r_syn, nl);
                             }
                         } else if let (Some(nl), Some(nr)) = (normalize_integer_type(&ls), normalize_integer_type(&rs)) {
-                            if !integer_types_compatible(nl, nr) {
+                            // 代入では isize/i64 や usize/u64 を区別する（Rust 的に別型）。
+                            // integer_types_compatible の緩い判定は演算側で使用。
+                            if nl != nr {
                                 r_syn = cast_syn_expr(r_syn, nl);
                             }
                         }
