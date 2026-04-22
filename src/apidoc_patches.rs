@@ -184,6 +184,36 @@ impl ApidocPatchSet {
         Self::load_json(&path)
     }
 
+    /// テキスト形式の skip-list ファイルを読み込んで
+    /// skip_codegen に名前を追加する。
+    ///
+    /// フォーマット:
+    /// - 1 行に 1 つの関数名（マクロまたは inline 関数）
+    /// - `#` で始まる行は comment として無視
+    /// - 前後の空白はトリム、空行は無視
+    ///
+    /// 同名が既に存在する場合は **既存を優先**（JSON patches で設定済みなど）。
+    /// reason は `"skip-list: <filename>"` を埋め込む。
+    pub fn merge_skip_list<P: AsRef<Path>>(&mut self, path: P) -> io::Result<usize> {
+        let path_ref = path.as_ref();
+        let content = std::fs::read_to_string(path_ref)?;
+        let display_name = path_ref.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| path_ref.display().to_string());
+        let reason = format!("skip-list: {}", display_name);
+        let mut added = 0usize;
+        for raw_line in content.lines() {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() { continue; }
+            // 既存（JSON patches 等）を優先、同名は上書きしない
+            if !self.skip_codegen.contains_key(line) {
+                self.skip_codegen.insert(line.to_string(), reason.clone());
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
     /// パッチが空（適用するものが無い）か
     pub fn is_empty(&self) -> bool {
         self.return_overrides.is_empty()

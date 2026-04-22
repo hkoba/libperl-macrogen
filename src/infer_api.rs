@@ -240,6 +240,7 @@ pub fn run_inference_with_preprocessor(
     apidoc_path: Option<&Path>,
     bindings_path: Option<&Path>,
     debug_opts: Option<&DebugOptions>,
+    skip_codegen_lists: &[PathBuf],
 ) -> Result<Option<InferResult>, InferError> {
     // RustDeclDict をロード（パーサー作成前に行い、展開抑制を設定）
     let rust_decl_dict = if let Some(path) = bindings_path {
@@ -470,7 +471,7 @@ pub fn run_inference_with_preprocessor(
     // perl の C ヘッダや apidoc に含まれる既知の誤りを訂正する。
     // ファイル: apidoc_path と同じディレクトリの v$major.$minor.patches.json
     // （存在しなければ no-op）
-    let apidoc_patches = if let Some(path) = apidoc_path {
+    let mut apidoc_patches = if let Some(path) = apidoc_path {
         let mut path_buf = path.to_path_buf();
         let new_name = path.file_stem()
             .map(|s| format!("{}.patches.json", s.to_string_lossy()))
@@ -484,6 +485,14 @@ pub fn run_inference_with_preprocessor(
     } else {
         crate::apidoc_patches::ApidocPatchSet::empty()
     };
+    // テキスト形式の skip-list ファイルをマージ（同名は patches 側を優先）
+    for list_path in skip_codegen_lists {
+        let added = apidoc_patches.merge_skip_list(list_path)?;
+        eprintln!(
+            "[apidoc-patches] merged {} skip entry(ies) from {}",
+            added, list_path.display()
+        );
+    }
     if !apidoc_patches.is_empty() {
         let applied = apidoc_patches.apply_to_apidoc(&mut apidoc);
         if let Some(p) = &apidoc_patches.source_path {

@@ -172,6 +172,11 @@ pub struct InferConfig {
     pub dump_apidoc_after_merge: Option<String>,
     /// 型推論デバッグ対象のマクロ名リスト
     pub debug_type_inference: Vec<String>,
+    /// codegen をスキップしたい関数名リストファイル。
+    /// 1 行 1 名、`#` コメント可。複数指定可。
+    /// JSON の apidoc patches (`skip_codegen`) にマージされる
+    /// （同名は既存が優先）。
+    pub skip_codegen_lists: Vec<PathBuf>,
 }
 
 impl InferConfig {
@@ -337,6 +342,16 @@ impl PipelineBuilder {
     /// 型推論デバッグ対象のマクロを指定
     pub fn with_debug_type_inference(mut self, macros: Vec<String>) -> Self {
         self.infer.debug_type_inference = macros;
+        self
+    }
+
+    /// codegen をスキップする関数名リストファイルを追加
+    ///
+    /// ファイル形式: 1 行 1 名、`#` コメント可、空行無視。
+    /// 複数回呼び出してファイルを追加可能。JSON の apidoc patches
+    /// (`skip_codegen`) と同時指定できる（同名は patches 優先）。
+    pub fn with_skip_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
+        self.infer.skip_codegen_lists.push(path.into());
         self
     }
 
@@ -522,6 +537,12 @@ impl PreprocessedPipeline {
         self
     }
 
+    /// codegen をスキップする関数名リストファイルを追加
+    pub fn with_skip_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
+        self.infer_config.skip_codegen_lists.push(path.into());
+        self
+    }
+
     /// Phase 2: 推論を実行
     pub fn infer(self) -> Result<InferredPipeline, PipelineError> {
         use crate::apidoc::resolve_apidoc_path;
@@ -552,6 +573,7 @@ impl PreprocessedPipeline {
             apidoc_path.as_deref(),
             self.infer_config.bindings_path.as_deref(),
             debug_opts.as_ref(),
+            &self.infer_config.skip_codegen_lists,
         )?;
 
         match result {

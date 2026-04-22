@@ -149,6 +149,11 @@ struct Cli {
     /// 指定した関数のコード生成時に型推論結果を stderr にダンプ（デバッグ用）
     #[arg(long = "dump-types-for", value_name = "FUNC")]
     dump_types_for: Option<String>,
+
+    /// codegen をスキップする関数名リストファイル。
+    /// 1 行 1 名、`#` コメント可、空行無視。複数指定可。
+    #[arg(long = "skip-codegen-list", value_name = "FILE")]
+    skip_codegen_list: Vec<PathBuf>,
 }
 
 fn main() {
@@ -224,6 +229,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // apidoc があれば設定
     if let Some(ref apidoc_path) = cli.apidoc {
         builder = builder.with_apidoc(apidoc_path);
+    }
+
+    // skip-codegen リストファイル（複数指定可）
+    for path in &cli.skip_codegen_list {
+        builder = builder.with_skip_codegen_list(path);
     }
 
     // デバッグオプション: dump_apidoc_after_merge
