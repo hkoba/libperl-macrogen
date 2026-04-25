@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "comment": "Auto-generated skip_codegen patches for perl 5.36. Functions whose generated body fails to type-check on this perl version (often due to macro expansion differences vs newer perl). Re-run tools/build-error-to-vpatches.pl after each perl-headers update or libperl-macrogen change.",
+  "patches": [
+    { "name": "CopLINE", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "CopLINE_dec", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "CopLINE_inc", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "Perl_atof", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPV_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPV_nolen_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPV_nomg_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPVbyte_or_null", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPVbyte_or_null_nomg", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPVutf8_or_null", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "SvPVutf8_or_null_nomg", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" },
+    { "name": "gv_init", "kind": "skip_codegen", "reason": "type-check fails on perl 5.36 (auto-generated)" }
+  ]
+}

@@ -177,6 +177,42 @@ gh release upload "$TAG" apidoc.tar.gz --clobber 2>/dev/null \
 
 ---
 
+## 古い perl 版で codegen が失敗するときの workflow
+
+下流（libperl-sys）の CI でだけ失敗する関数を版別に skip するには、
+**`tools/build-error-to-vpatches.pl`** で `apidoc/v5.X.patches.json` を機械生成する。
+
+```bash
+# 1. CI artifact から該当 perl 版の macro_bindings.rs を取得
+gh run download <RUN_ID> --repo hkoba/libperl-rs \
+    --name macro_bindings -D tmp/dl-5.36/
+
+# 2. CI ログから該当版のビルドエラー部分を抽出
+gh run view <RUN_ID> --repo hkoba/libperl-rs --log-failed \
+    | grep "build (true, 5.36," | grep "Build" \
+    > tmp/errlog-5.36.txt
+
+# 3. patches.json を生成
+tools/build-error-to-vpatches.pl 5.36 \
+    tmp/errlog-5.36.txt \
+    tmp/dl-5.36/libperl-sys-*/out/macro_bindings.rs \
+    > apidoc/v5.36.patches.json
+
+# 4. commit + push
+git add apidoc/v5.36.patches.json
+git commit -m "apidoc: v5.36 skip-codegen patches (auto-generated)"
+```
+
+このワークフローを各失敗版（5.26〜5.36 等）に対して 1 回ずつ実行すれば、
+全版で Build が通る状態にできる。当該マクロは libperl-rs 利用者から呼べなく
+なるが、Build は緑になり、新しい perl 版（5.38+）では普通に使える。
+
+将来 codegen が改善され、当該版でも正しく生成できるようになった patch は
+`v5.X.patches.json` から手動で削除する（または `tools/build-error-to-vpatches.pl`
+で再生成して diff を見る）。
+
+---
+
 ## 関連ファイル
 
 | ファイル | 役割 |
@@ -184,7 +220,9 @@ gh release upload "$TAG" apidoc.tar.gz --clobber 2>/dev/null \
 | `apidoc-import.zsh` | perl git repo から `v5.X.json` を再生成 |
 | `apidoc/v5.X.json` | 自動生成 apidoc データ（`apidoc-import.zsh` で更新） |
 | `apidoc/common.patches.json` | 全バージョン共通の手動メンテパッチ |
-| `apidoc/v5.X.patches.json` | バージョン固有の上書き・打ち消し（`kind: "remove"`） |
+| `apidoc/v5.X.patches.json` | バージョン固有のパッチ（`skip_codegen` / `return_type_override` / `kind: "remove"`） |
+| `tools/build-error-to-skiplist.pl` | CI build error log から共通 skip-list を生成 |
+| `tools/build-error-to-vpatches.pl` | CI build error log + 該当 macro_bindings.rs から `apidoc/v5.X.patches.json` を生成（古い perl 版で版別 skip_codegen を機械生成する用） |
 | `build.rs` | tar.gz 化（ローカル）または GH Release ダウンロード |
 | `src/apidoc_data.rs` | バイナリ埋め込み・ランタイム展開・キャッシュ管理 |
 | `Cargo.toml` の `exclude` | crates.io publish 時の apidoc/ 除外設定 |
