@@ -43,7 +43,7 @@ use crate::perl_config::{get_perl_config, PerlConfigError, get_default_target_di
 use crate::preprocessor::{PPConfig, Preprocessor};
 use crate::rust_codegen::{BindingsInfo, CodegenConfig as RustCodegenConfig, CodegenDriver, CodegenStats};
 use crate::infer_api::{InferResult, InferError};
-use crate::error::CompileError;
+use crate::error::EnrichedCompileError;
 
 // ============================================================================
 // Error types
@@ -54,8 +54,8 @@ use crate::error::CompileError;
 pub enum PipelineError {
     /// Perl 設定取得エラー
     PerlConfig(PerlConfigError),
-    /// プリプロセス/パースエラー
-    Compile(CompileError),
+    /// プリプロセス/パースエラー（ファイルパスと該当行で強化済み）
+    Compile(EnrichedCompileError),
     /// 推論エラー
     Infer(InferError),
     /// I/O エラー
@@ -90,8 +90,8 @@ impl From<PerlConfigError> for PipelineError {
     }
 }
 
-impl From<CompileError> for PipelineError {
-    fn from(e: CompileError) -> Self {
+impl From<EnrichedCompileError> for PipelineError {
+    fn from(e: EnrichedCompileError) -> Self {
         PipelineError::Compile(e)
     }
 }
@@ -460,7 +460,9 @@ impl Pipeline {
         }
 
         // ファイルを処理
-        pp.add_source_file(&self.preprocess_config.input_file)?;
+        if let Err(e) = pp.add_source_file(&self.preprocess_config.input_file) {
+            return Err(PipelineError::Compile(e.with_files(pp.files())));
+        }
 
         Ok(PreprocessedPipeline {
             preprocessor: pp,

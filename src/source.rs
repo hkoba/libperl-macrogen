@@ -63,6 +63,11 @@ impl FileRegistry {
         &self.paths[id.0 as usize]
     }
 
+    /// IDからパスを取得（範囲外なら None）
+    pub fn try_get_path(&self, id: FileId) -> Option<&Path> {
+        self.paths.get(id.0 as usize).map(|p| p.as_path())
+    }
+
     /// 登録されているファイル数を返す
     pub fn len(&self) -> usize {
         self.paths.len()

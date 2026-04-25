@@ -10,7 +10,7 @@ use crate::apidoc::{ApidocCollector, ApidocDict, ApidocResolveError};
 use crate::ast::{DerivedDecl, ExternalDecl, TypeSpec};
 use crate::c_fn_decl::{CFnDecl, CFnDeclDict, CParam};
 use crate::enum_dict::EnumDict;
-use crate::error::CompileError;
+use crate::error::EnrichedCompileError;
 use crate::fields_dict::FieldsDict;
 use crate::inline_fn::InlineFnDict;
 use crate::intern::InternedStr;
@@ -30,8 +30,8 @@ pub enum InferError {
     PerlConfig(PerlConfigError),
     /// apidoc 解決エラー
     ApidocResolve(ApidocResolveError),
-    /// プリプロセッサ/パースエラー
-    Compile(CompileError),
+    /// プリプロセッサ/パースエラー（ファイルパスと該当行で強化済み）
+    Compile(EnrichedCompileError),
     /// ファイル I/O エラー
     Io(std::io::Error),
 }
@@ -70,8 +70,8 @@ impl From<ApidocResolveError> for InferError {
     }
 }
 
-impl From<CompileError> for InferError {
-    fn from(e: CompileError) -> Self {
+impl From<EnrichedCompileError> for InferError {
+    fn from(e: EnrichedCompileError) -> Self {
         InferError::Compile(e)
     }
 }
@@ -308,7 +308,10 @@ pub fn run_inference_with_preprocessor(
     let mut c_fn_decl_dict = CFnDeclDict::new();
 
     // パーサー作成
-    let mut parser = Parser::new(&mut pp)?;
+    let mut parser = match Parser::new(&mut pp) {
+        Ok(p) => p,
+        Err(e) => return Err(InferError::Compile(e.with_files(pp.files()))),
+    };
 
     // inline 関数辞書を作成
     let mut inline_fn_dict = InlineFnDict::new();
@@ -316,7 +319,7 @@ pub fn run_inference_with_preprocessor(
     // parse_each_with_pp でフィールド辞書と inline 関数を収集
     // 同時に _SV_HEAD マクロ呼び出しを検出して SV ファミリーを動的に構築
     // また、関数宣言を収集して THX 依存性を検出
-    parser.parse_each_with_pp(|decl, loc, path, pp| {
+    let parse_result = parser.parse_each_with_pp(|decl, loc, path, pp| {
         let interner = pp.interner();
         fields_dict.collect_from_external_decl(decl, decl.is_target(), interner);
 
@@ -389,7 +392,12 @@ pub fn run_inference_with_preprocessor(
             }
         }
         ControlFlow::Continue(())
-    })?;
+    });
+    if let Err(e) = parse_result {
+        // parser を drop して pp の借用を解放してから enrich する
+        drop(parser);
+        return Err(InferError::Compile(e.with_files(pp.files())));
+    }
 
     // パーサーから typedef 辞書を取得
     let typedefs = parser.typedefs().clone();

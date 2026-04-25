@@ -1,7 +1,7 @@
 use crate::source::{FileRegistry, SourceLocation};
 use crate::token::TokenKind;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// エラー表示用のロケーション（ファイル名解決付き）
 pub struct DisplayLocation<'a> {
@@ -207,6 +207,94 @@ impl CompileError {
                 format!("{}: parse error: {}", disp, kind)
             }
         }
+    }
+
+    /// FileRegistry を使い、ファイルパスとソース該当行を付加した
+    /// `EnrichedCompileError` に変換する。
+    ///
+    /// 表示時に `file:line:col: kind: msg` に加えて該当行と caret を出すため、
+    /// `CompileError` を上位エラー型へ変換する境界で呼び出すことを想定。
+    pub fn with_files(self, files: &FileRegistry) -> EnrichedCompileError {
+        let loc = self.loc().clone();
+        let file_path = files.try_get_path(loc.file_id).map(|p| p.to_path_buf());
+        let source_line = file_path.as_deref().and_then(|p| read_source_line(p, loc.line));
+        EnrichedCompileError {
+            error: self,
+            file_path,
+            source_line,
+        }
+    }
+}
+
+/// 該当行 1 行をファイルから読み出す。失敗時は None を返す。
+fn read_source_line(path: &Path, line: u32) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    if line == 0 {
+        return None;
+    }
+    let f = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(f);
+    let mut iter = reader.lines();
+    let target = (line as usize).saturating_sub(1);
+    iter.nth(target).and_then(|r| r.ok())
+}
+
+/// CompileError + ファイルパス・該当行で強化されたエラー。
+///
+/// `Display` 実装は `path:line:col: kind: msg` の後に該当行と caret を付加した
+/// gcc 風のフォーマットを出す。下流（build.rs 等）は `{}` で文字列化するだけで
+/// 該当行が見えるようになる。
+#[derive(Debug)]
+pub struct EnrichedCompileError {
+    pub error: CompileError,
+    pub file_path: Option<PathBuf>,
+    pub source_line: Option<String>,
+}
+
+impl EnrichedCompileError {
+    /// 内側の CompileError を取得
+    pub fn inner(&self) -> &CompileError {
+        &self.error
+    }
+
+    /// エラー発生位置
+    pub fn loc(&self) -> &SourceLocation {
+        self.error.loc()
+    }
+}
+
+impl fmt::Display for EnrichedCompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let loc = self.error.loc();
+        let (kind_label, kind_msg) = match &self.error {
+            CompileError::Lex { kind, .. } => ("lexer error", format!("{}", kind)),
+            CompileError::Preprocess { kind, .. } => ("preprocessor error", format!("{}", kind)),
+            CompileError::Parse { kind, .. } => ("parse error", format!("{}", kind)),
+        };
+        match &self.file_path {
+            Some(p) => write!(
+                f,
+                "{}:{}:{}: {}: {}",
+                p.display(), loc.line, loc.column, kind_label, kind_msg
+            )?,
+            None => write!(
+                f,
+                "<file_id={}>:{}:{}: {}: {}",
+                loc.file_id.as_u32(), loc.line, loc.column, kind_label, kind_msg
+            )?,
+        }
+        if let Some(line_text) = &self.source_line {
+            write!(f, "\n  {:>4} | {}", loc.line, line_text)?;
+            let col = (loc.column as usize).saturating_sub(1);
+            write!(f, "\n       | {}^", " ".repeat(col))?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for EnrichedCompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
