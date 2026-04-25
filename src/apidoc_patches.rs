@@ -54,7 +54,7 @@
 //! 必要に応じて `arg_type_override`、`param_type_override`、`inject_thx_to_call`
 //! 等を追加する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -114,6 +114,11 @@ pub enum PatchKind {
     /// `[CODEGEN_SUPPRESSED]` コメントに置換
     #[serde(rename = "skip_codegen")]
     SkipCodegen,
+    /// 上位レイヤ（典型的には `common.patches.json`）で登録されているパッチを
+    /// 当該バージョンでだけ無効化する。`v$X.$Y.patches.json` で「上流が修正
+    /// された」ケースに使う。`value` などのフィールドは無視される。
+    #[serde(rename = "remove")]
+    Remove,
 }
 
 /// ロード後の正規化された patch 集合（高速ルックアップ用）
@@ -125,8 +130,14 @@ pub struct ApidocPatchSet {
     pub arg_overrides: HashMap<String, Vec<(usize, String, String)>>,
     /// macro/fn 名 → reason（codegen 抑制対象）
     pub skip_codegen: HashMap<String, String>,
-    /// ロードしたパッチファイルのパス（デバッグ用）
-    pub source_path: Option<PathBuf>,
+    /// `kind: "remove"` で名指しされた、上位レイヤから取り除くべき名前。
+    /// 単一ファイル `load_json` 単独では実体に影響しないが、
+    /// `load_for_apidoc_path` の 2 段マージで version-specific から common
+    /// レイヤを打ち消すために使う。
+    pub removals: HashSet<String>,
+    /// ロードしたパッチファイルのパス（デバッグ用、ロード順）。
+    /// 2 段マージのときは `[common.patches.json, v$X.$Y.patches.json]`。
+    pub source_paths: Vec<PathBuf>,
 }
 
 impl ApidocPatchSet {
@@ -145,7 +156,7 @@ impl ApidocPatchSet {
                 format!("unsupported apidoc patches schema_version: {}", file.schema_version)));
         }
         let mut set = Self::default();
-        set.source_path = Some(path_ref.to_path_buf());
+        set.source_paths.push(path_ref.to_path_buf());
         for p in file.patches {
             match p.kind {
                 PatchKind::ReturnTypeOverride => {
@@ -166,6 +177,11 @@ impl ApidocPatchSet {
                 PatchKind::SkipCodegen => {
                     set.skip_codegen.insert(p.name, p.reason);
                 }
+                PatchKind::Remove => {
+                    // 単独 load では実体には影響しない（removals に記録するだけ）。
+                    // 2 段マージ時に上位レイヤから打ち消すために使われる。
+                    set.removals.insert(p.name);
+                }
             }
         }
         Ok(set)
@@ -182,6 +198,72 @@ impl ApidocPatchSet {
             return Ok(Self::empty());
         }
         Self::load_json(&path)
+    }
+
+    /// **2 段マージ版ローダ**: `apidoc_path` (`<dir>/v$X.$Y.json`) と同じ
+    /// ディレクトリにある以下の 2 ファイルを優先順位付きで読み込む:
+    ///
+    /// 1. **`<dir>/common.patches.json`** — 全バージョン共通のパッチ
+    /// 2. **`<dir>/v$X.$Y.patches.json`** — 当該バージョン固有のパッチ
+    ///
+    /// マージ規則:
+    /// - 同一 `name` のエントリは **後者（version-specific）が前者（common）を上書き**
+    /// - version-specific 側の `kind: "remove"` は common 側の同名エントリを **削除**
+    ///   （上流で fix されたバージョンでパッチを撤去する用途）
+    ///
+    /// 両ファイルとも存在しない場合は空 set を返す（エラーにしない）。
+    pub fn load_for_apidoc_path<P: AsRef<Path>>(apidoc_path: P) -> io::Result<Self> {
+        let path_ref = apidoc_path.as_ref();
+        let dir = path_ref.parent().unwrap_or_else(|| Path::new("."));
+
+        let mut set = Self::default();
+
+        // 1. common.patches.json（あれば）
+        let common_path = dir.join("common.patches.json");
+        if common_path.exists() {
+            let common = Self::load_json(&common_path)?;
+            set.merge_overlay(common);
+        }
+
+        // 2. v$X.$Y.patches.json（あれば）
+        let version_path = {
+            let stem = path_ref.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(String::new);
+            path_ref.with_file_name(format!("{}.patches.json", stem))
+        };
+        if version_path.exists() {
+            let version = Self::load_json(&version_path)?;
+            // 先に version 側の removals で common を打ち消す
+            for name in &version.removals {
+                set.return_overrides.remove(name);
+                set.arg_overrides.remove(name);
+                set.skip_codegen.remove(name);
+            }
+            // それから version 側のパッチを上書きマージ
+            set.merge_overlay(version);
+        }
+
+        Ok(set)
+    }
+
+    /// 別の patch set を **後勝ち** で重ね合わせる。
+    /// 同名の override は上書き、`source_paths` は追記、`removals` は和集合。
+    fn merge_overlay(&mut self, other: ApidocPatchSet) {
+        for (k, v) in other.return_overrides {
+            self.return_overrides.insert(k, v);
+        }
+        for (k, v) in other.arg_overrides {
+            // arg_overrides は配列。同名で上書きするときは置換（追加ではない）。
+            self.arg_overrides.insert(k, v);
+        }
+        for (k, v) in other.skip_codegen {
+            self.skip_codegen.insert(k, v);
+        }
+        for name in other.removals {
+            self.removals.insert(name);
+        }
+        self.source_paths.extend(other.source_paths);
     }
 
     /// テキスト形式の skip-list ファイルを読み込んで
@@ -273,5 +355,120 @@ impl ApidocPatchSet {
     /// codegen 抑制対象なら reason を返す
     pub fn skip_reason(&self, name: &str) -> Option<&str> {
         self.skip_codegen.get(name).map(|s| s.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn write_json(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    const COMMON_PATCH: &str = r#"{
+        "schema_version": 1,
+        "patches": [
+            { "name": "RCPV_LEN", "kind": "return_type_override",
+              "value": "STRLEN", "reason": "common: wrong apidoc" },
+            { "name": "Perl_custom_op_xop", "kind": "skip_codegen",
+              "reason": "common: macro lacks aTHX_" }
+        ]
+    }"#;
+
+    #[test]
+    fn test_load_common_only() {
+        let tmp = TempDir::new().unwrap();
+        write_json(tmp.path(), "common.patches.json", COMMON_PATCH);
+        let apidoc_path = tmp.path().join("v5.40.json");
+        // v5.40.json 自体は存在しなくても OK（patches 解決はパスから派生するだけ）
+
+        let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
+        assert_eq!(set.return_overrides.len(), 1);
+        assert_eq!(set.return_overrides["RCPV_LEN"].0, "STRLEN");
+        assert_eq!(set.skip_codegen.len(), 1);
+        assert!(set.skip_codegen.contains_key("Perl_custom_op_xop"));
+        assert_eq!(set.source_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_version_overrides_common() {
+        let tmp = TempDir::new().unwrap();
+        write_json(tmp.path(), "common.patches.json", COMMON_PATCH);
+        // v5.42 で RCPV_LEN の戻り値型を別の値に上書き
+        let version_json = r#"{
+            "schema_version": 1,
+            "patches": [
+                { "name": "RCPV_LEN", "kind": "return_type_override",
+                  "value": "Size_t", "reason": "v5.42: tweaked" }
+            ]
+        }"#;
+        write_json(tmp.path(), "v5.42.patches.json", version_json);
+        let apidoc_path = tmp.path().join("v5.42.json");
+
+        let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
+        // RCPV_LEN は version-specific が勝つ
+        assert_eq!(set.return_overrides["RCPV_LEN"].0, "Size_t");
+        // common 由来の Perl_custom_op_xop はそのまま残る
+        assert!(set.skip_codegen.contains_key("Perl_custom_op_xop"));
+        // ロードしたファイル数は 2
+        assert_eq!(set.source_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_kind_drops_common_entry() {
+        let tmp = TempDir::new().unwrap();
+        write_json(tmp.path(), "common.patches.json", COMMON_PATCH);
+        // v5.42 で Perl_custom_op_xop が修正されたとして打ち消す
+        let version_json = r#"{
+            "schema_version": 1,
+            "patches": [
+                { "name": "Perl_custom_op_xop", "kind": "remove",
+                  "reason": "fixed upstream in 5.42" }
+            ]
+        }"#;
+        write_json(tmp.path(), "v5.42.patches.json", version_json);
+        let apidoc_path = tmp.path().join("v5.42.json");
+
+        let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
+        // Perl_custom_op_xop は removed
+        assert!(!set.skip_codegen.contains_key("Perl_custom_op_xop"));
+        // RCPV_LEN は common 由来でそのまま残る
+        assert!(set.return_overrides.contains_key("RCPV_LEN"));
+        // removals フィールドにも記録されている
+        assert!(set.removals.contains("Perl_custom_op_xop"));
+    }
+
+    #[test]
+    fn test_no_patches_files_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let apidoc_path = tmp.path().join("v5.40.json");
+        let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
+        assert!(set.is_empty());
+        assert_eq!(set.source_paths.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_only_in_singlefile_load_does_not_panic() {
+        // 単独 load_json で kind: "remove" を読んでも実体には影響しない
+        // （removals に記録されるだけ、override 系には触らない）
+        let tmp = TempDir::new().unwrap();
+        let json = r#"{
+            "schema_version": 1,
+            "patches": [
+                { "name": "FOO", "kind": "remove", "reason": "test" }
+            ]
+        }"#;
+        let path = write_json(tmp.path(), "v5.42.patches.json", json);
+        let set = ApidocPatchSet::load_json(&path).unwrap();
+        assert!(set.return_overrides.is_empty());
+        assert!(set.skip_codegen.is_empty());
+        assert!(set.removals.contains("FOO"));
     }
 }

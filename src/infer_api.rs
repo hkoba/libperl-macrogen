@@ -477,19 +477,12 @@ pub fn run_inference_with_preprocessor(
 
     // apidoc patches を適用（merge 後 / type macro 展開前）
     // perl の C ヘッダや apidoc に含まれる既知の誤りを訂正する。
-    // ファイル: apidoc_path と同じディレクトリの v$major.$minor.patches.json
-    // （存在しなければ no-op）
+    // 2 段マージ:
+    //   1. <apidoc dir>/common.patches.json     ← 全バージョン共通
+    //   2. <apidoc dir>/v$major.$minor.patches.json ← 当該バージョン固有
+    // 両方とも存在しなければ no-op。
     let mut apidoc_patches = if let Some(path) = apidoc_path {
-        let mut path_buf = path.to_path_buf();
-        let new_name = path.file_stem()
-            .map(|s| format!("{}.patches.json", s.to_string_lossy()))
-            .unwrap_or_else(|| String::from("patches.json"));
-        path_buf.set_file_name(new_name);
-        if path_buf.exists() {
-            crate::apidoc_patches::ApidocPatchSet::load_json(&path_buf)?
-        } else {
-            crate::apidoc_patches::ApidocPatchSet::empty()
-        }
+        crate::apidoc_patches::ApidocPatchSet::load_for_apidoc_path(path)?
     } else {
         crate::apidoc_patches::ApidocPatchSet::empty()
     };
@@ -503,11 +496,15 @@ pub fn run_inference_with_preprocessor(
     }
     if !apidoc_patches.is_empty() {
         let applied = apidoc_patches.apply_to_apidoc(&mut apidoc);
-        if let Some(p) = &apidoc_patches.source_path {
+        if !apidoc_patches.source_paths.is_empty() {
+            let paths_str = apidoc_patches.source_paths.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             eprintln!(
-                "[apidoc-patches] loaded {} patch(es) from {} ({} return-type override applied, {} skip-codegen registered)",
+                "[apidoc-patches] loaded {} patch(es) from [{}] ({} return-type override applied, {} skip-codegen registered)",
                 apidoc_patches.count(),
-                p.display(),
+                paths_str,
                 applied.len(),
                 apidoc_patches.skip_codegen.len(),
             );

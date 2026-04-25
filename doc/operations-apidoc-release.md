@@ -1,7 +1,8 @@
 # apidoc データのリリース運用
 
-`apidoc/v5.X.json` および `apidoc/v5.X.patches.json` の更新を下流に届けるまでの
-手順をまとめる。背景・スキーマは
+`apidoc/v5.X.json`、`apidoc/common.patches.json` および
+`apidoc/v5.X.patches.json` の更新を下流に届けるまでの手順をまとめる。
+背景・スキーマ・2 段マージの仕様は
 [architecture-apidoc-patches.md](architecture-apidoc-patches.md) を参照。
 
 ---
@@ -11,7 +12,8 @@
 ```
 apidoc/
   v5.X.json            ← apidoc-import.zsh で perl ソースから自動生成
-  v5.X.patches.json    ← 手動メンテ（バグ訂正用）
+  common.patches.json  ← 全バージョン共通の手動メンテパッチ（バグ訂正用）
+  v5.X.patches.json    ← バージョン固有の上書き・打ち消し（任意）
         ↓
 build.rs が tar.gz 化 → OUT_DIR/apidoc.tar.gz
         ↓
@@ -166,7 +168,8 @@ gh release upload "$TAG" apidoc.tar.gz --clobber 2>/dev/null \
 
 | 状況 | git push | release upload | version bump |
 |------|---------|---------------|-------------|
-| `v5.X.patches.json` の patch 1 件追加（git dep のみ利用） | ✓ | 不要 | 不要 |
+| `common.patches.json` の patch 1 件追加（git dep のみ利用） | ✓ | 不要 | 不要 |
+| `v5.X.patches.json` の patch / `kind: "remove"` 追加（git dep のみ利用） | ✓ | 不要 | 不要 |
 | 同上（crates.io 利用も視野） | ✓ | ✓（手動 or 自動 workflow） | 不要 |
 | 新しい perl 版 `v5.Y.json` 追加（後方互換） | ✓ | ✓ | 不要 |
 | patches.json のスキーマ拡張・破壊的変更 | ✓ | ✓ | ✓ |
@@ -180,7 +183,8 @@ gh release upload "$TAG" apidoc.tar.gz --clobber 2>/dev/null \
 |---------|------|
 | `apidoc-import.zsh` | perl git repo から `v5.X.json` を再生成 |
 | `apidoc/v5.X.json` | 自動生成 apidoc データ（`apidoc-import.zsh` で更新） |
-| `apidoc/v5.X.patches.json` | 手動メンテのバグ訂正パッチ |
+| `apidoc/common.patches.json` | 全バージョン共通の手動メンテパッチ |
+| `apidoc/v5.X.patches.json` | バージョン固有の上書き・打ち消し（`kind: "remove"`） |
 | `build.rs` | tar.gz 化（ローカル）または GH Release ダウンロード |
 | `src/apidoc_data.rs` | バイナリ埋め込み・ランタイム展開・キャッシュ管理 |
 | `Cargo.toml` の `exclude` | crates.io publish 時の apidoc/ 除外設定 |

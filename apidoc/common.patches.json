@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "comment": "Manual corrections for known perl 5.40.x C-source bugs that cause incorrect Rust binding generation. See src/apidoc_patches.rs for the schema.",
+  "comment": "Common (cross-version) manual corrections for known perl C-source bugs that cause incorrect Rust binding generation. Loaded for every perl version; per-version overrides go in v$X.$Y.patches.json (kind: \"remove\" cancels a common entry for that version). See src/apidoc_patches.rs for the schema and doc/architecture-apidoc-patches.md for the merge model.",
   "patches": [
     {
       "name": "RCPV_LEN",
