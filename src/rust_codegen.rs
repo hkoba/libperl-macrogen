@@ -3297,9 +3297,22 @@ impl<'a> RustCodegen<'a> {
                     });
                 }
                 let escaped = escape_rust_keyword(name_str);
-                // extern static 配列はポインタとして使われるため .as_ptr() を付加
+                // extern static 配列はポインタとして使われるため先頭要素の生ポインタに減衰させる。
+                //
+                // 旧実装: `NAME.as_ptr()`
+                // 新実装: `(&raw const NAME[0])`
+                //
+                // Rust 2024 edition では `static mut` への暗黙の shared reference が
+                // hard error 化された (`creating a shared reference to mutable static`)。
+                // `.as_ptr()` は内部で `&self -> *const T` の参照経由を行うため、
+                // `static mut PL_fold_locale: [u8; N]` のような mutable static に対して
+                // 直接呼ぶと当該 lint を踏む。
+                //
+                // `&raw const NAME[0]` は raw pointer を直接取るため shared reference を
+                // 経由しない（Rust 2024 idiom）。元の `.as_ptr()` と同じく `*const T` 型。
+                // `static` (immutable) でも問題なく動く。
                 if self.bindings_info.static_arrays.contains(name_str) {
-                    return syn::parse_str(&format!("{}.as_ptr()", escaped))
+                    return syn::parse_str(&format!("(&raw const {}[0])", escaped))
                         .unwrap_or_else(|_| int_lit(0));
                 }
                 syn::Expr::Path(syn::ExprPath {
@@ -3596,24 +3609,35 @@ impl<'a> RustCodegen<'a> {
                 let i = self.build_syn_expr(index, info);
                 let i_isize = cast_syn_expr(i, "isize");
                 let base_expr: syn::Expr = if self.is_array_like_expr(base, info) {
-                    let b = if let ExprKind::Ident(n) = &base.kind {
-                        ident_expr(escape_rust_keyword(self.interner.get(*n)).as_str())
+                    // 配列ベースを raw pointer に減衰させる。
+                    // - 通常: `array.as_ptr()`
+                    // - extern static (mutable static 含む): `&raw const NAME[0]`
+                    //   (Rust 2024 edition で `static mut` への shared reference が
+                    //   hard error 化されたため、`.as_ptr()` 経由の暗黙参照を避ける)
+                    let raw_ptr_expr: syn::Expr = if let ExprKind::Ident(n) = &base.kind {
+                        let name_str = self.interner.get(*n);
+                        let escaped = escape_rust_keyword(name_str);
+                        if self.bindings_info.static_arrays.contains(name_str) {
+                            syn::parse_str(&format!("(&raw const {}[0])", escaped))
+                                .unwrap_or_else(|_| int_lit(0))
+                        } else {
+                            let id = ident_expr(escaped.as_str());
+                            method_call(id, "as_ptr", vec![])
+                        }
                     } else {
-                        self.build_syn_expr(base, info)
+                        let b = self.build_syn_expr(base, info);
+                        method_call(b, "as_ptr", vec![])
                     };
-                    // 要素型を可能な限り抽出して `as_mut_ptr()` を使う。
-                    // `as_ptr()` だと const ポインタが返り `&mut a[i]` が E0596。
-                    // 要素型が分からない場合は `as_ptr()` で妥協する。
+                    // 要素型を可能な限り抽出して `*mut ELEM` にキャスト。
+                    // `as_ptr()` / `&raw const` どちらも `*const T` だが、後段で
+                    // `&mut a[i]` を取るときに E0596 を避けるため mut へ寄せる。
                     let elem_str = self.infer_expr_type_unified(base, info)
                         .and_then(|ut| ut.inner_type().cloned())
                         .map(|inner| inner.to_rust_string());
                     if let Some(elem) = elem_str {
-                        // `(array.as_ptr() as *mut ELEM).offset(i)` を組み立て、
-                        // mutable pointer 経由で offset する。
-                        let as_ptr = method_call(b, "as_ptr", vec![]);
-                        cast_syn_expr(as_ptr, &format!("*mut {}", elem))
+                        cast_syn_expr(raw_ptr_expr, &format!("*mut {}", elem))
                     } else {
-                        method_call(b, "as_ptr", vec![])
+                        raw_ptr_expr
                     }
                 } else {
                     self.build_syn_expr(base, info)
