@@ -1009,6 +1009,21 @@ impl ApidocCollector {
 
     /// 収集した apidoc を ApidocDict にマージ
     pub fn merge_into(self, dict: &mut ApidocDict) {
+        // デバッグ: LIBPERL_MACROGEN_DEBUG_APIDOC=1 のとき、共通 patches で関心のある
+        // 名前（typ. RCPV_*）が inline =for apidoc から拾えているかを cargo:warning= で
+        // CI ログに可視化する。
+        if crate::apidoc_patches::is_apidoc_debug_enabled() {
+            let total = self.entries.len();
+            let rcpv: Vec<String> = self.entries.iter()
+                .filter(|(k, _)| k.starts_with("RCPV"))
+                .map(|(k, e)| format!("{}->{}", k, e.return_type.as_deref().unwrap_or("?")))
+                .collect();
+            crate::apidoc_patches::cargo_warning(&format!(
+                "[apidoc-collector] merge_into: {} entries from inline =for apidoc; \
+                 RCPV-named ({}): {:?}",
+                total, rcpv.len(), rcpv
+            ));
+        }
         for (name, entry) in self.entries {
             dict.insert(name, entry);
         }

@@ -62,6 +62,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::apidoc::ApidocDict;
 
+/// `LIBPERL_MACROGEN_DEBUG_APIDOC=1` でデバッグ出力を有効化。
+pub(crate) fn is_apidoc_debug_enabled() -> bool {
+    std::env::var("LIBPERL_MACROGEN_DEBUG_APIDOC")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+/// build script 経由で呼ばれた場合 `cargo:warning=` で CI ログに可視化する。
+/// CLI 直接実行（cargo run など）の場合は stderr にも複製し、両方の経路で
+/// 確認できるようにする。
+pub(crate) fn cargo_warning(msg: &str) {
+    println!("cargo:warning={}", msg);
+    eprintln!("{}", msg);
+}
+
 /// Patch ファイル全体
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApidocPatchFile {
@@ -215,14 +230,37 @@ impl ApidocPatchSet {
     pub fn load_for_apidoc_path<P: AsRef<Path>>(apidoc_path: P) -> io::Result<Self> {
         let path_ref = apidoc_path.as_ref();
         let dir = path_ref.parent().unwrap_or_else(|| Path::new("."));
+        let debug = is_apidoc_debug_enabled();
 
         let mut set = Self::default();
+
+        if debug {
+            cargo_warning(&format!(
+                "[apidoc-patches] load_for_apidoc_path: apidoc_path={}, dir={}",
+                path_ref.display(), dir.display()
+            ));
+        }
 
         // 1. common.patches.json（あれば）
         let common_path = dir.join("common.patches.json");
         if common_path.exists() {
             let common = Self::load_json(&common_path)?;
+            if debug {
+                cargo_warning(&format!(
+                    "[apidoc-patches] loaded common.patches.json: \
+                     {} return_overrides, {} arg_overrides, {} skip_codegen, {} removals",
+                    common.return_overrides.len(),
+                    common.arg_overrides.len(),
+                    common.skip_codegen.len(),
+                    common.removals.len(),
+                ));
+            }
             set.merge_overlay(common);
+        } else if debug {
+            cargo_warning(&format!(
+                "[apidoc-patches] common.patches.json NOT FOUND at {}",
+                common_path.display()
+            ));
         }
 
         // 2. v$X.$Y.patches.json（あれば）
@@ -234,6 +272,16 @@ impl ApidocPatchSet {
         };
         if version_path.exists() {
             let version = Self::load_json(&version_path)?;
+            if debug {
+                cargo_warning(&format!(
+                    "[apidoc-patches] loaded {}: \
+                     {} return_overrides, {} skip_codegen, {} removals",
+                    version_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                    version.return_overrides.len(),
+                    version.skip_codegen.len(),
+                    version.removals.len(),
+                ));
+            }
             // 先に version 側の removals で common を打ち消す
             for name in &version.removals {
                 set.return_overrides.remove(name);
@@ -242,6 +290,11 @@ impl ApidocPatchSet {
             }
             // それから version 側のパッチを上書きマージ
             set.merge_overlay(version);
+        } else if debug {
+            cargo_warning(&format!(
+                "[apidoc-patches] {} NOT FOUND",
+                version_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+            ));
         }
 
         Ok(set)
@@ -313,18 +366,49 @@ impl ApidocPatchSet {
     /// `return_type_override` と `arg_type_override` を `ApidocDict` に適用
     /// 適用された entry 名のリストを返す。対象が dict に存在しない場合は warning
     /// として stderr に出力（perl 側で fix された等の状況検知用）。
+    ///
+    /// **デバッグ出力**: 環境変数 `LIBPERL_MACROGEN_DEBUG_APIDOC=1` を設定すると、
+    /// パッチ適用の hit/miss、適用前後の戻り値型、dict 全体の RCPV 関連エントリ等を
+    /// `cargo:warning=` 経由で出力する（build script 経由で呼ばれた場合は CI ログに
+    /// 可視化される）。CI で patch が一部バージョンで効かない問題の調査用。
+    /// **MISS は環境変数なしでも常に `cargo:warning=` として出力する**（黙って
+    /// 取りこぼされる事故を防ぐため）。
     pub fn apply_to_apidoc(&self, dict: &mut ApidocDict) -> Vec<String> {
+        let debug = is_apidoc_debug_enabled();
         let mut applied: Vec<String> = Vec::new();
+
+        if debug {
+            cargo_warning(&format!(
+                "[apidoc-patches] apply_to_apidoc: dict has {} entries; \
+                 patches: {} return_overrides, {} arg_overrides, {} skip_codegen",
+                dict.len(),
+                self.return_overrides.len(),
+                self.arg_overrides.len(),
+                self.skip_codegen.len(),
+            ));
+        }
+
         for (name, (new_ty, _reason)) in &self.return_overrides {
             if let Some(entry) = dict.get_mut(name) {
+                let old = entry.return_type.clone();
                 entry.return_type = Some(new_ty.clone());
                 applied.push(name.clone());
+                if debug {
+                    cargo_warning(&format!(
+                        "[apidoc-patches] return_type_override APPLIED `{}`: {} -> {}",
+                        name,
+                        old.as_deref().unwrap_or("(none)"),
+                        new_ty,
+                    ));
+                }
             } else {
-                eprintln!(
-                    "warning: apidoc patch target `{}` not found in apidoc — \
-                     may have been fixed upstream; consider removing the patch",
-                    name
-                );
+                // MISS は env var 不要で常に可視化（黙って取りこぼされるのを防ぐ）
+                cargo_warning(&format!(
+                    "[apidoc-patches] return_type_override MISS `{}`: \
+                     target not found in apidoc dict (dict has {} entries) — \
+                     codegen falls back to whatever else is inferred",
+                    name, dict.len()
+                ));
             }
         }
         for (name, list) in &self.arg_overrides {
@@ -333,22 +417,49 @@ impl ApidocPatchSet {
                     if let Some(arg) = entry.args.get_mut(*idx) {
                         arg.ty = new_ty.clone();
                     } else {
-                        eprintln!(
-                            "warning: apidoc patch target `{}` arg_index {} out of range \
-                             (entry has {} args)",
+                        cargo_warning(&format!(
+                            "[apidoc-patches] arg_type_override `{}` arg_index {} \
+                             out of range (entry has {} args)",
                             name, idx, entry.args.len()
-                        );
+                        ));
                     }
                 }
                 applied.push(name.clone());
             } else {
-                eprintln!(
-                    "warning: apidoc patch target `{}` not found in apidoc \
-                     (arg_type_override)",
+                cargo_warning(&format!(
+                    "[apidoc-patches] arg_type_override MISS `{}`: \
+                     target not found in apidoc dict",
                     name
-                );
+                ));
             }
         }
+
+        // デバッグ時のみ、dict 内の patch 関連エントリ群を dump
+        // （inline merge が `=for apidoc` を拾えているかの判別用）
+        if debug {
+            let interest_prefixes: Vec<&str> = self.return_overrides.keys()
+                .chain(self.skip_codegen.keys())
+                .map(|s| s.as_str())
+                .collect();
+            let mut prefixes_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for n in &interest_prefixes {
+                // 共通プレフィックスを抽出（例: "RCPV_"）。簡易的に "_" までの先頭部。
+                if let Some(idx) = n.find('_') {
+                    prefixes_set.insert(&n[..idx + 1]);
+                }
+            }
+            for prefix in prefixes_set {
+                let matches: Vec<String> = dict.iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .map(|(name, e)| format!("{}->{}", name, e.return_type.as_deref().unwrap_or("?")))
+                    .collect();
+                cargo_warning(&format!(
+                    "[apidoc-patches] dict entries with prefix `{}` ({} entries): {:?}",
+                    prefix, matches.len(), matches
+                ));
+            }
+        }
+
         applied
     }
 
