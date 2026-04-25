@@ -1683,13 +1683,20 @@ impl Preprocessor {
     /// #define を処理
     fn process_define(&mut self, loc: SourceLocation) -> Result<(), CompileError> {
         let name_token = self.next_raw_token()?;
+        // TinyCC 流: キーワード相当のトークンも識別子として受理する。
+        // 例: <stdbool.h> の `#define bool _Bool` は `bool` が `KwBool2` で
+        // 来るが、preprocessor の名前 namespace では Ident と等価に扱う。
         let name = match name_token.kind {
             TokenKind::Ident(id) => id,
-            _ => {
-                return Err(CompileError::Preprocess {
-                    loc,
-                    kind: PPError::InvalidDirective("expected macro name".to_string()),
-                });
+            ref kind => {
+                if let Some(s) = kind.keyword_str() {
+                    self.interner.intern(s)
+                } else {
+                    return Err(CompileError::Preprocess {
+                        loc,
+                        kind: PPError::InvalidDirective("expected macro name".to_string()),
+                    });
+                }
             }
         };
 
@@ -1764,10 +1771,16 @@ impl Preprocessor {
 
         loop {
             let token = self.next_raw_token()?;
+            // process_define と同じ理由で、キーワード相当のトークンも仮引数名として
+            // 受理する（例: `#define FOO(bool) ...`）。Ident/Kw* で抽出ロジックを揃える。
+            let param_id: Option<InternedStr> = match &token.kind {
+                TokenKind::Ident(id) => Some(*id),
+                kind => kind.keyword_str().map(|s| self.interner.intern(s)),
+            };
             match token.kind {
                 TokenKind::RParen => break,
-                TokenKind::Ident(id) => {
-                    params.push(id);
+                _ if param_id.is_some() => {
+                    params.push(param_id.unwrap());
                     let next = self.next_raw_token()?;
                     match next.kind {
                         TokenKind::Comma => continue,
@@ -1823,7 +1836,12 @@ impl Preprocessor {
     /// #undef を処理
     fn process_undef(&mut self) -> Result<(), CompileError> {
         let token = self.next_raw_token()?;
-        if let TokenKind::Ident(id) = token.kind {
+        // process_define と対称: キーワード名で #define されたマクロも undef できる
+        let name = match token.kind {
+            TokenKind::Ident(id) => Some(id),
+            ref kind => kind.keyword_str().map(|s| self.interner.intern(s)),
+        };
+        if let Some(id) = name {
             self.macros.undefine(id);
         }
         self.skip_to_eol()?;
@@ -2046,10 +2064,16 @@ impl Preprocessor {
         }
 
         let token = self.next_raw_token()?;
-        let defined = if let TokenKind::Ident(id) = token.kind {
-            self.macros.is_defined(id)
-        } else {
-            false
+        // process_define と対称: キーワード名で #define されたマクロも検出する
+        let defined = match token.kind {
+            TokenKind::Ident(id) => self.macros.is_defined(id),
+            ref kind => match kind.keyword_str() {
+                Some(s) => {
+                    let id = self.interner.intern(s);
+                    self.macros.is_defined(id)
+                }
+                None => false,
+            },
         };
 
         self.skip_to_eol()?;

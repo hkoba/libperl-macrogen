@@ -319,3 +319,94 @@ fn test_recursive_macro_prevention() {
     assert_eq!(tokens.len(), 5);
     assert_eq!(tokens[3].1, "X");
 }
+
+// =============================================================================
+// キーワード相当のトークンを #define / #undef / #ifdef の名前として受理する
+// （TinyCC 流: tccpp.c parse_define / process_ifdef は v < TOK_IDENT のみ弾く）
+// 直接の動機: <stdbool.h> の `#define bool _Bool` で落ちていた CI を通す。
+// =============================================================================
+
+#[test]
+fn test_define_keyword_name_does_not_error() {
+    // #define bool _Bool が処理できること（preprocess() 内 add_source_file が
+    // エラーを返さない時点で OK。さらに後続トークンが取り出せることも確認）。
+    let mut pp = preprocess("#define bool _Bool\nbool x;");
+    let tokens = collect_tokens(&mut pp);
+    // トークン展開は keyword token 経路では行われないので、bool x ; がそのまま出る
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "bool");
+    assert_eq!(tokens[1].1, "x");
+}
+
+#[test]
+fn test_ifdef_keyword_after_define() {
+    // #define bool に続けて #ifdef bool が真分岐を選ぶ
+    let mut pp = preprocess("#define bool\n#ifdef bool\nint x;\n#endif");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+    assert_eq!(tokens[1].1, "x");
+}
+
+#[test]
+fn test_ifdef_keyword_no_define() {
+    // #define が無いとき #ifdef bool は偽（bool キーワードは未定義扱い）
+    let mut pp = preprocess("#ifdef bool\nint x;\n#endif\nint y;");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+    assert_eq!(tokens[1].1, "y");
+}
+
+#[test]
+fn test_ifndef_keyword_no_define() {
+    // #ifndef bool は #define が無いとき真分岐
+    let mut pp = preprocess("#ifndef bool\nint x;\n#endif");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+    assert_eq!(tokens[1].1, "x");
+}
+
+#[test]
+fn test_undef_keyword_clears_define() {
+    // #define bool したあと #undef bool すると #ifdef bool は偽
+    let mut pp = preprocess(
+        "#define bool\n#undef bool\n#ifdef bool\nint x;\n#endif\nint y;"
+    );
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+    assert_eq!(tokens[1].1, "y");
+}
+
+#[test]
+fn test_define_inline_alias_does_not_error() {
+    // 互換ヘッダで頻出のパターン: #define inline __inline
+    let mut pp = preprocess("#define inline __inline\nint x;");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+}
+
+#[test]
+fn test_defined_operator_with_keyword_regression() {
+    // pp_expr.rs の parse_defined は既にキーワード対応済み。
+    // 今回の修正で壊れていないことの回帰テスト。
+    let mut pp = preprocess("#define bool\n#if defined(bool)\nint x;\n#endif");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+    assert_eq!(tokens[1].1, "x");
+}
+
+#[test]
+fn test_macro_param_keyword_does_not_error() {
+    // 仮引数名にキーワードを使う `#define FOO(bool) ...` がエラーにならない。
+    // expansion 側はまだ keyword token 経路を扱わないので、本テストは
+    // 「directive 自体が処理できる」ことのみ確認する。
+    let mut pp = preprocess("#define FOO(bool) 1\nint x;");
+    let tokens = collect_tokens(&mut pp);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[0].1, "int");
+}

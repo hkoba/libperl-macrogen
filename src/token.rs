@@ -502,6 +502,98 @@ impl TokenKind {
         )
     }
 
+    /// キーワードトークン (Kw*) ならその表記文字列を `&'static str` で返す。
+    /// それ以外（Ident, リテラル, 記号）は None。
+    ///
+    /// プリプロセッサで `#define bool _Bool` のような「キーワードに見える名前を
+    /// マクロ名として使う」ケースを受理するために、Ident と同等の扱いができるよう
+    /// 識別子文字列を取り出す共通ヘルパ。TinyCC の統一トークン namespace に相当
+    /// する役割を、こちら側では lexer の出口で「キーワードと識別子を別バリアントに
+    /// 分けてしまっている」ためここで吸収する。
+    pub fn keyword_str(&self) -> Option<&'static str> {
+        match self {
+            // 標準 C キーワード
+            TokenKind::KwAuto => Some("auto"),
+            TokenKind::KwExtern => Some("extern"),
+            TokenKind::KwRegister => Some("register"),
+            TokenKind::KwStatic => Some("static"),
+            TokenKind::KwTypedef => Some("typedef"),
+            TokenKind::KwChar => Some("char"),
+            TokenKind::KwDouble => Some("double"),
+            TokenKind::KwFloat => Some("float"),
+            TokenKind::KwInt => Some("int"),
+            TokenKind::KwLong => Some("long"),
+            TokenKind::KwShort => Some("short"),
+            TokenKind::KwSigned => Some("signed"),
+            TokenKind::KwUnsigned => Some("unsigned"),
+            TokenKind::KwVoid => Some("void"),
+            TokenKind::KwConst => Some("const"),
+            TokenKind::KwVolatile => Some("volatile"),
+            TokenKind::KwRestrict => Some("restrict"),
+            TokenKind::KwStruct => Some("struct"),
+            TokenKind::KwUnion => Some("union"),
+            TokenKind::KwEnum => Some("enum"),
+            TokenKind::KwBreak => Some("break"),
+            TokenKind::KwCase => Some("case"),
+            TokenKind::KwContinue => Some("continue"),
+            TokenKind::KwDefault => Some("default"),
+            TokenKind::KwDo => Some("do"),
+            TokenKind::KwElse => Some("else"),
+            TokenKind::KwFor => Some("for"),
+            TokenKind::KwGoto => Some("goto"),
+            TokenKind::KwIf => Some("if"),
+            TokenKind::KwReturn => Some("return"),
+            TokenKind::KwSwitch => Some("switch"),
+            TokenKind::KwWhile => Some("while"),
+            TokenKind::KwInline => Some("inline"),
+            TokenKind::KwSizeof => Some("sizeof"),
+            // C99
+            TokenKind::KwBool => Some("_Bool"),
+            TokenKind::KwComplex => Some("_Complex"),
+            TokenKind::KwImaginary => Some("_Imaginary"),
+            // C11
+            TokenKind::KwAlignas => Some("_Alignas"),
+            TokenKind::KwAlignof => Some("_Alignof"),
+            TokenKind::KwAtomic => Some("_Atomic"),
+            TokenKind::KwGeneric => Some("_Generic"),
+            TokenKind::KwNoreturn => Some("_Noreturn"),
+            TokenKind::KwStaticAssert => Some("_Static_assert"),
+            TokenKind::KwThreadLocal => Some("_Thread_local"),
+            // GCC 拡張浮動小数点型
+            TokenKind::KwFloat16 => Some("_Float16"),
+            TokenKind::KwFloat32 => Some("_Float32"),
+            TokenKind::KwFloat64 => Some("_Float64"),
+            TokenKind::KwFloat128 => Some("_Float128"),
+            TokenKind::KwFloat32x => Some("_Float32x"),
+            TokenKind::KwFloat64x => Some("_Float64x"),
+            // GCC 拡張キーワード（別名）
+            TokenKind::KwInline2 => Some("__inline"),
+            TokenKind::KwInline3 => Some("__inline__"),
+            TokenKind::KwSigned2 => Some("__signed__"),
+            TokenKind::KwConst2 => Some("__const"),
+            TokenKind::KwConst3 => Some("__const__"),
+            TokenKind::KwVolatile2 => Some("__volatile"),
+            TokenKind::KwVolatile3 => Some("__volatile__"),
+            TokenKind::KwRestrict2 => Some("__restrict"),
+            TokenKind::KwRestrict3 => Some("__restrict__"),
+            TokenKind::KwBool2 => Some("bool"),
+            TokenKind::KwAlignof2 => Some("__alignof"),
+            TokenKind::KwAlignof3 => Some("__alignof__"),
+            TokenKind::KwTypeof => Some("typeof"),
+            TokenKind::KwTypeof2 => Some("__typeof"),
+            TokenKind::KwTypeof3 => Some("__typeof__"),
+            TokenKind::KwAttribute => Some("__attribute"),
+            TokenKind::KwAttribute2 => Some("__attribute__"),
+            TokenKind::KwAsm => Some("asm"),
+            TokenKind::KwAsm2 => Some("__asm"),
+            TokenKind::KwAsm3 => Some("__asm__"),
+            TokenKind::KwExtension => Some("__extension__"),
+            TokenKind::KwThread => Some("__thread"),
+            TokenKind::KwInt128 => Some("__int128"),
+            _ => None,
+        }
+    }
+
     /// トークンを文字列に変換
     pub fn format(&self, interner: &StringInterner) -> String {
         match self {
