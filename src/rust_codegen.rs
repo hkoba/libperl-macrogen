@@ -576,6 +576,35 @@ fn substitute_idents(expr: &mut Expr, subs: &HashMap<InternedStr, &Expr>) {
     }
 }
 
+/// 式が「文の位置で値を捨てると `-D warnings` を踏む」形をしているか判定する。
+/// 主な用途: C カンマ `(A, B)` の LHS を `let _ = A;` で包むかの判定。
+///
+/// 該当パターン（wrap が必要）:
+/// - trailing-expr 付き block (`{ stmt; expr }`): `unused unary / logical op` の温床
+/// - 論理演算 `&&` / `||` (`unused logical operation`)
+/// - 単項式 `*p` `-x` `!b` 等 (`unused unary operation`)
+///
+/// 該当しないパターン（wrap 不要）:
+/// - 関数呼出 / メソッド呼出: 大半の FFI 関数は `()` を返し must_use ではない。
+///   `must_use` 戻り値（`size_of_val` 等）は `(void)cast` 経路で別途処理される
+/// - assert!() や `{ stmt; }` のように `()` を返すと明らかなもの
+/// - 単純な代入 `x = y` (Rust では `()` 型)
+fn expr_yields_value_for_stmt_use(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Block(b) => {
+            matches!(b.block.stmts.last(), Some(syn::Stmt::Expr(_, None)))
+        }
+        syn::Expr::Binary(b) => matches!(
+            b.op,
+            syn::BinOp::And(_) | syn::BinOp::Or(_)
+        ),
+        syn::Expr::Unary(_) => true,
+        // パーレン内は中身を見る（`(a || b)` 等）
+        syn::Expr::Paren(p) => expr_yields_value_for_stmt_use(&p.expr),
+        _ => false,
+    }
+}
+
 /// unsigned 型へのキャスト式かどうか判定
 /// 例: "(x as usize)", "(x as u32)"
 fn is_unsigned_cast_expr(expr_str: &str) -> bool {
@@ -3369,17 +3398,35 @@ impl<'a> RustCodegen<'a> {
             ExprKind::Comma { lhs, rhs } => {
                 let l = self.build_syn_expr(lhs, info);
                 let r = self.build_syn_expr(rhs, info);
-                syn::Expr::Block(syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block {
-                        brace_token: Default::default(),
-                        stmts: vec![
-                            syn::Stmt::Expr(l, Some(Default::default())),
-                            syn::Stmt::Expr(r, None),
-                        ],
-                    },
-                })
+                // C カンマ `(A, B)` の翻訳。LHS の値は捨てるが、A が
+                // assignment-as-expression の場合 codegen は `{ stmt; trailing }`
+                // のような trailing 値付きブロックを作る（例: `*fp |= X` →
+                // `{ *fp |= X; *fp }`）。これを文の位置で `;` 付きに置くと
+                // Rust の trailing 単項式・論理演算・must_use 戻り値が discarded で
+                // CI の `-D warnings` を踏む。
+                //
+                // 条件付き `let _ = A;` wrap: A が値を返すと判明している
+                // パターン（trailing-expr 付き block / 論理演算 / 単項 / 関数呼出）
+                // のみ wrap する。`{ assert!(...); }` のように常に `()` を返す
+                // 形式まで wrap すると、既存の生成コードを不必要に汚すため除外。
+                if expr_yields_value_for_stmt_use(&l) {
+                    let l_str = expr_to_string(&l);
+                    let r_str = expr_to_string(&r);
+                    syn::parse_str(&format!("{{ let _ = {}; {} }}", l_str, r_str))
+                        .unwrap_or_else(|_| int_lit(0))
+                } else {
+                    syn::Expr::Block(syn::ExprBlock {
+                        attrs: vec![],
+                        label: None,
+                        block: syn::Block {
+                            brace_token: Default::default(),
+                            stmts: vec![
+                                syn::Stmt::Expr(l, Some(Default::default())),
+                                syn::Stmt::Expr(r, None),
+                            ],
+                        },
+                    })
+                }
             }
             ExprKind::UnaryMinus(inner) => {
                 let e = self.build_syn_expr(inner, info);
