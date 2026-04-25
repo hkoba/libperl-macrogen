@@ -1279,10 +1279,12 @@ impl CodegenConfig {
     /// `size_t` などは Rust 組み込み型のエイリアスとして定義。
     pub fn default_use_statements() -> Vec<String> {
         vec![
-            "use std::ffi::{c_void, c_char, c_uchar, c_int, c_uint, c_long, c_ulong, c_short, c_ushort}".to_string(),
-            "#[allow(non_camel_case_types)] type size_t = usize".to_string(),
-            "#[allow(non_camel_case_types)] type ssize_t = isize".to_string(),
-            "#[allow(non_camel_case_types)] type SSize_t = isize".to_string(),
+            // 生成コードで実際に参照されない type alias / import が出ても
+            // CI の `-D warnings` で落ちないよう dead_code / unused_imports を allow。
+            "#[allow(unused_imports)] use std::ffi::{c_void, c_char, c_uchar, c_int, c_uint, c_long, c_ulong, c_short, c_ushort}".to_string(),
+            "#[allow(non_camel_case_types, dead_code)] type size_t = usize".to_string(),
+            "#[allow(non_camel_case_types, dead_code)] type ssize_t = isize".to_string(),
+            "#[allow(non_camel_case_types, dead_code)] type SSize_t = isize".to_string(),
         ]
     }
 
@@ -3476,9 +3478,14 @@ impl<'a> RustCodegen<'a> {
                 }
                 let e = self.build_syn_expr(inner, info);
                 if t == "()" {
-                    // void キャスト → 式の値を捨てる
+                    // void キャスト → 式の値を `let _` で捨てる。
+                    // 単純な `{ expr; }` だと `must_use` 関数の戻り値（size_of_val 等）、
+                    // 論理演算 (`a || b`)、単項式 (`*ptr`) を捨てたときに
+                    // unused_must_use / unused_logical_op / unused_unary lint で
+                    // CI の `-D warnings` が落ちる。`let _ = expr;` ならどんな式でも
+                    // 「使った」扱いになり、副作用ある式（assignment, fn call）でも安全。
                     let e_str = expr_to_string(&e);
-                    return syn::parse_str(&format!("{{ {}; }}", e_str))
+                    return syn::parse_str(&format!("{{ let _ = {}; }}", e_str))
                         .unwrap_or_else(|_| int_lit(0));
                 }
                 if t == "bool" {
