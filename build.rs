@@ -19,32 +19,36 @@ fn main() {
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR not set");
     let archive_path = Path::new(&out_dir).join("apidoc.tar.gz");
 
-    // 既にダウンロード済みならスキップ
-    if archive_path.exists() {
-        println!("cargo:rerun-if-changed=build.rs");
-        return;
-    }
+    // rerun トリガを早めに宣言（早期 return / panic でも cargo に反映される）。
+    // build.rs と apidoc/ 配下の任意の変更で再実行する。これを宣言しておかないと、
+    // GitHub Actions の target/ キャッシュ等で stale な apidoc.tar.gz が
+    // OUT_DIR に居座り続けて library binary が古い patches を embed してしまう。
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=apidoc");
 
-    // 開発時: ローカルの apidoc/ ディレクトリから tar.gz を作成
+    // 開発時: ローカルの apidoc/ ディレクトリから tar.gz を作成。
+    // **キャッシュされた archive を信用せず毎回作り直す**（数 MB の tar 化なので
+    // 十分速く、stale 化リスクの方が大きい）。
     let local_apidoc = Path::new("apidoc");
     if local_apidoc.is_dir() {
-        println!("cargo:warning=Using local apidoc/ directory");
+        // 既存の archive は明示的に削除（mtime 比較ではなく毎回まっさら）
+        let _ = std::fs::remove_file(&archive_path);
         if let Err(e) = create_local_archive(local_apidoc, &archive_path) {
             panic!("Failed to create local apidoc archive: {}", e);
         }
-        println!("cargo:rerun-if-changed=apidoc");
         return;
     }
 
-    // リリース時: GitHub Releases からダウンロード
+    // リリース時（crates.io 由来など、apidoc/ が exclude されている）:
+    // 既存の archive があれば再利用、無ければ GitHub Releases からダウンロード。
+    if archive_path.exists() {
+        return;
+    }
     let url = get_download_url();
     println!("cargo:warning=Downloading apidoc from {}", url);
-
     if let Err(e) = download_file(&url, &archive_path) {
         panic!("Failed to download apidoc archive: {}", e);
     }
-
-    println!("cargo:rerun-if-changed=build.rs");
 }
 
 /// GitHub Releases からのダウンロード URL を生成
