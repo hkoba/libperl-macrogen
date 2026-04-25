@@ -22,6 +22,9 @@ use crate::sexp::SexpPrinter;
 pub struct BindingsInfo {
     /// 配列型の extern static 変数名の集合
     pub static_arrays: HashSet<String>,
+    /// extern static 変数名 → 型文字列（"[T; N]" や "T" 等）
+    /// 配列の要素型抽出に使う。`static_array_element_type` も参照。
+    pub static_types: HashMap<String, String>,
     /// ビットフィールドのメソッド名集合（構造体名 → メソッド名セット）
     pub bitfield_methods: HashMap<String, HashSet<String>>,
 }
@@ -31,8 +34,21 @@ impl BindingsInfo {
     pub fn from_rust_decl_dict(dict: &RustDeclDict) -> Self {
         Self {
             static_arrays: dict.static_arrays.clone(),
+            static_types: dict.static_types.clone(),
             bitfield_methods: dict.bitfield_methods.clone(),
         }
+    }
+
+    /// `static_arrays` に含まれる名前の **配列要素型** を返す。
+    /// `static_types[name]` が `"[T; N]"` 形式なら T を取り出す。
+    /// 抽出できなかったら None（呼出側でフォールバック）。
+    pub fn static_array_element_type(&self, name: &str) -> Option<String> {
+        let ty = self.static_types.get(name)?;
+        let s = ty.trim();
+        let s = s.strip_prefix('[')?;
+        let s = s.strip_suffix(']')?;
+        let semi = s.rfind(';')?;
+        Some(s[..semi].trim().to_string())
     }
 }
 
@@ -3297,10 +3313,7 @@ impl<'a> RustCodegen<'a> {
                     });
                 }
                 let escaped = escape_rust_keyword(name_str);
-                // extern static 配列はポインタとして使われるため先頭要素の生ポインタに減衰させる。
-                //
-                // 旧実装: `NAME.as_ptr()`
-                // 新実装: `(&raw const NAME[0])`
+                // extern static 配列はポインタとして使われるため raw pointer に減衰させる。
                 //
                 // Rust 2024 edition では `static mut` への暗黙の shared reference が
                 // hard error 化された (`creating a shared reference to mutable static`)。
@@ -3308,12 +3321,20 @@ impl<'a> RustCodegen<'a> {
                 // `static mut PL_fold_locale: [u8; N]` のような mutable static に対して
                 // 直接呼ぶと当該 lint を踏む。
                 //
-                // `&raw const NAME[0]` は raw pointer を直接取るため shared reference を
-                // 経由しない（Rust 2024 idiom）。元の `.as_ptr()` と同じく `*const T` 型。
-                // `static` (immutable) でも問題なく動く。
+                // - `(&raw const NAME[0])` は const 評価で `[N=0]` の OOB を踏む
+                //   (bindgen が不明サイズの extern static を `[T; 0]` で出すため)。
+                // - `(&raw const NAME) as *const u8` は型情報を捨てるため `.offset(i)`
+                //   が byte 単位になり、要素配列で計算が壊れる。
+                // - 正解は **`(&raw const NAME) as *const T`**。bindings から要素型 T
+                //   を取り出して埋め込む。取り出せなかったら u8 にフォールバック。
                 if self.bindings_info.static_arrays.contains(name_str) {
-                    return syn::parse_str(&format!("(&raw const {}[0])", escaped))
-                        .unwrap_or_else(|_| int_lit(0));
+                    let elem = self.bindings_info.static_array_element_type(name_str)
+                        .unwrap_or_else(|| "u8".to_string());
+                    return syn::parse_str(&format!(
+                        "((&raw const {}) as *const {})",
+                        escaped, elem
+                    ))
+                    .unwrap_or_else(|_| int_lit(0));
                 }
                 syn::Expr::Path(syn::ExprPath {
                     attrs: vec![],
@@ -3611,15 +3632,21 @@ impl<'a> RustCodegen<'a> {
                 let base_expr: syn::Expr = if self.is_array_like_expr(base, info) {
                     // 配列ベースを raw pointer に減衰させる。
                     // - 通常: `array.as_ptr()`
-                    // - extern static (mutable static 含む): `&raw const NAME[0]`
-                    //   (Rust 2024 edition で `static mut` への shared reference が
-                    //   hard error 化されたため、`.as_ptr()` 経由の暗黙参照を避ける)
+                    // - extern static (mutable static 含む): `((&raw const NAME) as *const T)`
+                    //   (Rust 2024 で `static mut` への shared reference が hard error 化。
+                    //   `.as_ptr()` 経由の暗黙参照を避ける。要素型 T は bindings から取得)
                     let raw_ptr_expr: syn::Expr = if let ExprKind::Ident(n) = &base.kind {
                         let name_str = self.interner.get(*n);
                         let escaped = escape_rust_keyword(name_str);
                         if self.bindings_info.static_arrays.contains(name_str) {
-                            syn::parse_str(&format!("(&raw const {}[0])", escaped))
-                                .unwrap_or_else(|_| int_lit(0))
+                            let elem = self.bindings_info
+                                .static_array_element_type(name_str)
+                                .unwrap_or_else(|| "u8".to_string());
+                            syn::parse_str(&format!(
+                                "((&raw const {}) as *const {})",
+                                escaped, elem
+                            ))
+                            .unwrap_or_else(|_| int_lit(0))
                         } else {
                             let id = ident_expr(escaped.as_str());
                             method_call(id, "as_ptr", vec![])
@@ -6022,10 +6049,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             result.rust_decl_dict.as_ref(),
             self.interner,
         );
-        // 自動生成した static 配列名を bindings_info.static_arrays に登録。
-        // これにより codegen が `.as_ptr()` 減衰を掛けるべき配列として認識する。
+        // 自動生成した static 配列名を bindings_info.static_arrays / static_types に登録。
+        // これにより codegen が `.as_ptr()` 減衰を掛けるべき配列として認識し、
+        // 要素型 T も `(&raw const NAME) as *const T` で正しく出せる。
         for n in &static_arrays.emitted_names {
             self.bindings_info.static_arrays.insert(n.clone());
+        }
+        for (n, t) in &static_arrays.emitted_types {
+            self.bindings_info.static_types.insert(n.clone(), t.clone());
         }
 
         // 既知シンボル集合を構築（未解決シンボル検出用）

@@ -33,6 +33,9 @@ use crate::type_repr::TypeRepr;
 pub struct EmittedStaticArrays {
     pub source: String,
     pub emitted_names: std::collections::HashSet<String>,
+    /// 名前 → Rust 型文字列 (`"[ELEMENT; N]"` 形式)。
+    /// `BindingsInfo::static_types` にマージして要素型抽出に使う。
+    pub emitted_types: std::collections::HashMap<String, String>,
 }
 
 /// `GlobalConstDict` の全エントリを Rust ソースとして出力する。
@@ -45,6 +48,7 @@ pub fn emit_static_arrays(
 ) -> EmittedStaticArrays {
     let mut out = String::new();
     let mut emitted_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut emitted_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let bindings_consts: std::collections::HashSet<String> = rust_decl_dict
         .map(|d| d.consts.keys().cloned().collect())
         .unwrap_or_default();
@@ -85,6 +89,15 @@ pub fn emit_static_arrays(
                 out.push_str(&s);
                 out.push('\n');
                 emitted_names.insert(name_str.to_string());
+                let elem_str = decl.element_type.to_rust_string(interner);
+                let count = match &decl.initializer {
+                    Initializer::List(items) => items.len(),
+                    _ => 0,
+                };
+                emitted_types.insert(
+                    name_str.to_string(),
+                    format!("[{}; {}]", elem_str, count),
+                );
             }
             Err(reason) => {
                 if !header_emitted {
@@ -97,7 +110,7 @@ pub fn emit_static_arrays(
             }
         }
     }
-    EmittedStaticArrays { source: out, emitted_names }
+    EmittedStaticArrays { source: out, emitted_names, emitted_types }
 }
 
 fn emit_one_array(
