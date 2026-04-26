@@ -20,6 +20,11 @@ pub struct InlineFnDict {
     called_functions: HashMap<InternedStr, HashSet<InternedStr>>,
     /// 利用不可関数の呼び出しを含む inline 関数の集合
     calls_unavailable: HashSet<InternedStr>,
+    /// apidoc patches / skip-list で skip_codegen 指定された inline 関数の集合
+    ///
+    /// 直接の skip 対象にしか入れない。伝播では `is_unavailable_for_codegen()`
+    /// で `calls_unavailable` と OR を取って参照する。
+    apidoc_suppressed: HashSet<InternedStr>,
 }
 
 impl InlineFnDict {
@@ -66,6 +71,25 @@ impl InlineFnDict {
     /// 利用不可フラグを設定
     pub fn set_calls_unavailable(&mut self, name: InternedStr) {
         self.calls_unavailable.insert(name);
+    }
+
+    /// apidoc skip_codegen 対象かどうか
+    pub fn is_apidoc_suppressed(&self, name: InternedStr) -> bool {
+        self.apidoc_suppressed.contains(&name)
+    }
+
+    /// apidoc skip_codegen フラグを設定
+    pub fn set_apidoc_suppressed(&mut self, name: InternedStr) {
+        self.apidoc_suppressed.insert(name);
+    }
+
+    /// 出力可否の総合判定
+    ///
+    /// `calls_unavailable`（不在関数を呼ぶ／推移的）または
+    /// `apidoc_suppressed`（自分が skip_codegen 対象）のいずれかが立っていれば
+    /// codegen 対象外。
+    pub fn is_unavailable_for_codegen(&self, name: InternedStr) -> bool {
+        self.is_calls_unavailable(name) || self.is_apidoc_suppressed(name)
     }
 
     /// called_functions の全エントリを走査

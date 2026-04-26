@@ -308,6 +308,11 @@ pub struct MacroInferInfo {
     pub called_functions: HashSet<InternedStr>,
     /// 利用不可関数の呼び出しを含む（直接または推移的）
     pub calls_unavailable: bool,
+    /// apidoc patches / skip-list で skip_codegen 指定された対象自身か
+    ///
+    /// 直接の skip 対象にしか立てない。伝播では `is_unavailable_for_codegen()`
+    /// で `calls_unavailable` と OR を取って参照する。
+    pub apidoc_suppressed: bool,
 
     // ── Phase 2 確定型（resolve_param_and_return_types で設定）──
 
@@ -347,6 +352,7 @@ impl MacroInferInfo {
             deref_count: 0,
             called_functions: HashSet::new(),
             calls_unavailable: false,
+            apidoc_suppressed: false,
             resolved_param_types: Vec::new(),
             resolved_return_type: None,
             const_pointer_positions: HashSet::new(),
@@ -357,6 +363,15 @@ impl MacroInferInfo {
     /// unsafe 操作を含むか
     pub fn has_unsafe_ops(&self) -> bool {
         self.function_call_count > 0 || self.deref_count > 0
+    }
+
+    /// 出力可否の総合判定
+    ///
+    /// `calls_unavailable`（不在関数を呼ぶ／推移的）または
+    /// `apidoc_suppressed`（自分が skip_codegen 対象）のいずれかが立っていれば
+    /// codegen 対象外。propagation や cascade 検査ではこのヘルパーを使う。
+    pub fn is_unavailable_for_codegen(&self) -> bool {
+        self.calls_unavailable || self.apidoc_suppressed
     }
 
     /// パラメータ名から対応する ExprId を検索
