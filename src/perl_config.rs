@@ -12,6 +12,44 @@ pub struct PerlConfig {
     pub include_paths: Vec<PathBuf>,
     /// プリプロセッサマクロ定義 (cppsymbols)
     pub defines: Vec<(String, Option<String>)>,
+    /// 対象 perl の build mode (threaded / non-threaded)
+    pub build_mode: PerlBuildMode,
+}
+
+/// 対象 perl の build mode
+///
+/// `Threaded` は `-Dusethreads` でビルドされた perl
+/// （`PERL_IMPLICIT_CONTEXT` / `MULTIPLICITY` が定義されている）。
+/// 関数は `my_perl: *mut PerlInterpreter` を第一引数に取り、
+/// マクロは `aTHX_` で `my_perl` を伝播する。
+///
+/// `NonThreaded` は `-Uusethreads` の perl。`pTHX_` / `aTHX_` は
+/// 空展開され、関数は `my_perl` を取らない。`PL_curcop` 等のグローバル
+/// は実 extern 変数として bindings に出る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerlBuildMode {
+    Threaded,
+    NonThreaded,
+}
+
+impl PerlBuildMode {
+    /// `Config{usethreads}` を読んで自動検出する
+    ///
+    /// 判定順:
+    /// 1. `Config{usethreads}` == `"define"` → `Threaded`
+    /// 2. それ以外（`"undef"` / 空文字列）→ `NonThreaded`
+    pub fn detect_from_perl_config() -> Result<Self, PerlConfigError> {
+        let usethreads = get_config_value("usethreads")?;
+        if usethreads == "define" {
+            Ok(PerlBuildMode::Threaded)
+        } else {
+            Ok(PerlBuildMode::NonThreaded)
+        }
+    }
+
+    pub fn is_threaded(self) -> bool {
+        matches!(self, Self::Threaded)
+    }
 }
 
 /// Perl Config 取得エラー
@@ -222,9 +260,12 @@ pub fn get_perl_config() -> Result<PerlConfig, PerlConfigError> {
         }
     }
 
+    let build_mode = PerlBuildMode::detect_from_perl_config()?;
+
     Ok(PerlConfig {
         include_paths,
         defines,
+        build_mode,
     })
 }
 
