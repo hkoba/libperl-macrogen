@@ -84,6 +84,52 @@ fn mutable_ptr_inner_expr(compound: &CompoundStmt) -> Option<&Expr> {
     None
 }
 
+/// `TypeRepr` が「無名 struct/union 型のフィールドそのもの」かを判定する。
+///
+/// 例: C で `union { ... } op_pmstashstartu;` のように書かれた anonymous
+/// union を fields_dict に格納すると、`CTypeSpecs::Struct { name: None,
+/// is_union: true }` で derived = [] となる。この場合
+/// `to_display_string` は `"union"` を返してしまい、後続 member access
+/// の base 型として使い物にならない。bindings.rs から bindgen 生成の
+/// named 型（例: `pmop__bindgen_ty_2`）に置き換える必要がある。
+fn is_anonymous_struct_or_union_field(t: &TypeRepr) -> bool {
+    if let TypeRepr::CType { specs, derived, .. } = t {
+        if !derived.is_empty() {
+            return false;
+        }
+        return matches!(
+            specs,
+            crate::type_repr::CTypeSpecs::Struct { name: None, .. }
+        );
+    }
+    false
+}
+
+/// `TypeRepr` から struct/union/typedef 名を文字列として取得する。
+///
+/// `TypeRepr::type_name()` は `InternedStr` を返すが、`RustTypeRepr` 側は
+/// String ベースで保持しているため常に `None` を返す。bindings.rs 由来の
+/// `RustType::Named("pmop__bindgen_ty_2")` のような名前も拾うために、
+/// 個別に String として取り出すヘルパーを提供する。
+fn extract_struct_name_str(t: &TypeRepr, interner: &crate::intern::StringInterner) -> Option<String> {
+    use crate::type_repr::{CTypeSpecs, RustTypeRepr};
+    match t {
+        TypeRepr::CType { specs, derived, .. } if derived.is_empty() => match specs {
+            CTypeSpecs::TypedefName(n) => Some(interner.get(*n).to_string()),
+            CTypeSpecs::Struct { name: Some(n), .. } => Some(interner.get(*n).to_string()),
+            _ => None,
+        },
+        TypeRepr::RustType { repr, .. } => match repr {
+            RustTypeRepr::Named(s) => Some(s.clone()),
+            _ => None,
+        },
+        TypeRepr::Inferred(inferred) => {
+            inferred.resolved_type().and_then(|t| extract_struct_name_str(t, interner))
+        }
+        _ => None,
+    }
+}
+
 /// 既存の `TypeRepr` の最も外側に Pointer derived を一段被せた新しい
 /// `TypeRepr` を返す。flexible array member (`T[1]`) を `T*` として扱う際に使う。
 /// 元が `RustType` や `Inferred` の場合はサポート外として `None` 相当ではなく
@@ -1341,6 +1387,78 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    /// `c_field_type` が anonymous struct/union だった場合、bindings.rs
+    /// (rust_decl_dict) から同じ親 struct + 同名フィールドを引いて、
+    /// bindgen が生成した named 型 (`pmop__bindgen_ty_2` 等) で置き換える。
+    ///
+    /// これは perl の C ヘッダがインライン anonymous union を多用しており
+    /// （例: `union { HV *op_pmstash; PADOFFSET op_pmstashoff; } op_pmstashstartu;`）、
+    /// その内部メンバへの member access を解決するために必要。
+    /// fields_dict 単体では anonymous union のフィールドを引けないが、
+    /// bindings.rs では bindgen が `pmop__bindgen_ty_2` のような名前を
+    /// 与えており、そこには `op_pmstash: *mut HV` 等のフィールドが
+    /// 登録されている。
+    /// `name` が typedef なら base struct 名へ展開する
+    /// 例: "PMOP" → "pmop"。base が struct でない、または再帰深度
+    /// が深すぎる場合は元の名前を返す。
+    fn resolve_typedef_to_struct_name<'b>(&self, name: &'b str) -> std::borrow::Cow<'b, str> {
+        let Some(rd) = self.rust_decl_dict else {
+            return std::borrow::Cow::Borrowed(name);
+        };
+        let mut current = std::borrow::Cow::Borrowed(name);
+        for _ in 0..8 {
+            // 既に struct として登録されていれば終了
+            if rd.structs.contains_key(current.as_ref()) {
+                return current;
+            }
+            // typedef を辿る
+            let Some(alias) = rd.types.get(current.as_ref()) else {
+                return current;
+            };
+            current = std::borrow::Cow::Owned(alias.ty.clone());
+        }
+        current
+    }
+
+    fn replace_anonymous_with_bindings(
+        &self,
+        parent_struct_name_str: &str,
+        field_name_str: &str,
+        c_field_type: TypeRepr,
+    ) -> TypeRepr {
+        if !is_anonymous_struct_or_union_field(&c_field_type) {
+            return c_field_type;
+        }
+        let Some(rd) = self.rust_decl_dict else {
+            return c_field_type;
+        };
+        let resolved = self.resolve_typedef_to_struct_name(parent_struct_name_str);
+        let Some(rust_struct) = rd.structs.get(resolved.as_ref()) else {
+            return c_field_type;
+        };
+        let Some(rust_field) = rust_struct.fields.iter().find(|f| f.name == field_name_str) else {
+            return c_field_type;
+        };
+        // bindings.rs の Rust 形式型文字列を TypeRepr に変換
+        TypeRepr::from_rust_string(&rust_field.ty)
+    }
+
+    /// fields_dict (C 由来) でフィールドが見つからなかった場合の
+    /// bindings.rs フォールバックルックアップ。bindgen 生成の anonymous
+    /// union (`pmop__bindgen_ty_2` 等) は fields_dict には登録されない
+    /// ため、その内部メンバアクセスはこの経路でのみ解決できる。
+    fn lookup_field_in_bindings(
+        &self,
+        parent_struct_name_str: &str,
+        field_name_str: &str,
+    ) -> Option<TypeRepr> {
+        let rd = self.rust_decl_dict?;
+        let resolved = self.resolve_typedef_to_struct_name(parent_struct_name_str);
+        let rust_struct = rd.structs.get(resolved.as_ref())?;
+        let rust_field = rust_struct.fields.iter().find(|f| f.name == field_name_str)?;
+        Some(TypeRepr::from_rust_string(&rust_field.ty))
+    }
+
     /// 式全体から型制約を収集し、全式の型を計算（再帰的に走査）
     ///
     /// 子式を先に処理し、親式の型を後で計算する。
@@ -1580,17 +1698,36 @@ impl<'a> SemanticAnalyzer<'a> {
                 } else {
                     // TypeRepr ベースのフィールドルックアップ
                     let base_type_repr = self.get_expr_type_repr(base.id, type_env);
-                    let struct_name = base_type_repr.as_ref().and_then(|t| t.type_name());
+                    let struct_name_id = base_type_repr.as_ref().and_then(|t| t.type_name());
+                    // bindings.rs 由来の RustType::Named (`pmop__bindgen_ty_2` 等) も拾う
+                    let struct_name_str = base_type_repr.as_ref()
+                        .and_then(|t| extract_struct_name_str(t, self.interner));
+                    let field_str = self.interner.get(*member);
                     // flexible array member の特別扱い: 配列ではなく要素型へのポインタ
-                    let flex_ptr = struct_name.and_then(|n| {
+                    let flex_ptr = struct_name_id.and_then(|n| {
                         self.fields_dict?
                             .flexible_array_element(n, *member)
                             .map(|elem| Box::new(wrap_with_outer_pointer(elem.clone(), false)))
                     });
+                    // anonymous struct/union の type_repr は bindings.rs の named 型で置換
                     let direct = flex_ptr.or_else(|| {
-                        struct_name
-                            .and_then(|n| self.fields_dict?.get_field_type(n, *member))
-                            .map(|ft| Box::new(ft.type_repr.clone()))
+                        struct_name_id.and_then(|n| {
+                            self.fields_dict?.get_field_type(n, *member).map(|ft| {
+                                let parent_str = self.interner.get(n);
+                                let patched = self.replace_anonymous_with_bindings(
+                                    parent_str, field_str, ft.type_repr.clone(),
+                                );
+                                Box::new(patched)
+                            })
+                        })
+                    });
+                    // fields_dict にない場合は bindings.rs から直接引く
+                    // （bindgen 生成の anonymous union のメンバアクセス用）
+                    let direct = direct.or_else(|| {
+                        struct_name_str.as_deref().and_then(|parent_str| {
+                            self.lookup_field_in_bindings(parent_str, field_str)
+                                .map(Box::new)
+                        })
                     });
                     // フォールバック: 共通フィールドマクロ × bindings.rs マッピング
                     // （無名 union メンバ等、上の経路で解決できないケース）
@@ -1666,11 +1803,25 @@ impl<'a> SemanticAnalyzer<'a> {
                         fd.flexible_array_element(name, *member)
                             .map(|elem| Box::new(wrap_with_outer_pointer(elem.clone(), false)))
                     });
+                    let parent_str = self.interner.get(name);
+                    let field_str = self.interner.get(*member);
                     // ベース型が既知のポインタ型：構造体名で直接ルックアップ
+                    // anonymous struct/union の場合は bindings.rs の named 型で置換
                     let direct = flex_ptr.or_else(|| {
                         self.fields_dict
                             .and_then(|fd| fd.get_field_type(name, *member))
-                            .map(|ft| Box::new(ft.type_repr.clone()))
+                            .map(|ft| {
+                                let patched = self.replace_anonymous_with_bindings(
+                                    parent_str, field_str, ft.type_repr.clone(),
+                                );
+                                Box::new(patched)
+                            })
+                    });
+                    // fields_dict にない場合は bindings.rs から直接引く
+                    // （bindgen 生成の anonymous union のメンバアクセス用）
+                    let direct = direct.or_else(|| {
+                        self.lookup_field_in_bindings(parent_str, field_str)
+                            .map(Box::new)
                     });
                     let ty = direct.or_else(|| {
                         // 共通フィールドマクロ × bindings.rs マッピング（無名 union 等）
