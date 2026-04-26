@@ -737,6 +737,7 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
+        perl_build_mode: crate::perl_config::PerlBuildMode,
     ) -> (MacroInferInfo, bool, bool) {
         let mut info = MacroInferInfo::new(def.name);
         info.is_target = def.is_target;
@@ -797,13 +798,19 @@ impl MacroInferContext {
         self.collect_uses_from_called(&called_macros, &mut info);
 
         // THX 判定: 展開されたマクロに aTHX, tTHX が含まれるか、
-        // または展開後トークンに my_perl が含まれるかをチェック
+        // または展開後トークンに my_perl が含まれるかをチェック。
+        // 非 threaded perl では aTHX_ / pTHX_ が空展開され、my_perl も
+        // 存在しないので、検出自体を短絡させて常に false にする。
         let (sym_athx, sym_tthx, sym_my_perl) = thx_symbols;
-        let has_thx_from_uses = info.uses.contains(&sym_athx) || info.uses.contains(&sym_tthx);
-        let has_my_perl = expanded_tokens.iter().any(|t| {
-            matches!(t.kind, TokenKind::Ident(id) if id == sym_my_perl)
-        });
-        let has_thx = has_thx_from_uses || has_my_perl;
+        let has_thx = if perl_build_mode.is_threaded() {
+            let has_thx_from_uses = info.uses.contains(&sym_athx) || info.uses.contains(&sym_tthx);
+            let has_my_perl = expanded_tokens.iter().any(|t| {
+                matches!(t.kind, TokenKind::Ident(id) if id == sym_my_perl)
+            });
+            has_thx_from_uses || has_my_perl
+        } else {
+            false
+        };
 
         // 初期値を設定（後で propagate で上書きされる可能性あり）
         info.has_token_pasting = has_pasting_direct;
@@ -1147,6 +1154,7 @@ impl MacroInferContext {
         typedefs: &HashSet<InternedStr>,
         thx_symbols: (InternedStr, InternedStr, InternedStr),
         no_expand: NoExpandSymbols,
+        perl_build_mode: crate::perl_config::PerlBuildMode,
     ) {
         // Step 1: 全マクロの初期構築（パースのみ、型推論なし）
         let mut thx_initial = HashSet::new();
@@ -1157,7 +1165,7 @@ impl MacroInferContext {
 
         for def in &target_macros {
             let (info, has_pasting, has_thx) = self.build_macro_info(
-                def, pp, typedefs, thx_symbols, no_expand
+                def, pp, typedefs, thx_symbols, no_expand, perl_build_mode
             );
             if has_pasting {
                 pasting_initial.insert(def.name);

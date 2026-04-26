@@ -309,10 +309,19 @@ pub fn run_inference_with_preprocessor(
     )));
 
     // pTHX_ と pTHX マクロ呼び出しを監視（関数宣言の THX 依存検出用）
+    //
+    // 非 threaded perl では `pTHX_` / `pTHX` は空マクロに展開される。
+    // しかし `set_macro_called_callback` はマクロが呼び出された事実を
+    // 記録するため、展開結果が空でも is_thx=true が立ってしまう。
+    // それをそのまま codegen に渡すと「存在しない my_perl 引数」を
+    // 注入する破綻を起こすので、threaded mode のときだけ callback を
+    // 登録する（non-threaded では誰も THX 依存にならない）。
     let pthx_id = pp.interner_mut().intern("pTHX_");
     let pthx_no_comma_id = pp.interner_mut().intern("pTHX");
-    pp.set_macro_called_callback(pthx_id, Box::new(MacroCallWatcher::new()));
-    pp.set_macro_called_callback(pthx_no_comma_id, Box::new(MacroCallWatcher::new()));
+    if perl_build_mode.is_threaded() {
+        pp.set_macro_called_callback(pthx_id, Box::new(MacroCallWatcher::new()));
+        pp.set_macro_called_callback(pthx_no_comma_id, Box::new(MacroCallWatcher::new()));
+    }
 
     // C 関数宣言辞書を作成
     let mut c_fn_decl_dict = CFnDeclDict::new();
@@ -570,6 +579,7 @@ pub fn run_inference_with_preprocessor(
         &typedefs,
         thx_symbols,
         no_expand,
+        perl_build_mode,
     );
 
     // THX 依存マクロ数をカウント
