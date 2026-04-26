@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::apidoc::ApidocDict;
+use crate::apidoc_patches::ApidocPatchSet;
 use crate::ast::{AssertKind, BlockItem, Expr, ExprKind};
 use crate::c_fn_decl::CFnDeclDict;
 use crate::fields_dict::FieldsDict;
@@ -507,6 +508,29 @@ impl MacroInferContext {
     /// マクロ情報を可変で取得
     pub fn get_mut(&mut self, name: InternedStr) -> Option<&mut MacroInferInfo> {
         self.macros.get_mut(&name)
+    }
+
+    /// apidoc skip_codegen を `apidoc_suppressed` フラグに反映
+    ///
+    /// `patches.skip_codegen` の各エントリ名を interner で解決し、
+    /// 該当するマクロが見つかれば `info.apidoc_suppressed = true` を立てる。
+    /// マッチしたマクロ数を返す（インライン関数側のマッチは
+    /// `InlineFnDict::apply_apidoc_suppressions` が別途扱う）。
+    pub fn apply_apidoc_suppressions(
+        &mut self,
+        patches: &ApidocPatchSet,
+        interner: &StringInterner,
+    ) -> usize {
+        let mut count = 0usize;
+        for name_str in patches.skip_codegen.keys() {
+            if let Some(interned) = interner.lookup(name_str) {
+                if let Some(info) = self.macros.get_mut(&interned) {
+                    info.apidoc_suppressed = true;
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// def-use 関係を構築
@@ -1115,6 +1139,7 @@ impl MacroInferContext {
         &mut self,
         pp: &mut Preprocessor,
         apidoc: Option<&'a ApidocDict>,
+        apidoc_patches: Option<&'a ApidocPatchSet>,
         fields_dict: Option<&'a FieldsDict>,
         rust_decl_dict: Option<&'a RustDeclDict>,
         mut inline_fn_dict: Option<&'a mut InlineFnDict>,
@@ -1164,6 +1189,25 @@ impl MacroInferContext {
 
         // Step 4: ## の推移閉包を計算（used_by 経由）
         self.propagate_flag_via_used_by(&pasting_initial, false);
+
+        // Step 4.4: apidoc skip_codegen を apidoc_suppressed フラグに反映
+        // （Step 4.5 / 4.6 / 4.7 で is_unavailable_for_codegen() 経由で
+        //   伝播の起点として扱うため、availability チェックの前に立てる）
+        if let Some(patches) = apidoc_patches {
+            let interner = pp.interner();
+            let macro_hits = self.apply_apidoc_suppressions(patches, interner);
+            let inline_hits = inline_fn_dict
+                .as_mut()
+                .map(|ifd| ifd.apply_apidoc_suppressions(patches, interner))
+                .unwrap_or(0);
+            let total = patches.skip_codegen.len();
+            let unmatched = total.saturating_sub(macro_hits + inline_hits);
+            eprintln!(
+                "[apidoc-suppress] skip_codegen reflected: {} macro(s) + {} inline fn(s); \
+                 {} of {} entries unmatched (no such macro/inline; possibly stale skip-list)",
+                macro_hits, inline_hits, unmatched, total,
+            );
+        }
 
         // Step 4.5: マクロの利用不可関数呼び出しチェック
         {

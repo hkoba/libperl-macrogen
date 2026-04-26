@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::apidoc_patches::ApidocPatchSet;
 use crate::ast::FunctionDef;
 use crate::intern::{InternedStr, StringInterner};
 use crate::macro_infer::{convert_assert_calls_in_compound_stmt, MacroInferContext};
@@ -90,6 +91,29 @@ impl InlineFnDict {
     /// codegen 対象外。
     pub fn is_unavailable_for_codegen(&self, name: InternedStr) -> bool {
         self.is_calls_unavailable(name) || self.is_apidoc_suppressed(name)
+    }
+
+    /// apidoc skip_codegen を `apidoc_suppressed` 集合に反映
+    ///
+    /// `patches.skip_codegen` の各エントリ名を interner で解決し、
+    /// 該当する inline 関数が辞書に登録されていれば `apidoc_suppressed`
+    /// に追加する。マッチした関数数を返す（マクロ側のマッチは
+    /// `MacroInferContext::apply_apidoc_suppressions` が別途扱う）。
+    pub fn apply_apidoc_suppressions(
+        &mut self,
+        patches: &ApidocPatchSet,
+        interner: &StringInterner,
+    ) -> usize {
+        let mut count = 0usize;
+        for name_str in patches.skip_codegen.keys() {
+            if let Some(interned) = interner.lookup(name_str) {
+                if self.fns.contains_key(&interned) {
+                    self.apidoc_suppressed.insert(interned);
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// called_functions の全エントリを走査

@@ -552,6 +552,7 @@ pub fn run_inference_with_preprocessor(
     infer_ctx.analyze_all_macros(
         &mut pp,
         Some(&apidoc),
+        Some(&apidoc_patches),
         Some(&fields_dict),
         rust_decl_dict.as_ref(),
         Some(&mut inline_fn_dict),
