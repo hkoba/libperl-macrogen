@@ -130,6 +130,48 @@ fn extract_struct_name_str(t: &TypeRepr, interner: &crate::intern::StringInterne
     }
 }
 
+/// `*mut T` / `*const T` 形式の Rust 型文字列を C 風の `T *` / `const T *`
+/// 形式に変換する。bindings.rs の `RustField.ty` は Rust 形式で格納されて
+/// いるが、本プロジェクトの型系は基本的に C 形式を前提にしているため、
+/// `from_apidoc_string` で `TypeRepr::CType` を構築する前に変換が必要。
+///
+/// 想定する入力例:
+/// - `*mut HV` → `HV *`
+/// - `*const c_char` → `const c_char *`
+/// - `*mut *mut OP` → `OP * *`
+/// - `* mut HV` (syn が空白を入れる) → `HV *`
+/// - `HV` (ポインタなし) → `HV` （そのまま）
+///
+/// 配列型 (`[T; N]`) や関数ポインタ型は呼出側で扱わない想定。
+fn rust_type_string_to_c(s: &str) -> String {
+    // 先に `* mut ` / `* const ` を `*mut ` / `*const ` に正規化
+    // （syn の `Type::to_token_stream().to_string()` は空白を挟むことがある）
+    let normalized = s.replace("* mut ", "*mut ").replace("* const ", "*const ");
+    let mut current = normalized.trim();
+    let mut prefixes: Vec<bool> = Vec::new(); // is_const
+    loop {
+        if let Some(rest) = current.strip_prefix("*mut ") {
+            prefixes.push(false);
+            current = rest.trim();
+        } else if let Some(rest) = current.strip_prefix("*const ") {
+            prefixes.push(true);
+            current = rest.trim();
+        } else {
+            break;
+        }
+    }
+    let mut result = current.to_string();
+    // 内側のポインタから外側へ追記（配列の `Vec::push` 順は外→内なので reverse）
+    for is_const in prefixes.iter().rev() {
+        if *is_const {
+            result = format!("const {} *", result);
+        } else {
+            result.push_str(" *");
+        }
+    }
+    result
+}
+
 /// 既存の `TypeRepr` の最も外側に Pointer derived を一段被せた新しい
 /// `TypeRepr` を返す。flexible array member (`T[1]`) を `T*` として扱う際に使う。
 /// 元が `RustType` や `Inferred` の場合はサポート外として `None` 相当ではなく
@@ -1439,8 +1481,12 @@ impl<'a> SemanticAnalyzer<'a> {
         let Some(rust_field) = rust_struct.fields.iter().find(|f| f.name == field_name_str) else {
             return c_field_type;
         };
-        // bindings.rs の Rust 形式型文字列を TypeRepr に変換
-        TypeRepr::from_rust_string(&rust_field.ty)
+        // bindings.rs の Rust 形式型文字列 (`*mut HV`) を C 形式 (`HV *`) に
+        // 変換してから C-style TypeRepr を作る。`from_rust_string` で作る
+        // RustType だと、後続の conditional 型推論で `to_display_string` →
+        // `from_apidoc_string` round-trip が成立せず Void に落ちる。
+        let c_str = rust_type_string_to_c(&rust_field.ty);
+        TypeRepr::from_apidoc_string(&c_str, self.interner)
     }
 
     /// fields_dict (C 由来) でフィールドが見つからなかった場合の
@@ -1456,7 +1502,8 @@ impl<'a> SemanticAnalyzer<'a> {
         let resolved = self.resolve_typedef_to_struct_name(parent_struct_name_str);
         let rust_struct = rd.structs.get(resolved.as_ref())?;
         let rust_field = rust_struct.fields.iter().find(|f| f.name == field_name_str)?;
-        Some(TypeRepr::from_rust_string(&rust_field.ty))
+        let c_str = rust_type_string_to_c(&rust_field.ty);
+        Some(TypeRepr::from_apidoc_string(&c_str, self.interner))
     }
 
     /// 式全体から型制約を収集し、全式の型を計算（再帰的に走査）

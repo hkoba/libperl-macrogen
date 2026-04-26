@@ -96,6 +96,25 @@ impl RustDeclDict {
         Ok(Self::parse(&content))
     }
 
+    /// 全 struct / typedef / enum 名を StringInterner に intern する。
+    ///
+    /// bindgen が生成する `pmop__bindgen_ty_2` のような名前は通常 C ヘッダ側の
+    /// パースでは登場しないため interner に未登録のまま。後段の型推論で
+    /// `from_apidoc_string("pmop__bindgen_ty_2", interner)` のように
+    /// `interner.lookup()` を経由する経路は immutable な interner しか見ないので、
+    /// パース直後に明示的に intern しておく必要がある。
+    pub fn intern_names(&self, interner: &mut crate::intern::StringInterner) {
+        for name in self.structs.keys() {
+            interner.intern(name);
+        }
+        for name in self.types.keys() {
+            interner.intern(name);
+        }
+        for name in &self.enums {
+            interner.intern(name);
+        }
+    }
+
     /// 文字列からパース
     pub fn parse(content: &str) -> Self {
         let mut dict = Self::new();

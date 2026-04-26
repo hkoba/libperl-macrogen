@@ -901,10 +901,28 @@ impl TypeRepr {
     fn parse_c_type_string(s: &str, interner: &crate::intern::StringInterner) -> (CTypeSpecs, Vec<CDerivedType>) {
         let s = s.trim();
 
+        // Rust 形式 (`*mut T` / `*const T`) は先頭から prefix で剥がす。
+        // bindings.rs (`RustField.ty`) 由来の文字列が経由する経路で必要。
+        // 通常の C 形式 (`T *`) と混在しないよう、先頭プレフィクスがある間
+        // 繰り返し処理する。
+        let mut prefix_pointers: Vec<bool> = Vec::new(); // is_const
+        let mut current = s;
+        loop {
+            if let Some(rest) = current.strip_prefix("*mut ") {
+                prefix_pointers.push(false);
+                current = rest.trim();
+            } else if let Some(rest) = current.strip_prefix("*const ") {
+                prefix_pointers.push(true);
+                current = rest.trim();
+            } else {
+                break;
+            }
+        }
+
         // ポインタ数をカウント
         let mut ptr_count = 0;
         let mut is_const = false;
-        let mut base = s;
+        let mut base = current;
 
         // 末尾の * をカウント
         while base.ends_with('*') {
@@ -926,13 +944,24 @@ impl TypeRepr {
         let specs = Self::parse_c_base_type(base, interner);
 
         // 派生型を構築
-        let derived: Vec<CDerivedType> = (0..ptr_count)
-            .map(|i| CDerivedType::Pointer {
+        // 内側の Rust prefix ポインタを最初に積み、続いて C 形式 trailing
+        // ポインタを積む。`*mut HV` (Rust) は `HV *` (C) と等価なので
+        // 出力 derived は同じ並びになる。
+        let mut derived: Vec<CDerivedType> = Vec::with_capacity(prefix_pointers.len() + ptr_count);
+        for is_const_p in prefix_pointers.iter().rev() {
+            derived.push(CDerivedType::Pointer {
+                is_const: *is_const_p,
+                is_volatile: false,
+                is_restrict: false,
+            });
+        }
+        for i in 0..ptr_count {
+            derived.push(CDerivedType::Pointer {
                 is_const: i == 0 && is_const,
                 is_volatile: false,
                 is_restrict: false,
-            })
-            .collect();
+            });
+        }
 
         (specs, derived)
     }

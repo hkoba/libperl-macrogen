@@ -265,6 +265,10 @@ pub fn run_inference_with_preprocessor(
             let interned = pp.interner_mut().intern(name);
             pp.add_skip_expand_macro(interned);
         }
+        // bindgen 生成の anonymous union 型名 (`pmop__bindgen_ty_2` 等) を
+        // intern しておくことで、後段の型推論で
+        // `from_apidoc_string` 経由の `TypedefName` 解決が可能になる。
+        dict.intern_names(pp.interner_mut());
     }
 
     // 明示展開マクロを Preprocessor に登録（wrapped_macros の引数展開用）
