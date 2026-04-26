@@ -49,6 +49,33 @@ It should NOT perform new type analysis, dependency resolution, or semantic deci
 
 When touching these areas, prefer moving logic to Phase 2 over adding more analysis to Phase 3.
 
+## skip_codegen 運用ポリシー
+
+**IMPORTANT**: `apidoc/*.patches.json` の `skip_codegen` および skip-list ファイルは、
+Perl 本体側に存在しない関数や、現状の codegen で扱えない既知の構文を **明示的に**
+除外するためのものです。
+
+**禁止事項**: CI のビルド失敗ログを見て、エラーが出た関数名を skip_codegen に
+継ぎ足していく運用は避けて下さい。これは以下の理由で根本解決を遠ざけます:
+
+1. **問題の握りつぶし**: 失敗の原因（型推論の不備、cascade 伝播の漏れ、
+   未対応構文 etc.）を特定せず symptom だけを抑止することになる
+2. **複雑性の増大**: skip_codegen リストが肥大化し、本来 codegen 可能な関数まで
+   除外されたり、後の改善で不要になったエントリが残り続ける
+3. **cascade の不整合露呈**: そもそも caller が `[CASCADE_UNAVAILABLE]` に
+   降格されない（= cascade 伝播の漏れ）ことが原因で skip_codegen を継ぎ足す羽目に
+   なっているケースがある。これは Phase 2 の `check_function_availability` /
+   `propagate_unavailable_*` が `apidoc_patches.skip_codegen` を参照していない
+   ことに起因する設計上のギャップであり、**継ぎ足しではなく Phase 2 での
+   `calls_unavailable` 伝播経路を直すべき**
+
+**正しい対応順序**:
+1. CI 失敗時はまず原因を特定する（型推論の不備か、cascade 漏れか、未対応構文か）
+2. `calls_unavailable` 伝播の漏れであれば Phase 2 の伝播ロジックを修正する
+3. codegen 側のバグなら codegen を直す
+4. Perl 本体に存在しない関数 / 構造的に対応不可能な構文のみ skip_codegen に
+   登録する（理由を `reason` フィールドに明記）
+
 ## Development Workflow
 
 ### Signature Approval Rule
