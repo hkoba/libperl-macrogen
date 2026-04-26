@@ -1,5 +1,23 @@
 ﻿# コード生成スキップ機構の拡張計画
 
+> **注記 (2026-04-26)**: 本ドキュメント記載のうち層 1（`--skip-codegen-list`
+> CLI オプション）と層 3 関連はフェーズ 1 として実装済み。さらに本ドキュメント
+> 執筆時点では未着手だった「skip_codegen の cascade 自動伝播」が
+> [apidoc-suppress-phase2-propagation.md](apidoc-suppress-phase2-propagation.md)
+> として設計・実装された。
+> 概要:
+>
+> - `MacroInferInfo` / `InlineFnDict` に `apidoc_suppressed` フラグを追加
+> - `analyze_all_macros` Step 4.4 で skip_codegen を反映
+> - `propagate_unavailable_cross_domain` で四方向に伝播
+> - Phase 3 のメッセージは `[CODEGEN_SUPPRESSED]` / `[CALLS_UNAVAILABLE]`
+>   / `[CASCADE_UNAVAILABLE]` を厳密に区別
+>
+> このため本ドキュメントの「層 2c: ビルド失敗ログから自動生成する skip-list」
+> の必要性は **大幅に低下** した（cascade で自動降格されるため、本来 skip
+> すべきは「上流バグの根本原因となる関数」のみ）。CLAUDE.md「skip_codegen
+> 運用ポリシー」も併せて参照のこと。
+
 ## 目的の転換
 
 これまでは「生成コードの正確性を上げて統合ビルドのエラーを減らす」正攻法で

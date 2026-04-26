@@ -93,6 +93,7 @@ pub struct MacroInferInfo {
     pub deref_count: usize,             // ポインタデリファレンスの数
     pub called_functions: HashSet<InternedStr>,    // 呼び出す関数
     pub calls_unavailable: bool,        // 利用不可関数の呼び出しを含む（推移的）
+    pub apidoc_suppressed: bool,        // apidoc skip_codegen 指定（直接の対象のみ）
 
     // Phase 2b で確定されるフィールド (resolve_param_and_return_types)
     pub const_pointer_positions: HashSet<usize>,   // *const に確定したパラメータ位置
@@ -112,6 +113,16 @@ pub struct MacroInferInfo {
 **利用不可フラグ** (`calls_unavailable`):
 - このマクロが直接または推移的に利用不可関数を呼び出す場合 true
 - カスケード依存検出に使用（依存先が利用不可なら呼び出し元もコメントアウト）
+
+**apidoc 抑制フラグ** (`apidoc_suppressed`):
+- `apidoc_patches.skip_codegen` で明示的に skip 指定された **直接の対象** に
+  のみ true（推移的に伝播するのは `calls_unavailable` 側）
+- 出力可否の総合判定 `is_unavailable_for_codegen()` は
+  `calls_unavailable || apidoc_suppressed` を返す
+- `propagate_unavailable_cross_domain` は `is_unavailable_for_codegen()` を
+  起点として `calls_unavailable` を伝播させるため、skip_codegen 対象を
+  呼ぶマクロ・inline 関数も自動的に降格される
+- 詳細: [doc/architecture-apidoc-patches.md](architecture-apidoc-patches.md)
 
 #### 展開制御シンボル
 
@@ -454,6 +465,11 @@ pub enum UnifiedType {
 ### Phase 4: 関数可用性チェック (check_function_availability)
 
 ```
+Step 4.4: apidoc skip_codegen を apidoc_suppressed に反映
+  1. apidoc_patches.skip_codegen の各エントリ名を interner で解決
+  2. 該当する macro があれば info.apidoc_suppressed = true
+  3. 該当する inline 関数があれば inline_fn_dict.set_apidoc_suppressed()
+
 Step 4.5: マクロの利用不可関数チェック
   1. 各マクロの called_functions を確認
   2. bindings.rs、inline 関数辞書、ビルトイン関数リストと照合
@@ -465,11 +481,13 @@ Step 4.6: inline 関数の利用不可関数チェック (check_inline_fn_availa
   3. 利用不可関数がある場合 InlineFnDict.set_calls_unavailable()
 
 Step 4.7: クロスドメイン推移閉包 (propagate_unavailable_cross_domain)
-  fixpoint ループで 4 方向の利用不可伝播:
-  (a) macro → macro:  uses が calls_unavailable なマクロを含む場合
-  (b) inline → inline: called_functions が calls_unavailable な inline を含む場合
-  (c) macro → inline:  called_functions が calls_unavailable な inline を含む場合
-  (d) inline → macro:  called_functions が calls_unavailable なマクロを含む場合
+  fixpoint ループで 4 方向の利用不可伝播。被呼び出し先の判定は
+  `is_unavailable_for_codegen()` （= calls_unavailable || apidoc_suppressed）
+  を使う。caller に立てるフラグは calls_unavailable のみ:
+  (a) macro → macro:  uses が is_unavailable_for_codegen なマクロを含む場合
+  (b) inline → inline: called_functions が is_unavailable_for_codegen な inline を含む場合
+  (c) macro → inline:  called_functions が is_unavailable_for_codegen な inline を含む場合
+  (d) inline → macro:  called_functions が is_unavailable_for_codegen なマクロを含む場合
 ```
 
 ## semantic.rs と macro_infer.rs の役割分担

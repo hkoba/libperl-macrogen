@@ -487,6 +487,8 @@ pub struct InlineFnDict {
     called_functions: HashMap<InternedStr, HashSet<InternedStr>>,
     /// 利用不可関数の呼び出しを含む inline 関数の集合
     calls_unavailable: HashSet<InternedStr>,
+    /// apidoc skip_codegen 指定された inline 関数の集合（直接の対象のみ）
+    apidoc_suppressed: HashSet<InternedStr>,
 }
 ```
 
@@ -497,6 +499,10 @@ pub struct InlineFnDict {
 | `get_called_functions(name)` | 呼び出し先の集合を取得 |
 | `is_calls_unavailable(name)` | 利用不可フラグの確認 |
 | `set_calls_unavailable(name)` | 利用不可フラグの設定 |
+| `is_apidoc_suppressed(name)` | apidoc skip_codegen フラグの確認 |
+| `set_apidoc_suppressed(name)` | apidoc skip_codegen フラグの設定 |
+| `is_unavailable_for_codegen(name)` | calls_unavailable または apidoc_suppressed |
+| `apply_apidoc_suppressions(patches, interner)` | skip_codegen を flag に反映 |
 | `called_functions_iter()` | 全エントリの走査 |
 
 **収集タイミング**: `collect_from_function_def()` 内で、assert 変換後に
@@ -520,14 +526,21 @@ inline 関数の `called_functions` を、bindings.rs、マクロ辞書、他の
 `InlineFnDict::set_calls_unavailable()` を設定。
 
 **Step 4.7** (`propagate_unavailable_cross_domain`):
-fixpoint ループで以下の 4 方向の利用不可伝播を実行:
+fixpoint ループで以下の 4 方向の利用不可伝播を実行。被呼び出し先の判定は
+`is_unavailable_for_codegen()` （= `calls_unavailable || apidoc_suppressed`）
+を使い、apidoc skip_codegen 対象も伝播の起点になる。caller に立てるのは
+`calls_unavailable` のみ:
 
 ```
-(a) macro → macro:  マクロの uses が calls_unavailable なマクロを含む場合
-(b) inline → inline: inline の called_functions が calls_unavailable な inline を含む場合
-(c) macro → inline:  マクロの called_functions が calls_unavailable な inline を含む場合
-(d) inline → macro:  inline の called_functions が calls_unavailable なマクロを含む場合
+(a) macro → macro:  マクロの uses が is_unavailable_for_codegen なマクロを含む場合
+(b) inline → inline: inline の called_functions が is_unavailable_for_codegen な inline を含む場合
+(c) macro → inline:  マクロの called_functions が is_unavailable_for_codegen な inline を含む場合
+(d) inline → macro:  inline の called_functions が is_unavailable_for_codegen なマクロを含む場合
 ```
+
+なお Step 4.4 で `apidoc_suppressed` を立てる工程があり、その値が
+ここでの伝播の起点となる。詳細は
+[architecture-apidoc-patches.md](architecture-apidoc-patches.md) 参照。
 
 ### codegen 段階でのカスケード検出
 
