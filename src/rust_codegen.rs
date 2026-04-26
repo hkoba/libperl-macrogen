@@ -6197,11 +6197,23 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         for name in sorted_names {
             let info = result.infer_ctx.macros.get(&name).unwrap();
 
+            // apidoc_suppressed なマクロは generatable_macros に入れない
+            // （Phase 3 の早期 SUPPRESSED 分岐で抑止される。inline→macro の
+            //   cascade 検査が `generatable_macros` を参照するので、ここで
+            //   除外しないと skip_codegen 対象を呼ぶ inline が誤って success
+            //   扱いになる抜け穴ができる）
+            if info.apidoc_suppressed {
+                continue;
+            }
+
             // カスケード検査: called_functions が生成不可なマクロを含むか
+            // 被呼び出し先の判定は is_unavailable_for_codegen() を使う
+            // （= apidoc_suppressed 由来の不可も Phase 2 propagation で
+            //   calls_unavailable に流れているはずだが、防御的に OR を取る）
             let has_cascade_failure = info.called_functions.iter().any(|called| {
                 if included_set.contains(called) {
                     return result.infer_ctx.macros.get(called)
-                        .map(|u| u.is_parseable() && !u.calls_unavailable)
+                        .map(|u| u.is_parseable() && !u.is_unavailable_for_codegen())
                         .unwrap_or(false)
                         && !self.generatable_macros.contains(called);
                 }
@@ -6515,7 +6527,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     // Case 1: マクロ→マクロ依存
                     if included_set.contains(called) {
                         return result.infer_ctx.macros.get(called)
-                            .map(|u| u.is_parseable() && !u.calls_unavailable)
+                            .map(|u| u.is_parseable() && !u.is_unavailable_for_codegen())
                             .unwrap_or(false)
                             && !successfully_generated.contains(called);
                     }
