@@ -1391,11 +1391,16 @@ impl MacroInferContext {
     }
 
     /// calls_unavailable を used_by 経由で伝播
+    ///
+    /// 初期集合は `is_unavailable_for_codegen()`（= `calls_unavailable` または
+    /// `apidoc_suppressed`）が立っているマクロ。伝播時は caller に
+    /// `calls_unavailable = true` を立てる（`apidoc_suppressed` は直接の skip
+    /// 対象自身にしか立てないため）。
     fn propagate_unavailable_via_used_by(&mut self) {
-        // 初期集合: 直接利用不可関数を呼び出すマクロ
+        // 初期集合: 直接利用不可関数を呼び出すか、apidoc_suppressed なマクロ
         let initial_set: HashSet<InternedStr> = self.macros
             .iter()
-            .filter(|(_, info)| info.calls_unavailable)
+            .filter(|(_, info)| info.is_unavailable_for_codegen())
             .map(|(name, _)| *name)
             .collect();
 
@@ -1503,6 +1508,11 @@ impl MacroInferContext {
     ///
     /// macro→macro, inline→inline, macro→inline, inline→macro の
     /// 全方向の利用不可伝播を fixpoint ループで実行する。
+    ///
+    /// 被呼び出し先の判定は `is_unavailable_for_codegen()` を使う
+    /// （`calls_unavailable` または `apidoc_suppressed` のいずれか）。
+    /// caller に立てるフラグは常に `calls_unavailable = true`
+    /// （`apidoc_suppressed` は直接の skip 対象自身にしか立てない）。
     fn propagate_unavailable_cross_domain(
         &mut self,
         inline_fn_dict: &mut InlineFnDict,
@@ -1513,7 +1523,10 @@ impl MacroInferContext {
             // (a) macro → macro: used_by 経由の伝播
             let macro_names: Vec<InternedStr> = self.macros.keys().copied().collect();
             for name in &macro_names {
-                if !self.macros.get(name).map(|i| i.calls_unavailable).unwrap_or(false) {
+                if !self.macros.get(name)
+                    .map(|i| i.is_unavailable_for_codegen())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let used_by_list: Vec<InternedStr> = self.macros
@@ -1531,7 +1544,7 @@ impl MacroInferContext {
             }
 
             // (b) inline → inline: inline の called_functions が
-            //     calls_unavailable な inline を含む場合、自身も unavailable
+            //     unavailable な inline を含む場合、自身も unavailable
             let inline_entries: Vec<(InternedStr, Vec<InternedStr>)> = inline_fn_dict
                 .called_functions_iter()
                 .map(|(name, calls)| (*name, calls.iter().copied().collect()))
@@ -1542,7 +1555,7 @@ impl MacroInferContext {
                 }
                 let has_unavailable_inline = calls.iter().any(|called| {
                     inline_fn_dict.get(*called).is_some()
-                        && inline_fn_dict.is_calls_unavailable(*called)
+                        && inline_fn_dict.is_unavailable_for_codegen(*called)
                 });
                 if has_unavailable_inline {
                     inline_fn_dict.set_calls_unavailable(*name);
@@ -1551,9 +1564,12 @@ impl MacroInferContext {
             }
 
             // (c) macro → inline: マクロの called_functions が
-            //     calls_unavailable な inline を含む場合、マクロも unavailable
+            //     unavailable な inline を含む場合、マクロも unavailable
             for name in &macro_names {
-                if self.macros.get(name).map(|i| i.calls_unavailable).unwrap_or(false) {
+                if self.macros.get(name)
+                    .map(|i| i.calls_unavailable)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let called_fns: Vec<InternedStr> = self.macros
@@ -1562,7 +1578,7 @@ impl MacroInferContext {
                     .unwrap_or_default();
                 let has_unavailable_inline = called_fns.iter().any(|called| {
                     inline_fn_dict.get(*called).is_some()
-                        && inline_fn_dict.is_calls_unavailable(*called)
+                        && inline_fn_dict.is_unavailable_for_codegen(*called)
                 });
                 if has_unavailable_inline {
                     if let Some(info) = self.macros.get_mut(name) {
@@ -1573,14 +1589,14 @@ impl MacroInferContext {
             }
 
             // (d) inline → macro: inline の called_functions が
-            //     calls_unavailable なマクロを含む場合、inline も unavailable
+            //     unavailable なマクロを含む場合、inline も unavailable
             for (name, calls) in &inline_entries {
                 if inline_fn_dict.is_calls_unavailable(*name) {
                     continue;
                 }
                 let has_unavailable_macro = calls.iter().any(|called| {
                     self.macros.get(called)
-                        .map(|info| info.calls_unavailable)
+                        .map(|info| info.is_unavailable_for_codegen())
                         .unwrap_or(false)
                 });
                 if has_unavailable_macro {
