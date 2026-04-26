@@ -6275,11 +6275,15 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         let mut gen_results: Vec<(InternedStr, InlineGenResult)> = Vec::new();
 
         for (name, func_def) in &fns {
-            // apidoc patches: skip_codegen 対象は早期に Suppressed
-            let n_str = self.interner.get(**name);
-            if let Some(reason) = result.apidoc_patches.skip_reason(n_str) {
+            // apidoc skip_codegen 対象（Phase 2 で apidoc_suppressed 済）は
+            // 早期に Suppressed。reason 文字列は apidoc_patches から取得。
+            if result.inline_fn_dict.is_apidoc_suppressed(**name) {
+                let n_str = self.interner.get(**name);
+                let reason = result.apidoc_patches.skip_reason(n_str)
+                    .unwrap_or("apidoc skip_codegen")
+                    .to_string();
                 gen_results.push((**name,
-                    InlineGenResult::Suppressed { reason: reason.to_string() }));
+                    InlineGenResult::Suppressed { reason }));
                 continue;
             }
 
@@ -6371,24 +6375,40 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             match gen_result {
                 InlineGenResult::CallsUnavailable => {
                     let name_str = self.interner.get(name);
-                    let unavailable: Vec<String> = result.inline_fn_dict.get_called_functions(name)
-                        .map(|calls| calls.iter()
+                    let calls = result.inline_fn_dict.get_called_functions(name);
+                    // 原因を分類: 純粋に存在しない関数を呼ぶ (absent) と
+                    // 推移的に unavailable な依存先を呼ぶ (cascade) を区別する。
+                    let absent: Vec<String> = calls
+                        .map(|cs| cs.iter()
                             .filter(|c| {
-                                // 呼び出し先が unavailable な inline 関数、
-                                // または unavailable なマクロ、
-                                // またはどこにも定義がない
+                                let fn_name = self.interner.get(**c);
+                                !self.is_function_available(**c, fn_name, result)
+                            })
+                            .map(|c| self.interner.get(*c).to_string())
+                            .collect())
+                        .unwrap_or_default();
+                    let cascade_deps: Vec<String> = calls
+                        .map(|cs| cs.iter()
+                            .filter(|c| {
                                 let is_unavailable_inline = result.inline_fn_dict.get(**c).is_some()
-                                    && result.inline_fn_dict.is_calls_unavailable(**c);
+                                    && result.inline_fn_dict.is_unavailable_for_codegen(**c);
                                 let is_unavailable_macro = result.infer_ctx.macros.get(c)
-                                    .map(|info| info.calls_unavailable)
+                                    .map(|info| info.is_unavailable_for_codegen())
                                     .unwrap_or(false);
                                 is_unavailable_inline || is_unavailable_macro
                             })
                             .map(|c| self.interner.get(*c).to_string())
                             .collect())
                         .unwrap_or_default();
-                    writeln!(self.writer, "// [CASCADE_UNAVAILABLE] {} - calls unavailable: {}",
-                        name_str, unavailable.join(", "))?;
+                    if absent.is_empty() {
+                        writeln!(self.writer,
+                            "// [CASCADE_UNAVAILABLE] {} - dependency not generated: {}",
+                            name_str, cascade_deps.join(", "))?;
+                    } else {
+                        writeln!(self.writer,
+                            "// [CALLS_UNAVAILABLE] {} - calls unavailable function(s): {}",
+                            name_str, absent.join(", "))?;
+                    }
                     writeln!(self.writer)?;
                     self.stats.inline_fns_cascade_unavailable += 1;
                 }
@@ -6505,9 +6525,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
         for name in sorted_names {
             let info = result.infer_ctx.macros.get(&name).unwrap();
 
-            // ── apidoc patches: skip_codegen 対象なら早期に [CODEGEN_SUPPRESSED] ──
-            let name_str_for_patch = self.interner.get(name);
-            if let Some(reason) = result.apidoc_patches.skip_reason(name_str_for_patch) {
+            // ── apidoc skip_codegen 対象なら早期に [CODEGEN_SUPPRESSED] ──
+            // Phase 2 (Step 4.4) で `info.apidoc_suppressed` が立っているので
+            // それを参照する。reason 文字列は apidoc_patches から取得。
+            if info.apidoc_suppressed {
+                let name_str_for_patch = self.interner.get(name);
+                let reason = result.apidoc_patches.skip_reason(name_str_for_patch)
+                    .unwrap_or("apidoc skip_codegen");
                 let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
                 writeln!(self.writer,
                     "// [CODEGEN_SUPPRESSED] {}{} - macro function (apidoc patch)",
@@ -6615,8 +6639,37 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     self.stats.macros_type_incomplete += 1;
                 }
                 GenerateStatus::CallsUnavailable => {
-                    self.generate_macro_calls_unavailable(info, result)?;
-                    self.stats.macros_calls_unavailable += 1;
+                    // 原因を分類: 「実在しない関数を呼ぶ」vs「推移的に
+                    // unavailable な依存先を呼ぶ」。前者なら [CALLS_UNAVAILABLE]、
+                    // 後者なら [CASCADE_UNAVAILABLE] を出す。
+                    let absent: Vec<&str> = info.called_functions.iter()
+                        .filter(|fn_id| {
+                            let fn_name = self.interner.get(**fn_id);
+                            !self.is_function_available(**fn_id, fn_name, result)
+                        })
+                        .map(|fn_id| self.interner.get(*fn_id))
+                        .collect();
+                    if absent.is_empty() {
+                        // 純粋に推移依存。unavailable な依存先を列挙
+                        let cascade_deps: Vec<String> = info.called_functions.iter()
+                            .filter(|fn_id| {
+                                if let Some(m) = result.infer_ctx.macros.get(*fn_id) {
+                                    return m.is_unavailable_for_codegen();
+                                }
+                                if result.inline_fn_dict.get(**fn_id).is_some() {
+                                    return result.inline_fn_dict
+                                        .is_unavailable_for_codegen(**fn_id);
+                                }
+                                false
+                            })
+                            .map(|fn_id| self.interner.get(*fn_id).to_string())
+                            .collect();
+                        self.generate_macro_cascade_unavailable(info, &cascade_deps)?;
+                        self.stats.macros_cascade_unavailable += 1;
+                    } else {
+                        self.generate_macro_calls_unavailable(info, result)?;
+                        self.stats.macros_calls_unavailable += 1;
+                    }
                 }
                 GenerateStatus::ContainsGoto => {
                     let name_str = self.interner.get(info.name);
