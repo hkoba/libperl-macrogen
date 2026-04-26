@@ -154,6 +154,32 @@ struct Cli {
     /// 1 行 1 名、`#` コメント可、空行無視。複数指定可。
     #[arg(long = "skip-codegen-list", value_name = "FILE")]
     skip_codegen_list: Vec<PathBuf>,
+
+    /// 対象 perl の build mode（threaded / non-threaded / auto）
+    /// 省略時は auto（実行時の `perl Config{usethreads}` から自動検出）
+    #[arg(long = "perl-build-mode", value_name = "MODE", value_parser = parse_perl_build_mode)]
+    perl_build_mode: Option<libperl_macrogen::perl_config::PerlBuildMode>,
+}
+
+/// `--perl-build-mode` の値パーサー
+///
+/// `auto` は `Ok(None)` 相当だが clap の Option パーサーでは少し扱いが
+/// 異なるため、明示的にパースして「auto は明示指定なし」として扱う。
+fn parse_perl_build_mode(s: &str) -> Result<libperl_macrogen::perl_config::PerlBuildMode, String> {
+    use libperl_macrogen::perl_config::PerlBuildMode;
+    match s {
+        "threaded" | "thr" => Ok(PerlBuildMode::Threaded),
+        "non-threaded" | "nonthreaded" | "nothr" => Ok(PerlBuildMode::NonThreaded),
+        // `auto` は Option<PerlBuildMode> の None として扱いたいので、
+        // ここではエラーで弾き、`--perl-build-mode auto` の代わりに
+        // フラグ省略を案内する。
+        "auto" => Err(
+            "use omission of --perl-build-mode for auto-detection".to_string()
+        ),
+        other => Err(format!(
+            "unknown perl build mode: {} (expected 'threaded' or 'non-threaded')", other
+        )),
+    }
 }
 
 fn main() {
@@ -234,6 +260,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // skip-codegen リストファイル（複数指定可）
     for path in &cli.skip_codegen_list {
         builder = builder.with_skip_codegen_list(path);
+    }
+
+    // 対象 perl の build mode（省略時は auto-detect）
+    if let Some(mode) = cli.perl_build_mode {
+        builder = builder.with_perl_build_mode(mode);
     }
 
     // デバッグオプション: dump_apidoc_after_merge

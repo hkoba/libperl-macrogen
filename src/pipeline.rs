@@ -177,6 +177,11 @@ pub struct InferConfig {
     /// JSON の apidoc patches (`skip_codegen`) にマージされる
     /// （同名は既存が優先）。
     pub skip_codegen_lists: Vec<PathBuf>,
+    /// 対象 perl の build mode（threaded / non-threaded）
+    ///
+    /// `None` の場合は `auto-detect`（実行時に `perl Config{usethreads}` を読む）。
+    /// `Some(...)` で明示指定（テスト用）。
+    pub perl_build_mode: Option<crate::perl_config::PerlBuildMode>,
 }
 
 impl InferConfig {
@@ -352,6 +357,15 @@ impl PipelineBuilder {
     /// (`skip_codegen`) と同時指定できる（同名は patches 優先）。
     pub fn with_skip_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
         self.infer.skip_codegen_lists.push(path.into());
+        self
+    }
+
+    /// 対象 perl の build mode を明示指定する
+    ///
+    /// 省略時は実行時に `perl -V:usethreads` から auto-detect。
+    /// テストやクロスコンパイル用途で固定したい場合のみ呼び出す。
+    pub fn with_perl_build_mode(mut self, mode: crate::perl_config::PerlBuildMode) -> Self {
+        self.infer.perl_build_mode = Some(mode);
         self
     }
 
@@ -576,6 +590,7 @@ impl PreprocessedPipeline {
             self.infer_config.bindings_path.as_deref(),
             debug_opts.as_ref(),
             &self.infer_config.skip_codegen_lists,
+            self.infer_config.perl_build_mode,
         )?;
 
         match result {

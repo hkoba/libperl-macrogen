@@ -219,6 +219,8 @@ pub struct InferResult {
     pub global_const_dict: crate::global_const_dict::GlobalConstDict,
     /// apidoc patches（perl C ヘッダ既知バグの訂正データ）
     pub apidoc_patches: crate::apidoc_patches::ApidocPatchSet,
+    /// 対象 perl の build mode（threaded / non-threaded）
+    pub perl_build_mode: crate::perl_config::PerlBuildMode,
     /// プリプロセッサ（マクロテーブル、StringInterner、FileRegistry へのアクセス用）
     pub preprocessor: Preprocessor,
     /// 統計情報
@@ -241,7 +243,15 @@ pub fn run_inference_with_preprocessor(
     bindings_path: Option<&Path>,
     debug_opts: Option<&DebugOptions>,
     skip_codegen_lists: &[PathBuf],
+    perl_build_mode_override: Option<crate::perl_config::PerlBuildMode>,
 ) -> Result<Option<InferResult>, InferError> {
+    // Perl build mode を確定（明示指定があれば優先、なければ auto-detect）
+    let perl_build_mode = match perl_build_mode_override {
+        Some(m) => m,
+        None => crate::perl_config::PerlBuildMode::detect_from_perl_config()
+            .unwrap_or(crate::perl_config::PerlBuildMode::Threaded),
+    };
+    eprintln!("[perl-mode] {:?}", perl_build_mode);
     // RustDeclDict をロード（パーサー作成前に行い、展開抑制を設定）
     let rust_decl_dict = if let Some(path) = bindings_path {
         Some(RustDeclDict::parse_file(path)?)
@@ -596,6 +606,7 @@ pub fn run_inference_with_preprocessor(
         typedefs,
         global_const_dict,
         apidoc_patches,
+        perl_build_mode,
         preprocessor: pp,
         stats,
     }))
