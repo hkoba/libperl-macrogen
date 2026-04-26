@@ -3,10 +3,20 @@
 ## Project Configuration
 
 - **Rust Edition**: 2024 (do not change this)
+- **対象 Perl Build Mode**: Threaded (`-Dusethreads`) と Non-threaded
+  (`-Uusethreads`) の両方をサポート。実行時に `Config{usethreads}` から
+  自動検出（`PerlBuildMode::detect_from_perl_config`）。`--perl-build-mode`
+  CLI フラグで明示指定可能。詳細は
+  [doc/plan/non-threaded-perl-support.md](doc/plan/non-threaded-perl-support.md)
+  と [doc/verification-non-threaded-build.md](doc/verification-non-threaded-build.md)。
 
 ## Perl C Header Files
 
 The target Perl C header files (e.g., `sv.h`, `inline.h`, `perl.h`, `handy.h`) are located at `/usr/lib64/perl5/CORE/`. When investigating how Perl C macros or inline functions work, check these headers directly.
+
+検証用の非 threaded perl は `tmp/perls/v5.42.2/bin/perl` に用意されている。
+ヘッダ・libperl も同梱。`PATH=$PWD/tmp/perls/v5.42.2/bin:$PATH ...` で対象
+perl を切り替えてビルド検証できる。
 
 ## TinyCC Reference Rule
 

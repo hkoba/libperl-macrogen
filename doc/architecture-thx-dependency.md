@@ -8,6 +8,29 @@
 **関連ドキュメント**:
 - [マクロ展開制御アーキテクチャ](./architecture-macro-expansion-control.md)
 - [C Inline 関数の処理アーキテクチャ](./architecture-inline-function-processing.md)
+- [非 threaded perl 対応の設計計画](./plan/non-threaded-perl-support.md)
+- [非 threaded 動作検証ログ](./verification-non-threaded-build.md)
+
+## Perl Build Mode との関係
+
+本機構は `Config{usethreads}=define` の **threaded perl** に対してのみ
+意味がある。`PerlBuildMode::NonThreaded` のときは `aTHX_` / `pTHX_` が
+空展開され、関数は `my_perl` パラメータを取らない。このため:
+
+1. `infer_api.rs` の `pTHX_` / `pTHX` callback 登録は threaded mode の
+   ときだけ行う（`set_macro_called_callback` を `if perl_build_mode.is_threaded()`
+   でガード）。非 threaded で空展開されるマクロ呼び出しが「呼び出された」
+   と検出され `CFnDecl.is_thx=true` が誤って立つのを防ぐ。
+2. `MacroInferContext::build_macro_info` の `aTHX` / `tTHX` / `my_perl`
+   トークン検査も非 threaded では短絡 false を返す。
+3. codegen 側 (`RustCodegen` / `CodegenDriver`) は `perl_threaded: bool`
+   フィールドを持ち、`is_thx_dependent` を読み取るすべての箇所を
+   `perl_threaded && info.is_thx_dependent` 形にガードしている（防御的
+   二重防御）。
+
+検出されない/伝播しない結果として、非 threaded codegen では `[THX]`
+マークが出力されることはなく、`my_perl: *mut PerlInterpreter` の引数
+注入と `my_perl,` 自動挿入のすべての経路が無効化される。
 
 ---
 

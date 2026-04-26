@@ -2,6 +2,26 @@
 
 このドキュメントでは、libperl-macrogen における Rust コード生成の仕組みを解説する。
 
+## Perl Build Mode との連携
+
+`InferResult.perl_build_mode` が `Threaded` か `NonThreaded` かによって、
+codegen は `is_thx_dependent` 経路の挙動を切り替える。`CodegenDriver` /
+`RustCodegen` は内部に `perl_threaded: bool` フィールドを持ち、
+`generate()` 開始時に `result.perl_build_mode.is_threaded()` から書き換える。
+すべての `is_thx_dependent` 読み取り箇所は `self.perl_threaded && info.is_thx_dependent`
+形でガードしており、非 threaded build に対しては:
+
+- 関数シグネチャに `my_perl: *mut PerlInterpreter` を注入しない
+- 呼び出し時に `my_perl,` を自動挿入しない
+- `arg_index 0` のオフセット補正を入れない
+- inline 関数の THX 表示を抑止
+
+これにより同じ libperl-macrogen バイナリで両 build mode 向けの
+出力を生成できる。詳細は
+[architecture-thx-dependency.md](architecture-thx-dependency.md) と
+[plan/non-threaded-perl-support.md](plan/non-threaded-perl-support.md) を参照。
+
+
 ## 概要
 
 コード生成システムは、型推論結果（`InferResult`）から Rust コードを生成する。
