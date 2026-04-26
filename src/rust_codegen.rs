@@ -1528,6 +1528,8 @@ pub struct RustCodegen<'a> {
     is_bool_return: bool,
     /// codegen で bool を返すと判定されたマクロの集合（呼び出し先の bool 判定用）
     bool_return_macros: HashSet<InternedStr>,
+    /// 対象 perl が threaded build か（false なら my_perl 注入を抑止）
+    perl_threaded: bool,
 }
 
 /// コード生成全体を管理する構造体
@@ -1555,6 +1557,8 @@ pub struct CodegenDriver<'a, W: Write> {
     const_pointer_params: HashMap<InternedStr, HashSet<usize>>,
     /// bool を返すと判定されたマクロの集合
     bool_return_macros: HashSet<InternedStr>,
+    /// 対象 perl が threaded build か（false なら my_perl 注入を抑止）
+    perl_threaded: bool,
 }
 
 impl<'a> RustCodegen<'a> {
@@ -1595,7 +1599,16 @@ impl<'a> RustCodegen<'a> {
             bool_return_macros: HashSet::new(),
             mut_local_names: HashSet::new(),
             codegen_errors: Vec::new(),
+            // デフォルトは threaded（後方互換）。Driver 経由で
+            // with_perl_threaded() で上書きされる。
+            perl_threaded: true,
         }
+    }
+
+    /// 対象 perl が threaded かを設定
+    pub fn with_perl_threaded(mut self, threaded: bool) -> Self {
+        self.perl_threaded = threaded;
+        self
     }
 
     /// AST ダンプ対象関数名を設定（デバッグ用）
@@ -2324,6 +2337,12 @@ impl<'a> RustCodegen<'a> {
     /// 2. その MacroInferInfo.is_thx_dependent が true
     /// 3. 実引数が仮引数より1つ少ない（my_perl が不足）
     fn needs_my_perl_for_call(&self, func_name: crate::InternedStr, actual_arg_count: usize) -> bool {
+        // 非 threaded perl では my_perl 引数自体が存在しないので必ず false。
+        // is_thx_dependent は既に Phase 2 で false になっているはずだが、
+        // 防御的にここでも mode をチェック。
+        if !self.perl_threaded {
+            return false;
+        }
         if let Some(callee_info) = self.macro_ctx.macros.get(&func_name) {
             if callee_info.is_thx_dependent {
                 // THX マクロの期待引数数 = params.len() + 1 (my_perl)
@@ -2462,8 +2481,9 @@ impl<'a> RustCodegen<'a> {
             }
             // 3. 自家生成マクロ関数の type_env からパラメータ型を取得
             if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
-                // THX 依存の場合、arg_index 0 は my_perl なのでスキップ
-                let macro_param_idx = if macro_info.is_thx_dependent {
+                // THX 依存の場合、arg_index 0 は my_perl なのでスキップ。
+                // 非 threaded では my_perl が存在しないので素通り。
+                let macro_param_idx = if self.perl_threaded && macro_info.is_thx_dependent {
                     if arg_index == 0 {
                         return Some(UnifiedType::from_rust_str("*mut PerlInterpreter"));
                     }
@@ -2504,8 +2524,12 @@ impl<'a> RustCodegen<'a> {
         // 2. 自家生成マクロ関数のパラメータ型
         if let Some(interned) = self.interner.lookup(func_name) {
             if let Some(macro_info) = self.macro_ctx.macros.get(&interned) {
-                // THX マクロは my_perl が自動挿入されるのでオフセットを引く
-                let macro_arg_index = if macro_info.is_thx_dependent && arg_index > 0 {
+                // THX マクロは my_perl が自動挿入されるのでオフセットを引く。
+                // 非 threaded では my_perl 注入が無いのでオフセット 0。
+                let macro_arg_index = if self.perl_threaded
+                    && macro_info.is_thx_dependent
+                    && arg_index > 0
+                {
                     arg_index - 1
                 } else {
                     arg_index
@@ -2912,8 +2936,9 @@ impl<'a> RustCodegen<'a> {
             self.dump_type_info(name_str, info, &params_with_types, &return_type);
         }
 
-        // THX 依存の場合は my_perl パラメータを追加
-        let thx_param = if info.is_thx_dependent {
+        // THX 依存の場合は my_perl パラメータを追加。
+        // 非 threaded perl では my_perl 自体が存在しないので注入しない。
+        let thx_param = if self.perl_threaded && info.is_thx_dependent {
             "my_perl: *mut PerlInterpreter"
         } else {
             ""
@@ -5417,8 +5442,9 @@ impl<'a> RustCodegen<'a> {
         // StmtExpr、for ループ初期化、すべての block レベルを再帰走査）
         self.collect_local_names_recursive(&func_def.body);
 
-        // THX 依存性を判定
-        let is_thx_dependent = self.is_inline_fn_thx_dependent(&func_def.declarator.derived);
+        // THX 依存性を判定（非 threaded では常に false）
+        let is_thx_dependent = self.perl_threaded
+            && self.is_inline_fn_thx_dependent(&func_def.declarator.derived);
         let thx_info = if is_thx_dependent { " [THX]" } else { "" };
 
         // AST ダンプ（デバッグ用）
@@ -6023,7 +6049,16 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             generatable_macros: HashSet::new(),
             const_pointer_params: HashMap::new(),
             bool_return_macros: HashSet::new(),
+            // デフォルトは threaded（後方互換）。`generate()` で
+            // result.perl_build_mode から書き換える。
+            perl_threaded: true,
         }
+    }
+
+    /// 対象 perl が threaded かを設定
+    pub fn with_perl_threaded(mut self, threaded: bool) -> Self {
+        self.perl_threaded = threaded;
+        self
     }
 
     /// 統計情報を取得
@@ -6036,6 +6071,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     // const BUILD_TIMESTAMP: &'static str = "2025-01-24T17:50:00+09:00";
 
     pub fn generate(&mut self, result: &InferResult) -> io::Result<()> {
+        // 対象 perl の threaded フラグを反映（is_thx_dependent 経路の防御的ガード）
+        self.perl_threaded = result.perl_build_mode.is_threaded();
+
         // 自動生成 struct/typedef を先に決定（known_symbols 構築前）
         // 実際に出力される名前のみ known_symbols に登録するため、emit を先行実施。
         let missing_structs = crate::struct_emitter::emit_missing_structs(
@@ -6231,7 +6269,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     self.interner, self.enum_dict, self.macro_ctx,
                     self.bindings_info.clone(), &known_symbols,
                     result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict),
-                );
+                ).with_perl_threaded(self.perl_threaded);
                 let generated = codegen.generate_macro(info);
                 if generated.is_complete() && !generated.has_unresolved_names() {
                     self.generatable_macros.insert(name);
@@ -6299,6 +6337,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
 
             let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                .with_perl_threaded(self.perl_threaded)
                 .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
                 .with_fields_dict(&result.fields_dict)
@@ -6582,6 +6621,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         .cloned().unwrap_or_default();
                     let is_bool = self.bool_return_macros.contains(&name);
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                        .with_perl_threaded(self.perl_threaded)
                         .with_dump_ast_for(self.config.dump_ast_for.clone())
                         .with_dump_types_for(self.config.dump_types_for.clone())
                         .with_fields_dict(&result.fields_dict)
@@ -6685,6 +6725,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         .cloned().unwrap_or_default();
                     let is_bool = self.bool_return_macros.contains(&name);
                     let codegen = RustCodegen::new(self.interner, self.enum_dict, self.macro_ctx, self.bindings_info.clone(), known_symbols, result.rust_decl_dict.as_ref(), Some(&result.inline_fn_dict))
+                        .with_perl_threaded(self.perl_threaded)
                         .with_fields_dict(&result.fields_dict)
                         .with_const_pointer_positions(const_positions)
                         .with_bool_return(is_bool, self.bool_return_macros.clone());
