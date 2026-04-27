@@ -70,6 +70,31 @@ pub enum UnifiedType {
     /// 名前付き型 (typedef, struct, union, enum)
     Named(String),
 
+    /// 関数ポインタ型
+    ///
+    /// C の関数ポインタ (`void (*)(int)`) や Rust の
+    /// `extern "C" fn(...) -> ...` に対応する。bindgen は通常
+    /// `Option<unsafe extern "C" fn(...)>` 形式で出すため、
+    /// `is_optional: true` のケースが事実上の標準。
+    FnPtr {
+        params: Vec<UnifiedType>,
+        ret: Box<UnifiedType>,
+        /// ABI 名 (`extern "C"` の `"C"` 等)。`None` はデフォルト ABI。
+        abi: Option<String>,
+        /// `unsafe fn` なら true
+        is_unsafe: bool,
+        /// `Option<extern "C" fn(...)>` の Option ラッパを表現
+        is_optional: bool,
+    },
+
+    /// 構造化未対応の型を syn の正規トークンで保持する escape hatch
+    ///
+    /// **保持する文字列は必ず `proc_macro2::TokenStream::to_string()`
+    /// 出力 (= syn 正規形)** であること。手書き文字列を入れない。
+    /// 比較・Hash の安定性は syn の正規化に依存する。
+    /// 構造的検査 (`is_pointer` 等) は常に false を返す。emit 時のみ意味を持つ。
+    Verbatim(String),
+
     /// 不明な型
     Unknown,
 }
@@ -459,6 +484,33 @@ impl UnifiedType {
                 }
             }
 
+            Self::FnPtr { params, ret, abi, is_unsafe, is_optional } => {
+                let mut s = String::new();
+                if *is_unsafe {
+                    s.push_str("unsafe ");
+                }
+                if let Some(abi_name) = abi {
+                    // `{:?}` で `"C"` のような文字列リテラル形式になる
+                    s.push_str(&format!("extern {:?} ", abi_name));
+                }
+                s.push_str("fn(");
+                let param_strs: Vec<String> = params.iter().map(|p| p.to_rust_string()).collect();
+                s.push_str(&param_strs.join(", "));
+                s.push(')');
+                let ret_str = ret.to_rust_string();
+                if ret_str != "()" {
+                    s.push_str(" -> ");
+                    s.push_str(&ret_str);
+                }
+                if *is_optional {
+                    format!("Option<{}>", s)
+                } else {
+                    s
+                }
+            }
+
+            Self::Verbatim(s) => s.clone(),
+
             Self::Unknown => "UnknownType".to_string(),
         }
     }
@@ -577,6 +629,21 @@ impl UnifiedType {
             Self::Array { inner, .. } => Some(inner),
             _ => None,
         }
+    }
+
+    /// 関数ポインタ型かどうか (Option ラップを問わず)
+    pub fn is_fn_ptr(&self) -> bool {
+        matches!(self, Self::FnPtr { .. })
+    }
+
+    /// `Option<fn>` 形式の関数ポインタかどうか
+    pub fn is_optional_fn_ptr(&self) -> bool {
+        matches!(self, Self::FnPtr { is_optional: true, .. })
+    }
+
+    /// Verbatim ハッチ経由かどうか (構造化未対応の指標)
+    pub fn is_verbatim(&self) -> bool {
+        matches!(self, Self::Verbatim(_))
     }
 }
 
@@ -904,5 +971,93 @@ mod tests {
         assert!(UnifiedType::Void.is_void());
         assert!(!UnifiedType::Bool.is_void());
         assert!(!UnifiedType::Int { signed: true, size: IntSize::Int }.is_void());
+    }
+
+    // === Stage 1: FnPtr / Verbatim ===
+
+    #[test]
+    fn test_fn_ptr_void_no_args() {
+        let ty = UnifiedType::FnPtr {
+            params: vec![],
+            ret: Box::new(UnifiedType::Void),
+            abi: None,
+            is_unsafe: false,
+            is_optional: false,
+        };
+        assert!(ty.is_fn_ptr());
+        assert!(!ty.is_optional_fn_ptr());
+        assert!(!ty.is_pointer());
+        assert!(!ty.is_void());
+        assert_eq!(ty.to_rust_string(), "fn()");
+    }
+
+    #[test]
+    fn test_fn_ptr_extern_c_with_args() {
+        let ty = UnifiedType::FnPtr {
+            params: vec![
+                UnifiedType::Pointer {
+                    inner: Box::new(UnifiedType::Named("CV".to_string())),
+                    is_const: false,
+                },
+            ],
+            ret: Box::new(UnifiedType::Void),
+            abi: Some("C".to_string()),
+            is_unsafe: true,
+            is_optional: false,
+        };
+        assert_eq!(ty.to_rust_string(), "unsafe extern \"C\" fn(*mut CV)");
+    }
+
+    #[test]
+    fn test_fn_ptr_optional_with_return() {
+        // bindgen が生成する典型形: `Option<unsafe extern "C" fn(arg1: *mut CV) -> *mut SV>`
+        let ty = UnifiedType::FnPtr {
+            params: vec![
+                UnifiedType::Pointer {
+                    inner: Box::new(UnifiedType::Named("CV".to_string())),
+                    is_const: false,
+                },
+            ],
+            ret: Box::new(UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Named("SV".to_string())),
+                is_const: false,
+            }),
+            abi: Some("C".to_string()),
+            is_unsafe: true,
+            is_optional: true,
+        };
+        assert!(ty.is_fn_ptr());
+        assert!(ty.is_optional_fn_ptr());
+        assert_eq!(
+            ty.to_rust_string(),
+            "Option<unsafe extern \"C\" fn(*mut CV) -> *mut SV>"
+        );
+    }
+
+    #[test]
+    fn test_verbatim_emits_as_is() {
+        let raw = ":: std :: option :: Option < unsafe extern \"C\" fn (arg1 : * mut CV) >";
+        let ty = UnifiedType::Verbatim(raw.to_string());
+        assert!(ty.is_verbatim());
+        assert!(!ty.is_pointer());
+        assert!(!ty.is_fn_ptr());
+        assert_eq!(ty.to_rust_string(), raw);
+    }
+
+    #[test]
+    fn test_fn_ptr_eq_hash() {
+        // PartialEq / Hash の derive が新 variant でも壊れていないこと
+        let a = UnifiedType::FnPtr {
+            params: vec![UnifiedType::Void],
+            ret: Box::new(UnifiedType::Void),
+            abi: Some("C".to_string()),
+            is_unsafe: true,
+            is_optional: true,
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+        let mut set = std::collections::HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
     }
 }

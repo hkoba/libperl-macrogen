@@ -59,6 +59,38 @@ It should NOT perform new type analysis, dependency resolution, or semantic deci
 
 When touching these areas, prefer moving logic to Phase 2 over adding more analysis to Phase 3.
 
+### 型の検査・操作は構造ベースで (Structure-First Type Handling)
+
+**IMPORTANT**: 型の検査・分解・比較・変換は **構造的な enum マッチを第一**
+とし、文字列操作 (`starts_with` / `strip_prefix` / `contains` / `split` / 正規表現)
+に頼ることは極力避けて下さい。
+
+対象の型表現:
+- `UnifiedType` (`src/unified_type.rs`)
+- `TypeRepr` / `CTypeSpecs` / `CDerivedType` / `RustTypeRepr` (`src/type_repr.rs`)
+
+**禁止する代表パターン**:
+- `ty_str.contains("*mut")` でポインタ判定 → `ut.is_pointer()` / `matches!(t, TypeRepr::CType { derived, .. } if derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. })))`
+- `ty_str.starts_with(":: std :: option :: Option<")` で Option 判定 → `matches!(rt, RustTypeRepr::Option(_))` / `ut.is_optional_fn_ptr()`
+- `ty_str.contains("void") && ty_str.contains('*')` で void* 判定 → `ut.is_void_pointer()`
+- `ty_str.replace("*mut ", "...").replace(" :: ", "::")` で Rust 形式正規化 → 構造化された値の段階で持ち回す。`syn::Type` が手元にあるなら `UnifiedType::from_syn_type` 等の構造化エントリを使う
+- `to_rust_string()` してから再度 `from_rust_str()` する round-trip → ロスがあるので避ける。構造のまま変換器を書く
+
+**やむを得ず文字列を扱う場合**:
+1. **入口**: 外部入力 (apidoc の C 型文字列、ヘッダパース結果) からの **一度きりのパース** に限定する
+2. **出口**: emit 時の最終 `to_rust_string` / `to_display_string` のみ
+3. **escape hatch**: `UnifiedType::Verbatim(String)` など「構造化を諦める」専用 variant を経由し、保持文字列は **syn 正規形** (`proc_macro2::TokenStream` の to_string()) に限定する。手書き文字列は入れない
+4. パッチを当てる際は **なぜ構造化できないのか** をコメントで残し、後で解消できるよう負債として可視化する
+
+**根拠 / 過去の事例**:
+- 50dad70 で `*mut HV` round-trip を救うため `rust_type_string_to_c` ヘルパを足したが、`Option<extern "C" fn(...)>` 系の型では再度破綻した。文字列 prefix 剥がしの累積は脆弱性が線形に増える
+- `from_type_string` (type_repr.rs) の `Option<` 判定は `to_token_stream().to_string()` が出力する空白入りトークン (`:: std :: option :: Option < ...>`) にマッチせず、長期間 fallthrough していた
+- bindings.rs は **syn でパース済み** なので、文字列に潰してから再パースする経路は **設計上の劣化**。`syn::Type` を出発点にして構造的に decompose することを第一の選択肢とする
+
+**Signature Approval Rule との関係**: `UnifiedType` / `TypeRepr` への
+新 variant 追加や `from_*` 系コンストラクタの新設は、本ルールに沿った
+構造化を進める変更として推奨される。実装前にシグネチャを提示してレビューを得ること。
+
 ## skip_codegen 運用ポリシー
 
 **IMPORTANT**: `apidoc/*.patches.json` の `skip_codegen` および skip-list ファイルは、
