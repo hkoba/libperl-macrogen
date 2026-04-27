@@ -830,6 +830,36 @@ impl TypeRepr {
         }
     }
 
+    /// **構造ベース**: `UnifiedType` から `TypeRepr` を直接構築する。
+    ///
+    /// bindings.rs (`syn::File`) → `RustField.uty` (`UnifiedType`) で得た
+    /// 構造化情報を、文字列を経由せず TypeRepr に変換する。
+    /// Pointer / Array / Named / 基本型は `CType` として表現し、
+    /// FnPtr / Verbatim / Unknown は表現できないので `RustType` の
+    /// `Unknown(canonical_string)` にフォールバックする。
+    ///
+    /// Source は `CTypeSource::Apidoc { raw }` で記録する (tier 3 相当)。
+    /// bindings は本来 tier 1 だが、本メソッドの呼出元 (anonymous union
+    /// メンバ解決) は元の C-side フィールド型を補完する用途なので、tier 3
+    /// で十分。tier 1 が必要な経路ができたら別 source variant を追加する。
+    pub fn from_unified_type(
+        ut: &crate::unified_type::UnifiedType,
+        interner: &crate::intern::StringInterner,
+    ) -> Self {
+        let raw = ut.to_rust_string();
+        if let Some((specs, derived)) = unified_to_c(ut, interner) {
+            return TypeRepr::CType {
+                specs,
+                derived,
+                source: CTypeSource::Apidoc { raw },
+            };
+        }
+        TypeRepr::RustType {
+            repr: RustTypeRepr::Unknown(raw.clone()),
+            source: RustTypeSource::Parsed { raw },
+        }
+    }
+
     /// DeclSpecs と Declarator から TypeRepr を作成
     ///
     /// C ヘッダーのパース結果から直接 TypeRepr を生成する。
@@ -1082,6 +1112,70 @@ impl TypeRepr {
             TypeRepr::RustType { repr, .. } => repr.to_display_string(),
             TypeRepr::Inferred(inferred) => inferred.to_rust_string(interner),
         }
+    }
+}
+
+// ============================================================================
+// `UnifiedType` → `(CTypeSpecs, Vec<CDerivedType>)` 構造的変換
+// ============================================================================
+
+/// `UnifiedType` を C 型表現 (specs + derived) に分解する。
+/// FnPtr / Verbatim / Unknown は C 表現に落とせないので `None` を返す。
+fn unified_to_c(
+    ut: &crate::unified_type::UnifiedType,
+    interner: &crate::intern::StringInterner,
+) -> Option<(CTypeSpecs, Vec<CDerivedType>)> {
+    use crate::unified_type::{UnifiedType as UT, IntSize as UIS};
+
+    match ut {
+        UT::Void => Some((CTypeSpecs::Void, vec![])),
+        UT::Bool => Some((CTypeSpecs::Bool, vec![])),
+        UT::Char { signed } => Some((CTypeSpecs::Char { signed: *signed }, vec![])),
+        UT::Int { signed, size } => {
+            // UnifiedType::IntSize::Char は C の signed/unsigned char に倒す
+            // (TypeRepr::IntSize には Char バリアントが無い)
+            if matches!(size, UIS::Char) {
+                return Some((CTypeSpecs::Char { signed: Some(*signed) }, vec![]));
+            }
+            let target = match size {
+                UIS::Char => unreachable!(),
+                UIS::Short => IntSize::Short,
+                UIS::Int => IntSize::Int,
+                UIS::Long => IntSize::Long,
+                UIS::LongLong => IntSize::LongLong,
+                UIS::Int128 => IntSize::Int128,
+            };
+            Some((CTypeSpecs::Int { signed: *signed, size: target }, vec![]))
+        }
+        UT::Float => Some((CTypeSpecs::Float, vec![])),
+        UT::Double => Some((CTypeSpecs::Double { is_long: false }, vec![])),
+        UT::LongDouble => Some((CTypeSpecs::Double { is_long: true }, vec![])),
+        UT::Pointer { inner, is_const } => {
+            let (specs, mut derived) = unified_to_c(inner, interner)?;
+            // 最も外側の derived として Pointer を追加 (derived 配列は外→内順)
+            derived.insert(
+                0,
+                CDerivedType::Pointer {
+                    is_const: *is_const,
+                    is_volatile: false,
+                    is_restrict: false,
+                },
+            );
+            Some((specs, derived))
+        }
+        UT::Array { inner, size } => {
+            let (specs, mut derived) = unified_to_c(inner, interner)?;
+            derived.insert(0, CDerivedType::Array { size: *size });
+            Some((specs, derived))
+        }
+        UT::Named(name) => {
+            let specs = match interner.lookup(name) {
+                Some(id) => CTypeSpecs::TypedefName(id),
+                None => CTypeSpecs::UnknownTypedef(name.clone()),
+            };
+            Some((specs, vec![]))
+        }
+        UT::FnPtr { .. } | UT::Verbatim(_) | UT::Unknown => None,
     }
 }
 
