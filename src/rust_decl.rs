@@ -142,16 +142,16 @@ impl RustDeclDict {
             Item::Const(item_const) => {
                 if Self::is_pub(&item_const.vis) {
                     let name = item_const.ident.to_string();
+                    let uty = UnifiedType::from_syn_type(&item_const.ty);
                     let ty = Self::type_to_string(&item_const.ty);
-                    let uty = UnifiedType::from_rust_str(&ty);
                     self.consts.insert(name.clone(), RustConst { name, ty, uty });
                 }
             }
             Item::Type(item_type) => {
                 if Self::is_pub(&item_type.vis) {
                     let name = item_type.ident.to_string();
+                    let uty = UnifiedType::from_syn_type(&item_type.ty);
                     let ty = Self::type_to_string(&item_type.ty);
-                    let uty = UnifiedType::from_rust_str(&ty);
                     self.types.insert(name.clone(), RustTypeAlias { name, ty, uty });
                 }
             }
@@ -258,8 +258,8 @@ impl RustDeclDict {
                 for field in &named.named {
                     if Self::is_pub(&field.vis) {
                         if let Some(ident) = &field.ident {
+                            let uty = UnifiedType::from_syn_type(&field.ty);
                             let ty = Self::type_to_string(&field.ty);
-                            let uty = UnifiedType::from_rust_str(&ty);
                             result.push(RustField {
                                 name: ident.to_string(),
                                 ty,
@@ -272,8 +272,8 @@ impl RustDeclDict {
             Fields::Unnamed(unnamed) => {
                 for (i, field) in unnamed.unnamed.iter().enumerate() {
                     if Self::is_pub(&field.vis) {
+                        let uty = UnifiedType::from_syn_type(&field.ty);
                         let ty = Self::type_to_string(&field.ty);
-                        let uty = UnifiedType::from_rust_str(&ty);
                         result.push(RustField {
                             name: format!("{}", i),
                             ty,
@@ -303,8 +303,8 @@ impl RustDeclDict {
                         Pat::Ident(pat_ident) => pat_ident.ident.to_string(),
                         _ => "_".to_string(),
                     };
+                    let uty = UnifiedType::from_syn_type(&pat_type.ty);
                     let param_ty = Self::type_to_string(&pat_type.ty);
-                    let uty = UnifiedType::from_rust_str(&param_ty);
                     params.push(RustParam {
                         name: param_name,
                         ty: param_ty,
@@ -314,11 +314,13 @@ impl RustDeclDict {
             }
         }
 
-        let ret_ty = match &sig.output {
-            ReturnType::Default => None,
-            ReturnType::Type(_, ty) => Some(Self::type_to_string(ty)),
+        let (ret_ty, uret_ty) = match &sig.output {
+            ReturnType::Default => (None, None),
+            ReturnType::Type(_, ty) => (
+                Some(Self::type_to_string(ty)),
+                Some(UnifiedType::from_syn_type(ty)),
+            ),
         };
-        let uret_ty = ret_ty.as_ref().map(|s| UnifiedType::from_rust_str(s));
 
         Some(RustFn {
             name,
