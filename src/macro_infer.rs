@@ -1978,6 +1978,15 @@ impl MacroInferContext {
         rust_decl_dict: Option<&crate::rust_decl::RustDeclDict>,
         inline_fn_dict: &crate::inline_fn::InlineFnDict,
     ) {
+        // ── 戻り値型の topological 伝播 ──
+        // build_macro_info 時には callee マクロの戻り値型が未確定のため、
+        // `cond ? HEK_KEY(...) : NULL` のような式は then ブランチ型不明で
+        // void * にフォールバックしていた。ここで依存順に再評価し、
+        // 各マクロの type_env に return_constraint として追加する。
+        // 後段の const/mut/bool 推論より前に行う必要はない (独立) が、
+        // 同じ topological 結果を 2 回計算しないよう先に走らせる。
+        self.propagate_macro_return_types(interner);
+
         // 依存順にソート（リーフマクロ先頭）
         let sorted = self.topological_sort_for_resolve();
 
@@ -2034,6 +2043,51 @@ impl MacroInferContext {
             let info_mut = self.macros.get_mut(name).unwrap();
             info_mut.const_pointer_positions = const_positions;
             info_mut.is_bool_return = is_bool;
+        }
+    }
+
+    /// 依存順 (リーフ先頭) で各マクロの戻り値型を構造的に伝播する。
+    ///
+    /// `resolve_param_and_return_types` の補助。conditional 式
+    /// (`cond ? then : else`) の戻り値型推論は `compute_conditional_type_str`
+    /// (semantic.rs) が build_macro_info 時に処理しているが、その時点では
+    /// マクロ→マクロ呼出の戻り値型は不明 (`HEK_KEY` 等は他マクロから定義)
+    /// で、`*mut c_void` (NULL ブランチ由来) にフォールバックしてしまう。
+    ///
+    /// 本ステップでは topological 順に各マクロの戻り値型を `macro_returns`
+    /// に蓄積し、Call/Conditional をその情報で再評価して
+    /// `type_env.return_constraints` に高優先度で追加する。
+    fn propagate_macro_return_types(&mut self, _interner: &StringInterner) {
+        let sorted = self.topological_sort_for_resolve();
+        let mut macro_returns: HashMap<InternedStr, TypeRepr> = HashMap::new();
+
+        for name in &sorted {
+            // 不変借用スコープ内で「式の id」と「再評価結果」だけ取り出し、
+            // ブロックを抜けてから可変借用で書き戻す (borrow チェッカー対応)。
+            let computed: Option<(crate::ast::ExprId, TypeRepr)> = {
+                let info = match self.macros.get(name) {
+                    Some(i) => i,
+                    None => continue,
+                };
+                if !info.is_parseable() || info.calls_unavailable || !info.is_function {
+                    continue;
+                }
+                let ParseResult::Expression(ref expr) = info.parse_result else {
+                    continue;
+                };
+                compute_macro_return_type(expr, &info.type_env, &macro_returns)
+                    .map(|ty| (expr.id, ty))
+            };
+
+            if let Some((expr_id, ret_ty)) = computed {
+                macro_returns.insert(*name, ret_ty.clone());
+                let info_mut = self.macros.get_mut(name).unwrap();
+                info_mut.type_env.add_return_constraint(TypeConstraint::new(
+                    expr_id,
+                    ret_ty,
+                    "macro return propagated from callee macros",
+                ));
+            }
         }
     }
 
@@ -2182,6 +2236,119 @@ impl MacroInferContext {
 impl Default for MacroInferContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Macro return type の topological 伝播 (resolve_param_and_return_types から使う)
+// ============================================================================
+
+/// マクロ式の戻り値型を、既に解決済の callee マクロ群 (`macro_returns`) を
+/// 参照しつつ構造的に再評価する。Conditional の場合は両ブランチの型を比べ、
+/// `void *` と具体ポインタの組合せなら具体側を採用する (C 三項演算の慣例)。
+fn compute_macro_return_type(
+    expr: &Expr,
+    env: &TypeEnv,
+    macro_returns: &HashMap<InternedStr, TypeRepr>,
+) -> Option<TypeRepr> {
+    match &expr.kind {
+        ExprKind::Conditional { then_expr, else_expr, .. } => {
+            let then_ty = compute_macro_return_type(then_expr, env, macro_returns)
+                .or_else(|| existing_constraint_type(then_expr.id, env));
+            let else_ty = compute_macro_return_type(else_expr, env, macro_returns)
+                .or_else(|| existing_constraint_type(else_expr.id, env));
+            resolve_conditional_branches(then_ty, else_ty)
+        }
+        ExprKind::Call { func, .. } => {
+            if let ExprKind::Ident(callee_name) = &func.kind {
+                if let Some(ty) = macro_returns.get(callee_name) {
+                    return Some(ty.clone());
+                }
+            }
+            existing_constraint_type(expr.id, env)
+        }
+        // 透過的に右側を採用 (`(a, b)` の値は `b`)
+        ExprKind::Comma { rhs, .. } => {
+            compute_macro_return_type(rhs, env, macro_returns)
+                .or_else(|| existing_constraint_type(rhs.id, env))
+        }
+        // 二項演算: pointer ± integer → pointer 型を伝播する。
+        // `RX_WRAPPED(prog) + N` (Add) のように lhs がマクロ呼出のとき、
+        // build_macro_info 時には callee の戻り値型が未知で `void *` に
+        // 落ちていた。ここで構造的に解決する。
+        ExprKind::Binary { op, lhs, rhs } => {
+            let lhs_ty = compute_macro_return_type(lhs, env, macro_returns)
+                .or_else(|| existing_constraint_type(lhs.id, env));
+            let rhs_ty = compute_macro_return_type(rhs, env, macro_returns)
+                .or_else(|| existing_constraint_type(rhs.id, env));
+            resolve_binary(op, lhs_ty, rhs_ty)
+        }
+        // キャスト式: 既存の constraint (キャスト先型) で十分
+        ExprKind::Cast { .. } => existing_constraint_type(expr.id, env),
+        // それ以外は build_macro_info 時に張られた制約をそのまま採用
+        _ => existing_constraint_type(expr.id, env),
+    }
+}
+
+/// `expr_constraints` の先頭エントリの型を返す (見つからなければ None)。
+fn existing_constraint_type(
+    expr_id: crate::ast::ExprId,
+    env: &TypeEnv,
+) -> Option<TypeRepr> {
+    env.expr_constraints
+        .get(&expr_id)
+        .and_then(|cs| cs.first())
+        .map(|c| c.ty.clone())
+}
+
+/// 二項演算の結果型を構造的に推論する:
+/// - 比較・論理演算 → 既存の constraint に任せる (None を返して fallback)
+/// - `pointer ± integer` → pointer 側の型
+/// - `pointer - pointer` → 既存の constraint (isize 推定済) を維持
+/// - それ以外 → None で fallback
+fn resolve_binary(
+    op: &crate::ast::BinOp,
+    lhs_ty: Option<TypeRepr>,
+    rhs_ty: Option<TypeRepr>,
+) -> Option<TypeRepr> {
+    use crate::ast::BinOp;
+    match op {
+        BinOp::Add | BinOp::Sub => {
+            let lhs_is_ptr = lhs_ty.as_ref().is_some_and(|t| t.is_pointer_type());
+            let rhs_is_ptr = rhs_ty.as_ref().is_some_and(|t| t.is_pointer_type());
+            match (lhs_is_ptr, rhs_is_ptr) {
+                (true, false) => lhs_ty,
+                (false, true) => rhs_ty,
+                _ => None, // pointer-pointer / 整数同士は既存 constraint に任せる
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 三項演算 / if-else の二ブランチの型を統合する。
+/// 構造的判定 (`is_void_pointer` / `is_concrete_pointer`) のみを使い、
+/// 文字列 contains は使わない。
+fn resolve_conditional_branches(
+    then_ty: Option<TypeRepr>,
+    else_ty: Option<TypeRepr>,
+) -> Option<TypeRepr> {
+    match (&then_ty, &else_ty) {
+        (Some(t), Some(e)) => {
+            if t.is_void_pointer() && e.is_concrete_pointer() {
+                return else_ty;
+            }
+            if e.is_void_pointer() && t.is_concrete_pointer() {
+                return then_ty;
+            }
+            // それ以外は then 側を採用 (C のセマンティクスでは双方の昇格型だが、
+            // 主要ユースケース (`HEK_KEY ? : NULL`) は具体型を優先する目的で
+            // 十分。両方とも具体ポインタなら then が一般的に意味のある型)
+            then_ty
+        }
+        (Some(_), None) => then_ty,
+        (None, Some(_)) => else_ty,
+        (None, None) => None,
     }
 }
 

@@ -794,7 +794,57 @@ impl TypeRepr {
         }
     }
 
+    /// ポインタ型かどうか (`has_outer_pointer` のエイリアス)。
+    ///
+    /// `Inferred` ラッパは `resolved_type()` を経由して中身を再帰参照する点で
+    /// `has_outer_pointer` と挙動が異なる (本メソッドは構造的「実体型」判定に
+    /// 使う)。`has_outer_pointer` 自体は既存の使用箇所が `Inferred` を別扱い
+    /// しているため挙動を変えない。
+    pub fn is_pointer_type(&self) -> bool {
+        match self {
+            TypeRepr::CType { derived, .. } => {
+                derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. }))
+            }
+            TypeRepr::RustType { repr, .. } => repr.has_outer_pointer(),
+            TypeRepr::Inferred(inferred) => inferred
+                .resolved_type()
+                .is_some_and(|t| t.is_pointer_type()),
+        }
+    }
+
+    /// `void *` / `*mut c_void` / `*const c_void` かどうかを **構造的に** 判定する。
+    ///
+    /// 文字列 `contains("void")` ではなく specs/derived の構造で判定するので、
+    /// `*mut struct void_table` のような偽陽性に引っかからない。
+    /// `Inferred` ラッパは `resolved_type()` 経由で中身を再帰参照する。
+    pub fn is_void_pointer(&self) -> bool {
+        match self {
+            TypeRepr::CType { specs, derived, .. } => {
+                derived.iter().any(|d| matches!(d, CDerivedType::Pointer { .. }))
+                    && matches!(specs, CTypeSpecs::Void)
+            }
+            TypeRepr::RustType { repr, .. } => match repr {
+                RustTypeRepr::Pointer { inner, .. } => {
+                    matches!(inner.as_ref(), RustTypeRepr::Unit)
+                        || matches!(inner.as_ref(), RustTypeRepr::Named(n) if n == "c_void")
+                }
+                _ => false,
+            },
+            TypeRepr::Inferred(inferred) => inferred
+                .resolved_type()
+                .is_some_and(|t| t.is_void_pointer()),
+        }
+    }
+
+    /// 具体的なポインタ (`void *` ではないポインタ型) かどうか
+    pub fn is_concrete_pointer(&self) -> bool {
+        self.is_pointer_type() && !self.is_void_pointer()
+    }
+
     /// 最外ポインタを持つかどうか
+    ///
+    /// 既存呼出側の挙動を変えないため `Inferred` は false を返す
+    /// (再帰判定が必要な場合は `is_pointer_type` を使うこと)。
     pub fn has_outer_pointer(&self) -> bool {
         match self {
             TypeRepr::CType { derived, .. } => {
@@ -1613,5 +1663,65 @@ mod tests {
     fn test_rust_primitive_display() {
         assert_eq!(RustPrimitiveKind::I32.to_string(), "i32");
         assert_eq!(RustPrimitiveKind::Usize.to_string(), "usize");
+    }
+
+    // === Stage 5: 構造的 pointer 判定 (`is_pointer_type` / `is_void_pointer`) ===
+
+    fn make_void_ptr() -> TypeRepr {
+        TypeRepr::CType {
+            specs: CTypeSpecs::Void,
+            derived: vec![CDerivedType::Pointer {
+                is_const: false,
+                is_volatile: false,
+                is_restrict: false,
+            }],
+            source: CTypeSource::Apidoc { raw: "void *".to_string() },
+        }
+    }
+
+    fn make_concrete_ptr() -> TypeRepr {
+        TypeRepr::CType {
+            specs: CTypeSpecs::Char { signed: None },
+            derived: vec![CDerivedType::Pointer {
+                is_const: false,
+                is_volatile: false,
+                is_restrict: false,
+            }],
+            source: CTypeSource::Apidoc { raw: "char *".to_string() },
+        }
+    }
+
+    #[test]
+    fn test_void_pointer_structural() {
+        let vp = make_void_ptr();
+        assert!(vp.is_pointer_type());
+        assert!(vp.is_void_pointer());
+        assert!(!vp.is_concrete_pointer());
+    }
+
+    #[test]
+    fn test_concrete_pointer_structural() {
+        let cp = make_concrete_ptr();
+        assert!(cp.is_pointer_type());
+        assert!(!cp.is_void_pointer());
+        assert!(cp.is_concrete_pointer());
+    }
+
+    #[test]
+    fn test_inferred_member_access_pointer_recursive() {
+        // bindings.rs 経由で MemberAccess の field_type が `*mut c_char` のとき、
+        // `is_pointer_type` は Inferred を再帰参照して true を返すべき。
+        // (Stage 4 までの `has_outer_pointer` は false を返してしまう)
+        let inner = make_concrete_ptr();
+        let inferred = TypeRepr::Inferred(InferredType::MemberAccess {
+            base_type: "xpvcv".to_string(),
+            member: crate::intern::StringInterner::new().intern("foo"),
+            field_type: Some(Box::new(inner)),
+        });
+        assert!(inferred.is_pointer_type());
+        assert!(!inferred.is_void_pointer());
+        assert!(inferred.is_concrete_pointer());
+        // 一方、has_outer_pointer は既存挙動 (Inferred → false) を維持
+        assert!(!inferred.has_outer_pointer());
     }
 }
