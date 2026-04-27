@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+use quote::ToTokens;
+
 /// 整数サイズ
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntSize {
@@ -355,6 +357,46 @@ impl UnifiedType {
         Self::parse_rust_basic_type(trimmed)
     }
 
+    /// **構造ベース第一推奨**: `syn::Type` を直接 decompose して構築する。
+    ///
+    /// `to_token_stream().to_string()` → `from_rust_str` という round-trip
+    /// では prefix 剥がしの累積で破綻する型 (`::std::option::Option<extern "C" fn>` 等)
+    /// が安全に扱える。bindings.rs (`syn::File`) 由来データはこちらを使うこと。
+    ///
+    /// 構造的に decompose できない型は `UnifiedType::Verbatim` に格納し、
+    /// emit 時に元のトークン列をそのまま吐く (構造的検査は諦める)。
+    pub fn from_syn_type(ty: &syn::Type) -> Self {
+        match ty {
+            // () = Void
+            syn::Type::Tuple(t) if t.elems.is_empty() => Self::Void,
+
+            // 透過的に剥がす構造
+            syn::Type::Group(g) => Self::from_syn_type(&g.elem),
+            syn::Type::Paren(p) => Self::from_syn_type(&p.elem),
+
+            // *mut T / *const T
+            syn::Type::Ptr(p) => Self::Pointer {
+                inner: Box::new(Self::from_syn_type(&p.elem)),
+                is_const: p.const_token.is_some(),
+            },
+
+            // [T; N]
+            syn::Type::Array(a) => Self::Array {
+                inner: Box::new(Self::from_syn_type(&a.elem)),
+                size: extract_array_size(&a.len),
+            },
+
+            // 裸関数ポインタ (まれ。bindgen は通常 Option ラップ)
+            syn::Type::BareFn(f) => from_bare_fn(f, /* is_optional */ false),
+
+            // Path: Option<T>, primitives (c_int 等), 名前付き型 (SV 等)
+            syn::Type::Path(tp) => from_type_path(tp),
+
+            // 上記以外は escape hatch
+            _ => verbatim_of(ty),
+        }
+    }
+
     /// Rust の基本型をパース
     fn parse_rust_basic_type(s: &str) -> Self {
         // std:: プレフィックスを除去
@@ -645,6 +687,156 @@ impl UnifiedType {
     pub fn is_verbatim(&self) -> bool {
         matches!(self, Self::Verbatim(_))
     }
+}
+
+// ============================================================================
+// from_syn_type の補助関数 (構造ベースで decompose する内部実装)
+// ============================================================================
+
+/// 配列長の `syn::Expr` から `usize` を取り出す。整数リテラル以外は `None`。
+fn extract_array_size(expr: &syn::Expr) -> Option<usize> {
+    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(li), .. }) = expr {
+        li.base10_parse::<usize>().ok()
+    } else {
+        None
+    }
+}
+
+/// `syn::TypeBareFn` から `UnifiedType::FnPtr` を構築する。
+/// `is_optional` は `Option<extern "C" fn(...)>` 形式かどうかの呼出側情報。
+fn from_bare_fn(f: &syn::TypeBareFn, is_optional: bool) -> UnifiedType {
+    let abi = f.abi.as_ref().map(|abi| {
+        abi.name
+            .as_ref()
+            .map(|n| n.value())
+            .unwrap_or_else(|| "C".to_string())
+    });
+    let params: Vec<UnifiedType> = f
+        .inputs
+        .iter()
+        .map(|arg| UnifiedType::from_syn_type(&arg.ty))
+        .collect();
+    let ret = match &f.output {
+        syn::ReturnType::Default => UnifiedType::Void,
+        syn::ReturnType::Type(_, t) => UnifiedType::from_syn_type(t),
+    };
+    UnifiedType::FnPtr {
+        params,
+        ret: Box::new(ret),
+        abi,
+        is_unsafe: f.unsafety.is_some(),
+        is_optional,
+    }
+}
+
+/// `syn::TypePath` を Option<fn> / 基本型 / 名前付き型に振り分ける。
+fn from_type_path(tp: &syn::TypePath) -> UnifiedType {
+    // qself 付き (`<T as Trait>::U`) は構造化を諦める
+    if tp.qself.is_some() {
+        return verbatim_of(&syn::Type::Path(tp.clone()));
+    }
+    let path = &tp.path;
+
+    // Option<T> の検出: 最終セグメントが `Option` で <T> が一つ
+    if let Some(last) = path.segments.last() {
+        if last.ident == "Option" {
+            if let syn::PathArguments::AngleBracketed(ab) = &last.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
+                    return from_optional_inner(inner);
+                }
+            }
+        }
+    }
+
+    // 単一識別子へ畳めるパス (`SV`, `c_int`, `::std::os::raw::c_int` 等)
+    if let Some(ident) = single_ident_of(path) {
+        if let Some(prim) = primitive_from_ident(&ident) {
+            return prim;
+        }
+        return UnifiedType::Named(ident);
+    }
+
+    // それ以外 (ジェネリック等) は escape hatch
+    verbatim_of(&syn::Type::Path(tp.clone()))
+}
+
+/// `Option<T>` の中身 `T` を見て、関数ポインタなら `is_optional: true` の
+/// `FnPtr` に持ち上げる。それ以外は Verbatim にフォールバック。
+fn from_optional_inner(inner: &syn::Type) -> UnifiedType {
+    match inner {
+        syn::Type::BareFn(f) => from_bare_fn(f, true),
+        syn::Type::Group(g) => from_optional_inner(&g.elem),
+        syn::Type::Paren(p) => from_optional_inner(&p.elem),
+        // Option<*mut T> 等は perl bindings には現れないため Verbatim で残す
+        _ => {
+            let wrapped: syn::TypePath = syn::parse_quote!(::std::option::Option<#inner>);
+            verbatim_of(&syn::Type::Path(wrapped))
+        }
+    }
+}
+
+/// パスを単一識別子に畳めるか試みる:
+/// - 最終セグメントに generics が無い
+/// - 最終セグメントの ident をそのまま採用 (`::std::os::raw::c_int` → `"c_int"`)
+fn single_ident_of(path: &syn::Path) -> Option<String> {
+    let last = path.segments.last()?;
+    if !matches!(last.arguments, syn::PathArguments::None) {
+        return None;
+    }
+    Some(last.ident.to_string())
+}
+
+/// 識別子が C 互換 / Rust 基本型に対応するか調べる。
+/// 文字列 prefix の剥がしは行わず、**識別子そのもの** で判定する。
+fn primitive_from_ident(name: &str) -> Option<UnifiedType> {
+    Some(match name {
+        // C 互換 void / bool
+        "c_void" => UnifiedType::Void,
+        "bool" => UnifiedType::Bool,
+
+        // C 互換 char
+        "c_char" => UnifiedType::Char { signed: None },
+        "c_schar" => UnifiedType::Char { signed: Some(true) },
+        "c_uchar" => UnifiedType::Char { signed: Some(false) },
+
+        // C 互換整数
+        "c_short" => UnifiedType::Int { signed: true, size: IntSize::Short },
+        "c_ushort" => UnifiedType::Int { signed: false, size: IntSize::Short },
+        "c_int" => UnifiedType::Int { signed: true, size: IntSize::Int },
+        "c_uint" => UnifiedType::Int { signed: false, size: IntSize::Int },
+        "c_long" => UnifiedType::Int { signed: true, size: IntSize::Long },
+        "c_ulong" => UnifiedType::Int { signed: false, size: IntSize::Long },
+        "c_longlong" => UnifiedType::Int { signed: true, size: IntSize::LongLong },
+        "c_ulonglong" => UnifiedType::Int { signed: false, size: IntSize::LongLong },
+
+        // Rust ネイティブ整数 (8/16/32/64/128)
+        // i8/u8 は char 系として扱い (バイト列の意味を保つ)
+        "i8" => UnifiedType::Char { signed: Some(true) },
+        "u8" => UnifiedType::Char { signed: Some(false) },
+        "i16" => UnifiedType::Int { signed: true, size: IntSize::Short },
+        "u16" => UnifiedType::Int { signed: false, size: IntSize::Short },
+        "i32" => UnifiedType::Int { signed: true, size: IntSize::Int },
+        "u32" => UnifiedType::Int { signed: false, size: IntSize::Int },
+        "i64" => UnifiedType::Int { signed: true, size: IntSize::LongLong },
+        "u64" => UnifiedType::Int { signed: false, size: IntSize::LongLong },
+        "i128" => UnifiedType::Int { signed: true, size: IntSize::Int128 },
+        "u128" => UnifiedType::Int { signed: false, size: IntSize::Int128 },
+
+        // isize/usize は Named 維持 (c_long とサイズが同じでも区別)
+        "isize" | "usize" => UnifiedType::Named(name.to_string()),
+
+        // 浮動小数点
+        "c_float" | "f32" => UnifiedType::Float,
+        "c_double" | "f64" => UnifiedType::Double,
+
+        _ => return None,
+    })
+}
+
+/// 任意の `syn::Type` を `proc_macro2::TokenStream` の正規形文字列で
+/// `UnifiedType::Verbatim` にラップする。
+fn verbatim_of(ty: &syn::Type) -> UnifiedType {
+    UnifiedType::Verbatim(ty.to_token_stream().to_string())
 }
 
 impl fmt::Display for UnifiedType {
@@ -1042,6 +1234,157 @@ mod tests {
         assert!(!ty.is_pointer());
         assert!(!ty.is_fn_ptr());
         assert_eq!(ty.to_rust_string(), raw);
+    }
+
+    // === Stage 2: from_syn_type ===
+
+    fn parse_ty(s: &str) -> syn::Type {
+        syn::parse_str::<syn::Type>(s).expect("syn parse failed")
+    }
+
+    #[test]
+    fn test_syn_void_tuple() {
+        assert_eq!(UnifiedType::from_syn_type(&parse_ty("()")), UnifiedType::Void);
+    }
+
+    #[test]
+    fn test_syn_pointer_mut() {
+        let ty = parse_ty("*mut SV");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Named("SV".to_string())),
+                is_const: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_syn_pointer_const_char() {
+        let ty = parse_ty("*const c_char");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Char { signed: None }),
+                is_const: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_syn_double_pointer() {
+        let ty = parse_ty("*mut *mut OP");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Pointer {
+                    inner: Box::new(UnifiedType::Named("OP".to_string())),
+                    is_const: false,
+                }),
+                is_const: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_syn_array() {
+        let ty = parse_ty("[U32; 8]");
+        match UnifiedType::from_syn_type(&ty) {
+            UnifiedType::Array { inner, size } => {
+                assert_eq!(*inner, UnifiedType::Named("U32".to_string()));
+                assert_eq!(size, Some(8));
+            }
+            other => panic!("expected Array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_syn_primitive_full_path() {
+        // `::std::os::raw::c_int` の最終識別子で判定
+        let ty = parse_ty(":: std :: os :: raw :: c_int");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Int { signed: true, size: IntSize::Int }
+        );
+    }
+
+    #[test]
+    fn test_syn_primitive_short_path() {
+        let ty = parse_ty("c_uchar");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Char { signed: Some(false) }
+        );
+    }
+
+    #[test]
+    fn test_syn_named_type() {
+        let ty = parse_ty("PerlInterpreter");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Named("PerlInterpreter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_syn_option_extern_c_fn_ptr() {
+        // bindgen 標準形: `xcv_xsub` の型表現
+        let ty = parse_ty(
+            ":: std :: option :: Option < unsafe extern \"C\" fn (arg1 : * mut CV) >",
+        );
+        let ut = UnifiedType::from_syn_type(&ty);
+        let expected = UnifiedType::FnPtr {
+            params: vec![UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Named("CV".to_string())),
+                is_const: false,
+            }],
+            ret: Box::new(UnifiedType::Void),
+            abi: Some("C".to_string()),
+            is_unsafe: true,
+            is_optional: true,
+        };
+        assert_eq!(ut, expected);
+        // emit が `option::Option<...>` ではなく正しい形に戻ること
+        assert_eq!(
+            ut.to_rust_string(),
+            "Option<unsafe extern \"C\" fn(*mut CV)>"
+        );
+    }
+
+    #[test]
+    fn test_syn_option_fn_with_return() {
+        let ty = parse_ty(
+            "Option<unsafe extern \"C\" fn(my_perl: *mut PerlInterpreter, rx: *mut REGEXP) -> *mut SV>",
+        );
+        let ut = UnifiedType::from_syn_type(&ty);
+        assert!(ut.is_optional_fn_ptr());
+        assert_eq!(
+            ut.to_rust_string(),
+            "Option<unsafe extern \"C\" fn(*mut PerlInterpreter, *mut REGEXP) -> *mut SV>"
+        );
+    }
+
+    #[test]
+    fn test_syn_unsupported_falls_to_verbatim() {
+        // ジェネリック型 (Option<fn> 以外) は Verbatim にフォールバックする
+        let ty = parse_ty("Vec<u8>");
+        let ut = UnifiedType::from_syn_type(&ty);
+        assert!(ut.is_verbatim());
+        // Verbatim の文字列は syn 正規形 (空白入り)
+        assert_eq!(ut.to_rust_string(), "Vec < u8 >");
+    }
+
+    #[test]
+    fn test_syn_paren_and_group_unwrap() {
+        // 括弧で囲まれた型はそのまま剥がれて中身に等しくなる
+        let ty = parse_ty("(*mut SV)");
+        assert_eq!(
+            UnifiedType::from_syn_type(&ty),
+            UnifiedType::Pointer {
+                inner: Box::new(UnifiedType::Named("SV".to_string())),
+                is_const: false,
+            }
+        );
     }
 
     #[test]
