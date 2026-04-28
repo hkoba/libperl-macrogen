@@ -236,11 +236,17 @@ round-trip 後 `Void` に潰れる事故を引き起こしていた。
   AddressOf でそのまま wrap → Deref で `to_rust_string` の `*mut ` prefix
   を strip → `*mut PADLIST` （正しい）
 
-例外として `Conditional` の `result_type`（then/else から「より具体的な
-方を選ぶ」ロジック）と、二項演算の `compute_binary_type_str`、
-`Index` の base 型 `*` 末尾 strip 等は依然として文字列ベースのルールが
-残っているため当面 `from_apidoc_string` を経由している。これらも将来的に
-TypeRepr 直接化したいが、ロジック移植コストが大きいため段階移行とする。
+例外として `Conditional` の `result_type` (`compute_conditional_type_str`)、
+二項演算の `compute_binary_type_str`、`Index` の base 型 `*` 末尾 strip
+等は依然として文字列ベースのルールが残っているため当面 `from_apidoc_string`
+を経由している。これらも将来的に TypeRepr 直接化したいが、ロジック移植
+コストが大きいため段階移行とする。
+
+ただし **macro→macro 戻り値型伝播** は構造化済: `macro_infer.rs` の
+`propagate_macro_return_types` が依存順 (リーフ先頭) で各マクロの戻り値型を
+構造的に再評価し (`compute_macro_return_type` / `resolve_binary` /
+`resolve_conditional_branches`)、`type_env.return_constraints` に追記する。
+詳細は `architecture-type-inference-and-cast.md` の「Phase 2b'」節参照。
 
 #### Type 列挙型
 
@@ -323,15 +329,28 @@ pub enum TypeRepr {
 
 | メソッド | 役割 |
 |----------|------|
-| `from_apidoc_string()` | 簡易パーサーで型文字列を解析（フォールバック用） |
+| `from_unified_type(&UnifiedType, &interner)` | **構造ベース**: `UnifiedType` から直接構築（Pointer/Array/Named/基本型は CType に、FnPtr/Verbatim/Unknown は RustType フォールバック）。bindings.rs 経由の型情報はこちらを使う |
+| `from_apidoc_string()` | 簡易パーサーで C 型文字列を解析（apidoc 入力用、フォールバックでも使われる） |
 | `from_c_type_string()` | 完全な C パーサー（parser.rs）で型文字列を解析 |
 | `from_type_name()` | パーサー出力の TypeName から TypeRepr を作成 |
-| `is_void()` | void 型かどうかを判定（ポインタなしの純粋な void のみ true） |
+| `is_void()` | void 型かどうか（ポインタなしの純粋な void のみ true） |
+| `is_pointer_type()` | ポインタ型か（`Inferred` は `resolved_type()` 経由で再帰判定） |
+| `is_void_pointer()` | `void *` / `*mut/*const c_void` か（specs/derived の構造で判定、文字列 contains は使わない） |
+| `is_concrete_pointer()` | `void *` ではないポインタ型か |
+| `has_outer_pointer()` | 最外ポインタを持つか（`Inferred` は false 固定、既存呼出側互換のため） |
 | `pointee_name()` | ポインタ型の指示先の構造体/typedef 名を抽出（`*mut SV` → `SV`） |
 | `type_name()` | 構造体/typedef/enum 名を抽出（`union _xhvnameu` → `_xhvnameu`） |
 
 `from_c_type_string()` は `"COP* const"` のような複雑なパターンも正しく解析できる。
 `from_apidoc_string()` は簡易パーサーを使用するため、一部のパターンで失敗する可能性がある。
+
+**bindings.rs 由来データの取扱い**: 50dad70 までは
+`from_rust_string()` (RustType 構築) や `rust_type_string_to_c()` という
+ad-hoc な文字列正規化 shim 経由で TypeRepr を組み立てていたが、
+`::std::option::Option<extern "C" fn>` のような型で round-trip 破綻
+（CI で `option::Option<...>` 未解決エラー）を起こしたため、Stage 1〜4
+で `UnifiedType::from_syn_type` → `TypeRepr::from_unified_type` の
+**構造ベース経路に統一** された。`rust_type_string_to_c` ヘルパは削除済。
 
 #### 出所情報
 
@@ -406,15 +425,40 @@ pub enum UnifiedType {
     Pointer { inner: Box<UnifiedType>, is_const: bool },
     Array { inner: Box<UnifiedType>, size: Option<usize> },
     Named(String),
+    /// 関数ポインタ型 (Option<extern "C" fn(...)> 含む)
+    FnPtr {
+        params: Vec<UnifiedType>,
+        ret: Box<UnifiedType>,
+        abi: Option<String>,
+        is_unsafe: bool,
+        is_optional: bool,        // `Option<extern "C" fn>` で true
+    },
+    /// 構造化未対応の型を syn 正規トークンで保持する escape hatch
+    Verbatim(String),
     Unknown,
 }
 ```
 
+`FnPtr` / `Verbatim` は **Structure-First Type Handling** (CLAUDE.md
+参照) の一環で導入された。bindgen が `xcv_xsub` のようなフィールドで
+出力する `::std::option::Option<unsafe extern "C" fn(...)>` 型を、
+文字列 prefix 剥がしの累積に頼らず構造的に decompose するための
+variants。`Verbatim` は構造化を諦めるケースで `proc_macro2::TokenStream`
+の正規形文字列を保持し、emit 時にそのまま出力する。
+
 主要機能:
+- `from_syn_type(&syn::Type)` - **構造ベース第一推奨**: bindings.rs の
+  `syn::Field` / `syn::ItemConst` 等から取得した `&syn::Type` を直接
+  decompose。文字列 round-trip を経由しない。`rust_decl.rs` の
+  `RustField` / `RustParam` / `RustFn::ret_ty` / `RustConst` /
+  `RustTypeAlias` 抽出で `uty: UnifiedType` を作る経路で使う
+  (Stage 3)。**bindings.rs 由来のデータはこちらを使うこと**
 - `from_c_str()` - C 型文字列からパース
-- `from_rust_str()` - Rust 型文字列からパース
-- `to_rust_string()` - Rust 型文字列に変換
+- `from_rust_str()` - Rust 型文字列からパース（後方互換用、新規呼出は
+  避ける）
+- `to_rust_string()` - Rust 型文字列に変換 (FnPtr / Verbatim も対応)
 - `equals_ignoring_const()` - const を無視した比較
+- `is_fn_ptr()` / `is_optional_fn_ptr()` / `is_verbatim()` - 構造的判定
 
 ## 型推論のフロー
 

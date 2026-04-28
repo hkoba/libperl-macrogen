@@ -12,8 +12,12 @@ Phase 2a: 型制約の収集 (依存順)
   │   └─ collect_call_constraints(): 呼び出し先の引数型を制約として追加
   └─ 確定したマクロの型をキャッシュに保存
 
-Phase 2b: const/mut・bool の確定 (依存順)
+Phase 2b: const/mut・bool・戻り値型伝播の確定 (依存順)
   resolve_param_and_return_types()
+  ├─ propagate_macro_return_types() ← Stage 5
+  │   ├─ 各マクロの戻り値型を構造的に再評価し macro_returns に蓄積
+  │   ├─ type_env.return_constraints に書き戻す
+  │   └─ stale な void* call expr 制約を構造的に置換
   ├─ 外部関数 (bindings.rs, inline) の const/bool 情報を収集
   ├─ 各マクロのパラメータが *mut 必須か判定
   └─ 結果を MacroInferInfo に格納
@@ -116,6 +120,92 @@ else: *mut CV     (gp_cv フィールド)
 ```
 
 `UnifiedType::is_void_pointer()` / `is_concrete_pointer()` で判定。
+
+## Phase 2b': macro→macro 戻り値型の構造的伝播
+
+`propagate_macro_return_types()` (macro_infer.rs) は
+`resolve_param_and_return_types` の冒頭で実行される。Phase 2a で
+`return_types_cache` (semantic.rs 経由) に格納されたマクロ戻り値型は、
+**そのマクロを処理した時点での暫定値**でしかなく、特に `cond ? then : else`
+の Conditional や `pointer ± integer` の Binary では callee マクロの
+正しい型を未だ知らないまま `void *` 等にフォールバックしていた。
+
+例:
+```c
+#define HvENAME_get(hv) ((HvHasENAME(hv)) ? HEK_KEY(HvENAME_HEK_NN(hv)) : NULL)
+#define HvENAME(hv)     HvENAME_get(hv)
+```
+
+Phase 2a 時点では `HvENAME_get` の Conditional の result_type は NULL
+ブランチ由来の `void *`。これが `return_types_cache` に乗ってしまい、
+caller の `HvENAME` も `*mut c_void` を返すマクロとして展開される。
+本体は `HEK_KEY()` (= `*mut c_char`) を返すので Rust 上で型不一致 (E0308)。
+
+### 解決アプローチ
+
+リーフ先頭の topological 順で各マクロを再評価する:
+
+```
+for name in topological_sort_for_resolve():
+    1. compute_macro_return_type(M.expr, M.type_env, macro_returns)
+       ├─ Call(callee_macro): macro_returns[callee] が登録済ならそれを採用
+       ├─ Conditional(cond, then, else):
+       │   ├─ then/else を再帰評価
+       │   └─ resolve_conditional_branches で void* vs 具体ポインタを構造判定
+       │       (TypeRepr::is_void_pointer / is_concrete_pointer)
+       ├─ Binary(Add/Sub, lhs, rhs):
+       │   └─ resolve_binary: pointer ± integer → pointer 側の型を伝播
+       ├─ Comma { rhs }: 右側の式の型を採用
+       └─ それ以外: type_env.expr_constraints の既存制約をそのまま採用
+
+    2. macro_returns.insert(name, ret_ty)
+
+    3. type_env.return_constraints に追加
+       (context = "macro return propagated from callee macros")
+
+    4. **stale な call expr 制約を構造的に置換** (補強 v2):
+       自マクロ式中の Call(callee_macro) について、
+       「stale 側 (`return type of macro X()` context) が
+        `is_void_pointer()` かつ propagated 値が `is_concrete_pointer()`」
+       のケース**のみ**、stale を expr_constraints から除去し、
+       propagated 値を追加する。
+```
+
+### 条件付き差し替え (補強 v2) の理由
+
+旧アプローチ (`unwrap_inferred` で `Inferred::resolved_type()` を再帰
+unwrap して tier 引上げ) は、`Inferred::Dereference { pointer_type }`
+や `AddressOf { inner_type }` で **意味の異なる型を返す**ため、
+`HvAUX` / `HvNAME_HEK_NN` 等で広範な型崩壊 (49 errors) を引き起こした。
+
+代わりに採用した条件付き置換では:
+
+- HvENAME 系の broken `*mut c_void` → 具体ポインタ正規化 ✓
+- apidoc が `void *` を意図して宣言している HeKEY (`#define HeKEY(he)
+  HEK_KEY(HeKEY_hek(he))` の apidoc は `void *`) のような正常ケースは
+  触らない (signature/body 整合性を保つ)
+- HeKLEN の `STRLEN == -2` のような unsigned vs signed 比較 idiom も
+  触らない (cached value が void* でないため)
+
+文字列 `contains` や prefix 剥がしでなく、構造的な
+`TypeRepr::is_void_pointer()` / `is_concrete_pointer()` で判定するため
+偽陽性を起こさない (CLAUDE.md「Structure-First Type Handling」)。
+
+### `compute_macro_return_type` の構造的特性
+
+| AST バリアント | 戻り値型の決め方 |
+|---|---|
+| `Call(Ident(name), _)` | `macro_returns.get(name)` が `Some` ならそれを採用、否なら既存制約 |
+| `Conditional` | 両ブランチを再帰評価し、`resolve_conditional_branches` (void* vs concrete を構造判定) |
+| `Binary { Add/Sub }` | `resolve_binary`: pointer ± integer → pointer 側の型を伝播 |
+| `Binary { その他 }` | None (既存制約に委ねる) |
+| `Comma { rhs }` | 右側を再帰評価 |
+| その他 | `type_env.expr_constraints` の先頭制約をそのまま採用 |
+
+`resolve_conditional_branches` は CLAUDE.md ポリシー通り
+**文字列 contains を使わない**: `TypeRepr::is_void_pointer()` と
+`is_concrete_pointer()` で判定する。`Inferred(MemberAccess { field_type })`
+等のラッパは `resolved_type()` 経由で再帰参照 (構造的)。
 
 ## Phase 2b: const/mut と bool の確定
 
