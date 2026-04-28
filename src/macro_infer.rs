@@ -2088,6 +2088,51 @@ impl MacroInferContext {
                     "macro return propagated from callee macros",
                 ));
             }
+
+            // 自マクロの式中の Call(callee_macro, ...) で、build_macro_info
+            // 時に semantic.rs の stale な return_types_cache から付いた
+            // `Parsed { raw: "*mut c_void" }` のような void pointer 制約を、
+            // propagated の具体ポインタ型で差し替える。
+            //
+            // **条件付き差し替え**: stale 側が void * かつ propagated 側が
+            // 具体ポインタの場合**のみ**、void * 制約を除去する。
+            // これにより HvENAME (callee の cached value が `void*` で誤って
+            // いた) は修正できる一方、apidoc が `void *` を意図して宣言している
+            // (HeKEY 等) ケースは触らないので signature/body 整合を壊さない。
+            let updates: Vec<(crate::ast::ExprId, TypeRepr)> = {
+                let info = self.macros.get(name).unwrap();
+                let mut acc = Vec::new();
+                collect_macro_call_updates(&info.parse_result, &macro_returns, &mut acc);
+                acc
+            };
+            if !updates.is_empty() {
+                let info_mut = self.macros.get_mut(name).unwrap();
+                for (eid, ty) in updates {
+                    if !ty.is_concrete_pointer() {
+                        continue;
+                    }
+                    if let Some(cs) = info_mut.type_env.expr_constraints.get_mut(&eid) {
+                        let mut should_replace = false;
+                        cs.retain(|c| {
+                            let stale = c.context.starts_with("return type of macro ")
+                                && c.ty.is_void_pointer();
+                            if stale {
+                                should_replace = true;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                        if should_replace {
+                            cs.push(TypeConstraint::new(
+                                eid,
+                                ty,
+                                "return type from propagated callee macro (void* override)",
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2246,6 +2291,152 @@ impl Default for MacroInferContext {
 /// マクロ式の戻り値型を、既に解決済の callee マクロ群 (`macro_returns`) を
 /// 参照しつつ構造的に再評価する。Conditional の場合は両ブランチの型を比べ、
 /// `void *` と具体ポインタの組合せなら具体側を採用する (C 三項演算の慣例)。
+/// マクロ M の `parse_result` を再帰 walk し、`Call(Ident(name), args)` で
+/// `macro_returns` に登録済の callee マクロを呼んでいる箇所を集める。
+/// 戻り値は (call 式の `ExprId`, callee の戻り値型) の列。
+fn collect_macro_call_updates(
+    parse_result: &ParseResult,
+    macro_returns: &HashMap<InternedStr, TypeRepr>,
+    acc: &mut Vec<(crate::ast::ExprId, TypeRepr)>,
+) {
+    match parse_result {
+        ParseResult::Expression(e) => visit_expr_for_calls(e, macro_returns, acc),
+        ParseResult::Statement(items) => {
+            for it in items {
+                if let BlockItem::Stmt(stmt) = it {
+                    visit_stmt_for_calls(stmt, macro_returns, acc);
+                }
+            }
+        }
+        ParseResult::Unparseable(_) => {}
+    }
+}
+
+fn visit_expr_for_calls(
+    expr: &Expr,
+    macro_returns: &HashMap<InternedStr, TypeRepr>,
+    acc: &mut Vec<(crate::ast::ExprId, TypeRepr)>,
+) {
+    if let ExprKind::Call { func, args } = &expr.kind {
+        if let ExprKind::Ident(callee) = &func.kind {
+            if let Some(ty) = macro_returns.get(callee) {
+                acc.push((expr.id, ty.clone()));
+            }
+        }
+        visit_expr_for_calls(func, macro_returns, acc);
+        for a in args {
+            visit_expr_for_calls(a, macro_returns, acc);
+        }
+        return;
+    }
+    walk_expr_children(expr, &mut |e| visit_expr_for_calls(e, macro_returns, acc));
+}
+
+fn visit_stmt_for_calls(
+    stmt: &crate::ast::Stmt,
+    macro_returns: &HashMap<InternedStr, TypeRepr>,
+    acc: &mut Vec<(crate::ast::ExprId, TypeRepr)>,
+) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Compound(c) => {
+            for it in &c.items {
+                if let BlockItem::Stmt(s) = it {
+                    visit_stmt_for_calls(s, macro_returns, acc);
+                }
+            }
+        }
+        Stmt::Expr(Some(e), _) | Stmt::Return(Some(e), _) => {
+            visit_expr_for_calls(e, macro_returns, acc)
+        }
+        Stmt::If { cond, then_stmt, else_stmt, .. } => {
+            visit_expr_for_calls(cond, macro_returns, acc);
+            visit_stmt_for_calls(then_stmt, macro_returns, acc);
+            if let Some(es) = else_stmt {
+                visit_stmt_for_calls(es, macro_returns, acc);
+            }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            visit_expr_for_calls(cond, macro_returns, acc);
+            visit_stmt_for_calls(body, macro_returns, acc);
+        }
+        Stmt::For { init, cond, step, body, .. } => {
+            if let Some(crate::ast::ForInit::Expr(e)) = init {
+                visit_expr_for_calls(e, macro_returns, acc);
+            }
+            if let Some(c) = cond {
+                visit_expr_for_calls(c, macro_returns, acc);
+            }
+            if let Some(s) = step {
+                visit_expr_for_calls(s, macro_returns, acc);
+            }
+            visit_stmt_for_calls(body, macro_returns, acc);
+        }
+        Stmt::Switch { expr, body, .. } => {
+            visit_expr_for_calls(expr, macro_returns, acc);
+            visit_stmt_for_calls(body, macro_returns, acc);
+        }
+        Stmt::Case { expr, stmt, .. } => {
+            visit_expr_for_calls(expr, macro_returns, acc);
+            visit_stmt_for_calls(stmt, macro_returns, acc);
+        }
+        Stmt::Default { stmt, .. } | Stmt::Label { stmt, .. } => {
+            visit_stmt_for_calls(stmt, macro_returns, acc);
+        }
+        _ => {}
+    }
+}
+
+/// `Expr` の子ノードを構造的に列挙する小ヘルパ。Call の特殊扱いは呼出側で行う前提。
+fn walk_expr_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
+    match &expr.kind {
+        ExprKind::Ident(_)
+        | ExprKind::IntLit(_)
+        | ExprKind::UIntLit(_)
+        | ExprKind::FloatLit(_)
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::SizeofType(_)
+        | ExprKind::Alignof(_) => {}
+        ExprKind::Call { func, args } => {
+            f(func);
+            for a in args { f(a); }
+        }
+        ExprKind::Index { expr: e, index } => { f(e); f(index); }
+        ExprKind::Member { expr: e, .. } | ExprKind::PtrMember { expr: e, .. } => f(e),
+        ExprKind::PostInc(e)
+        | ExprKind::PostDec(e)
+        | ExprKind::PreInc(e)
+        | ExprKind::PreDec(e)
+        | ExprKind::AddrOf(e)
+        | ExprKind::Deref(e)
+        | ExprKind::UnaryPlus(e)
+        | ExprKind::UnaryMinus(e)
+        | ExprKind::BitNot(e)
+        | ExprKind::LogNot(e)
+        | ExprKind::Sizeof(e) => f(e),
+        ExprKind::Cast { expr: e, .. } => f(e),
+        ExprKind::Binary { lhs, rhs, .. } => { f(lhs); f(rhs); }
+        ExprKind::Assign { lhs, rhs, .. } => { f(lhs); f(rhs); }
+        ExprKind::Conditional { cond, then_expr, else_expr } => {
+            f(cond); f(then_expr); f(else_expr);
+        }
+        ExprKind::Comma { lhs, rhs } => { f(lhs); f(rhs); }
+        ExprKind::CompoundLit { .. } => {}
+        ExprKind::BuiltinCall { args, .. } => {
+            for a in args {
+                if let crate::ast::BuiltinArg::Expr(e) = a { f(e); }
+            }
+        }
+        ExprKind::StmtExpr(_) => {}
+        ExprKind::Assert { condition, .. } => f(condition),
+        ExprKind::MacroCall { args, expanded, .. } => {
+            for a in args { f(a); }
+            f(expanded);
+        }
+    }
+}
+
 fn compute_macro_return_type(
     expr: &Expr,
     env: &TypeEnv,
