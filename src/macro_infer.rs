@@ -2080,16 +2080,11 @@ impl MacroInferContext {
             };
 
             if let Some((expr_id, ret_ty)) = computed {
-                // Inferred ラッパは構造的 tier 4 だが、resolved_type で
-                // unwrap すると本来の CType (tier 2 Header 等) に到達し、
-                // build_macro_info 時の stale な `Parsed { raw: ... }`
-                // tier 3 制約に勝てる。
-                let unwrapped = unwrap_inferred(&ret_ty);
-                macro_returns.insert(*name, unwrapped.clone());
+                macro_returns.insert(*name, ret_ty.clone());
                 let info_mut = self.macros.get_mut(name).unwrap();
                 info_mut.type_env.add_return_constraint(TypeConstraint::new(
                     expr_id,
-                    unwrapped,
+                    ret_ty,
                     "macro return propagated from callee macros",
                 ));
             }
@@ -2304,25 +2299,6 @@ fn existing_constraint_type(
         .get(&expr_id)
         .and_then(|cs| cs.first())
         .map(|c| c.ty.clone())
-}
-
-/// `Inferred` ラッパを (構造的に) 中身の CType / RustType まで剥がす。
-/// 剥がしきれた場合はその TypeRepr を返し、剥がせない (resolved_type が
-/// 無い) なら入力をそのまま返す。
-///
-/// 用途: `propagate_macro_return_types` で得た callee 戻り値型を
-/// `return_constraint` として記録する際、Inferred のままだと
-/// `confidence_tier` が常に 4 になり、stale な Parsed (tier 3) 制約に
-/// 負ける。中身を取り出すと本来の Header (tier 2) や FnReturn (tier 1)
-/// に到達できる。
-fn unwrap_inferred(ty: &TypeRepr) -> TypeRepr {
-    match ty {
-        TypeRepr::Inferred(i) => match i.resolved_type() {
-            Some(inner) => unwrap_inferred(inner),
-            None => ty.clone(),
-        },
-        _ => ty.clone(),
-    }
 }
 
 /// 二項演算の結果型を構造的に推論する:
