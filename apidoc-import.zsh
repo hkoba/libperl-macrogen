@@ -6,7 +6,7 @@ realScriptFn=$(readlink -f $0) || die "Can't resolve script path!"
 appDir=$realScriptFn:h
 dataDir=${realScriptFn%%-import.zsh}
 
-echo dataDir=$dataDir
+# echo dataDir=$dataDir
 
 function usage {
     echo 1>&2 $*;
@@ -17,21 +17,32 @@ EOF
 }
 #----------------------------------------
 
+zparseopts -D -K l=o_list_versions
+
 ((ARGC)) || usage "PERL_GIT_REPO is required!"
 
-git_repo=$1; shift
+function list_versions {
+    local git_repo=$1; shift
 
-git -C $git_repo tag |
-perl -nle '
-  /^v5\.(\d+)(\.\d+)?$/ or next;
-  next unless $1 % 2 == 0;
-  $vers[$1] = $_;
-  END { print for grep {defined} @vers }
-' |
-while read ver; do
-    echo $ver;
-    git -C $git_repo checkout $ver || die "Can't checkout $ver"
-    destFn=$dataDir/$ver:r.json
-    cargo run -- --apidoc-to-json $git_repo/embed.fnc \
-          -o $destFn || break
-done
+    git -C $git_repo tag |
+    perl -nle '
+      /^v5\.(\d+)(\.\d+)?$/ or next;
+      next unless $1 % 2 == 0;
+      $vers[$1] = $_;
+      END { print for grep {defined} @vers }
+    '
+}
+
+if (($#o_list_versions)); then
+    list_versions $1
+else
+    list_versions $1  |
+        while read ver; do
+            echo $ver;
+            git -C $git_repo checkout $ver || die "Can't checkout $ver"
+            destFn=$dataDir/$ver:r.json
+            cargo run -- --apidoc-to-json $git_repo/embed.fnc \
+                  -o $destFn || break
+        done
+fi
+
