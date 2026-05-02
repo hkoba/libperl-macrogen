@@ -20,6 +20,8 @@ pub mod macro_def;
 pub mod macro_infer;
 pub mod parser;
 pub mod perl_config;
+pub mod perlvar_dict;
+pub mod perlvar_emitter;
 pub mod pipeline;
 pub mod pp_expr;
 pub mod preprocessor;
@@ -62,6 +64,9 @@ pub use parser::{parse_expression_from_tokens, parse_expression_from_tokens_ref,
 pub use perl_config::{
     build_pp_config_for_perl, get_default_target_dir, get_perl_config, get_perl_version,
     PerlConfig, PerlConfigError,
+};
+pub use perlvar_dict::{
+    ArrayLength, PerlvarCollector, PerlvarDict, PerlvarEntry, PerlvarKind,
 };
 pub use preprocessor::{
     CallbackPair, CommentCallback, MacroCalledCallback, MacroCallWatcher, MacroDefCallback,

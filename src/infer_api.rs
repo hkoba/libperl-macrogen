@@ -221,6 +221,9 @@ pub struct InferResult {
     pub apidoc_patches: crate::apidoc_patches::ApidocPatchSet,
     /// 対象 perl の build mode（threaded / non-threaded）
     pub perl_build_mode: crate::perl_config::PerlBuildMode,
+    /// PERLVAR 観測辞書 (Phase 1 で収集、Phase 3 で `PL_xxx!()` 出力に使う)。
+    /// Pipeline で `with_perlvar_collection(false)` した場合は空。
+    pub perlvar_dict: crate::perlvar_dict::PerlvarDict,
     /// プリプロセッサ（マクロテーブル、StringInterner、FileRegistry へのアクセス用）
     pub preprocessor: Preprocessor,
     /// 統計情報
@@ -621,6 +624,9 @@ pub fn run_inference_with_preprocessor(
         global_const_dict,
         apidoc_patches,
         perl_build_mode,
+        // Default: empty. Pipeline overwrites this with the collected dict
+        // before returning the result.
+        perlvar_dict: crate::perlvar_dict::PerlvarDict::new(),
         preprocessor: pp,
         stats,
     }))

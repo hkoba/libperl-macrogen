@@ -127,6 +127,13 @@ pub struct PreprocessConfig {
     pub emit_markers: bool,
     /// ラップ対象マクロ（inline関数内で特別扱いするマクロ）
     pub wrapped_macros: Vec<String>,
+    /// PERLVAR/PERLVARI/PERLVARA/PERLVARIC 呼び出しを観測して
+    /// `PerlvarDict` に集めるかどうか。
+    ///
+    /// デフォルト `true`（opt-out）。生成される `macro_bindings.rs` の
+    /// 末尾に `PL_xxx!()` 宣言マクロのセクションを追加する。
+    /// 必要なければ `with_perlvar_collection(false)` で無効化できる。
+    pub collect_perlvars: bool,
     /// デバッグ出力
     pub debug_pp: bool,
 }
@@ -141,6 +148,7 @@ impl PreprocessConfig {
             target_dir: None,
             emit_markers: false,
             wrapped_macros: Vec::new(),
+            collect_perlvars: true,
             debug_pp: false,
         }
     }
@@ -312,6 +320,15 @@ impl PipelineBuilder {
         self
     }
 
+    /// PERLVAR/PERLVARI/PERLVARA/PERLVARIC 観測の有効/無効を指定。
+    ///
+    /// デフォルトは有効 (opt-out)。`false` を渡すと PERLVAR コレクションを
+    /// 無効化し、`PL_xxx!()` セクションは出力されなくなる。
+    pub fn with_perlvar_collection(mut self, enable: bool) -> Self {
+        self.preprocess.collect_perlvars = enable;
+        self
+    }
+
     /// プリプロセッサデバッグ出力を有効化
     pub fn with_debug_pp(mut self) -> Self {
         self.preprocess.debug_pp = true;
@@ -473,6 +490,25 @@ impl Pipeline {
             pp.add_wrapped_macro(macro_name);
         }
 
+        // PERLVAR コレクション (opt-out、デフォルト有効)
+        let perlvar_dict = if self.preprocess_config.collect_perlvars {
+            let (dict, c_var, c_init, c_array, c_const) =
+                crate::perlvar_dict::PerlvarCollector::new_set();
+            // 借用衝突回避のため intern を先に済ませる
+            let interner = pp.interner_mut();
+            let id_var = interner.intern("PERLVAR");
+            let id_init = interner.intern("PERLVARI");
+            let id_array = interner.intern("PERLVARA");
+            let id_const = interner.intern("PERLVARIC");
+            pp.set_macro_called_callback(id_var, Box::new(c_var));
+            pp.set_macro_called_callback(id_init, Box::new(c_init));
+            pp.set_macro_called_callback(id_array, Box::new(c_array));
+            pp.set_macro_called_callback(id_const, Box::new(c_const));
+            Some(dict)
+        } else {
+            None
+        };
+
         // ファイルを処理
         if let Err(e) = pp.add_source_file(&self.preprocess_config.input_file) {
             return Err(PipelineError::Compile(e.with_files(pp.files())));
@@ -482,6 +518,7 @@ impl Pipeline {
             preprocessor: pp,
             infer_config: self.infer_config,
             codegen_config: self.codegen_config,
+            perlvar_dict,
         })
     }
 
@@ -505,6 +542,10 @@ pub struct PreprocessedPipeline {
     preprocessor: Preprocessor,
     infer_config: InferConfig,
     codegen_config: CodegenConfig,
+    /// PERLVAR コレクション (有効時に Some)。
+    /// `Rc<RefCell<...>>` 経由でコールバックと共有しているので、
+    /// add_source_file 完了時点でコールバックが書き込み済み。
+    perlvar_dict: Option<std::rc::Rc<std::cell::RefCell<crate::perlvar_dict::PerlvarDict>>>,
 }
 
 impl PreprocessedPipeline {
@@ -594,10 +635,19 @@ impl PreprocessedPipeline {
         )?;
 
         match result {
-            Some(infer_result) => Ok(InferredPipeline {
-                result: infer_result,
-                codegen_config: self.codegen_config,
-            }),
+            Some(mut infer_result) => {
+                // PERLVAR コレクションを取り出して結果に転送
+                if let Some(rc) = self.perlvar_dict {
+                    // コールバックとの共有 Rc。Preprocessor 内にコールバックが
+                    // まだ生きている (= 参照カウント > 1) 想定なので、try_unwrap
+                    // ではなく素直に clone で取り出す。
+                    infer_result.perlvar_dict = rc.borrow().clone();
+                }
+                Ok(InferredPipeline {
+                    result: infer_result,
+                    codegen_config: self.codegen_config,
+                })
+            }
             None => {
                 // デバッグダンプで早期終了
                 // 空の結果を返すか、専用のエラーを返すか検討が必要
@@ -694,6 +744,14 @@ impl InferredPipeline {
         driver.generate(&self.result)?;
 
         let stats = driver.stats().clone();
+
+        // PERLVAR section: emit at end of macro_bindings.rs.
+        // Empty dict (e.g. when collect_perlvars=false) is a no-op.
+        crate::perlvar_emitter::emit_perlvar_section(
+            &mut writer,
+            &self.result.perlvar_dict,
+            self.result.perl_build_mode.is_threaded(),
+        )?;
 
         // TODO: strict_rustfmt の処理
         // 現状は CodegenDriver が rustfmt を呼び出さないため、
