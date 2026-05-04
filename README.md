@@ -26,6 +26,23 @@ Or add to your `Cargo.toml`:
 libperl-macrogen = "0.1"
 ```
 
+## Build requirements
+
+The crate's `build.rs` downloads a pre-extracted perlapi snapshot
+(`apidoc.tar.gz`, ~1.9 MiB) from the corresponding GitHub Release on
+the **first build** after install / version change. This embeds
+documentation that the type inferencer needs to disambiguate macro
+return types — pre-extracting it shaves significant time off every
+consumer's build.
+
+- **Internet access is required** at first build / install time.
+  Subsequent builds reuse the cached copy in Cargo's `OUT_DIR`.
+- For offline mirrors / air-gapped CI, set the `LIBPERL_APIDOC_URL`
+  environment variable to override the download source.
+- If you're building from a checkout of this repository (with the
+  `apidoc/` directory present), `build.rs` re-tars locally instead
+  of downloading.
+
 ## Usage
 
 ### CLI
@@ -171,7 +188,7 @@ Special thanks to the [TinyCC community](https://github.com/TinyCC/tinycc) for c
 
 ## License
 
-This project is licensed under the [GNU Lesser General Public License v2.1](LICENSE) (LGPL-2.1), following TinyCC's licensing.
+This project is licensed under the [GNU Lesser General Public License v2.1 or later](LICENSE) (`LGPL-2.1-or-later`), following TinyCC's licensing.
 
 ## Author
 

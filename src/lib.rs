@@ -1,7 +1,76 @@
-//! TinyCC Macro Bindgen
+//! # libperl-macrogen
 //!
-//! C言語のヘッダーファイルからマクロとinline static関数を抽出し、
-//! Rustコードに変換するツール。
+//! Generate Rust FFI bindings for the things `bindgen` can't see:
+//! C **macro functions** and **`static inline`** definitions in
+//! Perl's header tree.
+//!
+//! `rust-bindgen` is the standard for translating C declarations to
+//! Rust, but it deliberately skips macro-shaped function definitions
+//! (because they have no fixed type signature) and produces no Rust
+//! body for `static inline` functions (because their definitions live
+//! in headers, not the linked library). For wrapping libperl that
+//! gap is huge — much of the public-looking API (`SvIV`, `newRV_inc`,
+//! `PL_stack_base`, hundreds more) is exposed as macros or
+//! `static inline` only.
+//!
+//! `libperl-macrogen` complements `bindgen`: it lex / parse /
+//! type-infers the relevant headers and emits Rust wrappers like
+//!
+//! ```text
+//! pub unsafe fn SvIV(my_perl: *mut PerlInterpreter, sv: *mut SV) -> IV {
+//!     unsafe { Perl_SvIV(my_perl, sv) }
+//! }
+//! ```
+//!
+//! plus declarative macros for `PERLVAR`-driven globals (so the same
+//! `PL_stack_base!(my_perl)` source compiles against threaded and
+//! non-threaded Perl).
+//!
+//! ## Library API
+//!
+//! The high-level entry point is the [`Pipeline`] builder, which
+//! drives a header file through the preprocess → infer → codegen
+//! stages and writes a Rust source file:
+//!
+//! ```no_run
+//! use libperl_macrogen::Pipeline;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut output = std::fs::File::create("macro_bindings.rs")?;
+//! Pipeline::builder("xs-wrapper.h")
+//!     .with_auto_perl_config()?
+//!     .with_bindings("bindings.rs")     // bindgen output for type info
+//!     .with_codegen_defaults()
+//!     .build()?
+//!     .generate(&mut output)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`PipelineBuilder`] for the full set of options
+//! (skip-list, extra include paths, codegen knobs, ...).
+//!
+//! ## CLI
+//!
+//! Installing the crate also gives you a `libperl-macrogen` binary
+//! for one-off / inspection use. Run with `--help` for the option
+//! summary.
+//!
+//! ## Build-time data download
+//!
+//! At build time (the first `cargo build` after install / update),
+//! the crate's own `build.rs` downloads `apidoc.tar.gz` from the
+//! corresponding GitHub Release. The archive embeds an extracted
+//! snapshot of perlapi documentation that the type inferencer
+//! consults — pre-extracting it shaves significant time off every
+//! consumer's build. Network access is therefore needed once per
+//! version; subsequent builds reuse the cached `OUT_DIR` copy.
+//! Set `LIBPERL_APIDOC_URL` to override the download URL (e.g. for
+//! offline mirrors).
+//!
+//! ## Status
+//!
+//! Pre-1.0 — focused on the libperl-rs use case. Wider header-tree
+//! coverage and stable APIs come after libperl-rs hits 1.0.
 
 pub mod apidoc;
 pub mod apidoc_data;

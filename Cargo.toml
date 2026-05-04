@@ -3,16 +3,28 @@ name = "libperl-macrogen"
 version = "0.1.2"
 edition = "2024"
 description = "Generate Rust FFI bindings from C macro functions in Perl headers"
-license = "LGPL-2.1"
+license = "LGPL-2.1-or-later"
 repository = "https://github.com/hkoba/libperl-macrogen"
 keywords = ["perl", "ffi", "macro", "bindgen", "codegen"]
 categories = ["development-tools::ffi", "parsing"]
 exclude = [
+    # Bulky non-source assets that are reconstructed at build time or
+    # genuinely not user-facing.
     "apidoc/",
     "tinycc/",
     "doc/",
     "samples/",
     "tmp/",
+    # Internal development-only files: Claude Code instructions,
+    # planning docs, dev scripts, profiling artifacts.
+    "CLAUDE.md",
+    "Project.md",
+    "TODO.md",
+    "tools/",
+    "apidoc-import.zsh",
+    "categorize-help-diags.tcl",
+    "*.pdf",
+    "perf.data*",
 ]
 
 [dependencies]

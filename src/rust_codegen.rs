@@ -2592,25 +2592,6 @@ impl<'a> RustCodegen<'a> {
         false
     }
 
-    /// 必要なら enum→int キャストを挿入。
-    /// `self_ut` が Rust enum 型で `target_int_ty` が整数型なら
-    /// `syn_expr as <target_int_ty>` を返す。それ以外は `syn_expr` をそのまま返す。
-    fn maybe_cast_enum_to_int(
-        &self,
-        syn_expr: syn::Expr,
-        self_ut: Option<&UnifiedType>,
-        target_int_ty: &str,
-    ) -> syn::Expr {
-        if let Some(ut) = self_ut {
-            if self.is_rust_enum_type(ut) {
-                if normalize_integer_type(target_int_ty).is_some() {
-                    return crate::syn_codegen::cast_syn_expr(syn_expr, target_int_ty);
-                }
-            }
-        }
-        syn_expr
-    }
-
     /// 式が bool を返すかどうかを判定（関数の戻り値型も考慮）
     fn is_bool_expr_with_dict(&self, expr: &Expr) -> bool {
         if is_boolean_expr_recursive(expr, self.interner) {
