@@ -25,6 +25,21 @@ fn main() {
     // OUT_DIR に居座り続けて library binary が古い patches を embed してしまう。
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=apidoc");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
+    println!("cargo:rerun-if-env-changed=LIBPERL_APIDOC_URL");
+
+    // docs.rs builds run inside a `--network none` sandbox, so the
+    // GitHub Releases download below would panic with a DNS error.
+    // docs.rs only invokes `rustdoc`, never the binary or runtime
+    // code that consumes the apidoc, so an empty placeholder archive
+    // is sufficient. Detected via the `DOCS_RS=1` env var that
+    // docs.rs sets in its build environment.
+    if env::var("DOCS_RS").is_ok() {
+        let _ = std::fs::remove_file(&archive_path);
+        write_empty_archive(&archive_path)
+            .expect("write empty apidoc placeholder for docs.rs");
+        return;
+    }
 
     // 開発時: ローカルの apidoc/ ディレクトリから tar.gz を作成。
     // **キャッシュされた archive を信用せず毎回作り直す**（数 MB の tar 化なので
@@ -82,6 +97,31 @@ fn create_local_archive(_src_dir: &Path, dest: &Path) -> io::Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// 空の `tar.gz` を書き出す。docs.rs のような offline / 機能を実行しない
+/// ビルド環境向けの placeholder。`tar`/`flate2` 依存を build-deps に
+/// 追加せずに済むよう、最小の有効な gzip header (空の gzip stream) を
+/// 直接書く。runtime の `flate2::read::GzDecoder` で読めば 0 バイトの
+/// uncompressed stream が返る。
+fn write_empty_archive(dest: &Path) -> io::Result<()> {
+    // RFC 1952 minimal gzip: ID1, ID2, CM=8 (deflate), FLG=0,
+    // MTIME=0 (4 bytes), XFL=0, OS=255 (unknown), then a zero-length
+    // deflate block (BFINAL=1, BTYPE=00, no data, byte-aligned),
+    // then CRC32(empty)=0 and ISIZE=0 (each 4 bytes LE).
+    // Canonical 20-byte empty gzip stream (the bytes `gzip < /dev/null`
+    // produces, with MTIME zeroed for reproducibility).
+    let bytes: [u8; 20] = [
+        0x1f, 0x8b, 0x08, 0x00, // ID1, ID2, CM=8 (deflate), FLG=0
+        0x00, 0x00, 0x00, 0x00, // MTIME=0
+        0x00, 0xff,             // XFL=0, OS=255 (unknown)
+        0x03, 0x00,             // empty deflate block
+        0x00, 0x00, 0x00, 0x00, // CRC32 = 0 (CRC of empty input)
+        0x00, 0x00, 0x00, 0x00, // ISIZE = 0 (uncompressed length)
+    ];
+    let mut file = File::create(dest)?;
+    file.write_all(&bytes)?;
     Ok(())
 }
 
