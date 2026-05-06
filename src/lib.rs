@@ -55,17 +55,17 @@
 //! for one-off / inspection use. Run with `--help` for the option
 //! summary.
 //!
-//! ## Build-time data download
+//! ## Apidoc data
 //!
-//! At build time (the first `cargo build` after install / update),
-//! the crate's own `build.rs` downloads `apidoc.tar.gz` from the
-//! corresponding GitHub Release. The archive embeds an extracted
-//! snapshot of perlapi documentation that the type inferencer
-//! consults — pre-extracting it shaves significant time off every
-//! consumer's build. Network access is therefore needed once per
-//! version; subsequent builds reuse the cached `OUT_DIR` copy.
-//! Set `LIBPERL_APIDOC_URL` to override the download URL (e.g. for
-//! offline mirrors).
+//! The crate bundles a pre-extracted snapshot of perlapi documentation
+//! (`apidoc.tar.gz`, ~1.9 MiB compressed) that the type inferencer
+//! consults during macro-wrapper generation. This means **no network
+//! access is required at build time** — works under docs.rs's
+//! `--network none` sandbox, in air-gapped CI, etc.
+//!
+//! For advanced use (e.g. testing an unreleased apidoc dataset on an
+//! offline mirror), set the `LIBPERL_APIDOC_URL` environment variable
+//! to override and download from there instead.
 //!
 //! ## Status
 //!
