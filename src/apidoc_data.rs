@@ -34,53 +34,83 @@ pub fn get_apidoc_dir() -> Option<PathBuf> {
         .clone()
 }
 
-/// キャッシュディレクトリのベースパスを取得
-fn get_cache_base_dir() -> Option<PathBuf> {
-    // 1. 環境変数で指定されたパス
+/// キャッシュディレクトリのベース候補を優先度順で列挙
+///
+/// 1. `LIBPERL_APIDOC_CACHE_DIR` — ユーザの明示 override
+/// 2. `OUT_DIR` — build-script ランタイムでは確実に書き込み可能。
+///    docs.rs / 他 sandboxed 環境はここで成功する。
+/// 3. `HOME/.cache` (Linux) / `Library/Caches` (macOS) /
+///    `LOCALAPPDATA` (Windows) — 普段の dev 環境はここでヒット。
+///    再ビルド間でキャッシュが効くので速い。
+/// 4. `std::env::temp_dir()` — 最後の砦。書き込み可だが揮発的。
+///
+/// 全候補を試して書き込みに成功した最初のものを採用する。
+fn cache_base_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
     if let Ok(path) = std::env::var("LIBPERL_APIDOC_CACHE_DIR") {
-        return Some(PathBuf::from(path));
+        candidates.push(PathBuf::from(path));
     }
 
-    // 2. プラットフォーム固有のキャッシュディレクトリ
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        candidates.push(PathBuf::from(out_dir));
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Ok(home) = std::env::var("HOME") {
-            return Some(PathBuf::from(home).join(".cache"));
+            candidates.push(PathBuf::from(home).join(".cache"));
         }
     }
 
     #[cfg(target_os = "macos")]
     {
         if let Ok(home) = std::env::var("HOME") {
-            return Some(PathBuf::from(home).join("Library/Caches"));
+            candidates.push(PathBuf::from(home).join("Library/Caches"));
         }
     }
 
     #[cfg(target_os = "windows")]
     {
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            return Some(PathBuf::from(local_app_data));
+            candidates.push(PathBuf::from(local_app_data));
         }
     }
 
-    // フォールバック: カレントディレクトリ
-    std::env::current_dir().ok()
+    candidates.push(std::env::temp_dir());
+
+    candidates
 }
 
 /// apidoc データを展開してキャッシュ
+///
+/// 候補ディレクトリを順に試し、書き込みに成功したものを採用。
+/// 全候補で失敗したら最後のエラーを返す。
 fn extract_apidoc_if_needed() -> io::Result<PathBuf> {
-    let cache_base = get_cache_base_dir().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "Could not determine cache directory")
-    })?;
+    let mut last_err: Option<io::Error> = None;
+    for cache_base in cache_base_candidates() {
+        match try_extract_to(&cache_base) {
+            Ok(dir) => return Ok(dir),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no writable cache directory candidates",
+        )
+    }))
+}
 
+/// 単一の cache_base で展開を試みる
+fn try_extract_to(cache_base: &std::path::Path) -> io::Result<PathBuf> {
     let cache_dir = cache_base
         .join("libperl-macrogen")
         .join(format!("apidoc-v{}", APIDOC_DATA_VERSION));
 
-    // キャッシュが存在するか確認
+    // キャッシュが既に存在していて整合していればそれを返す
     let apidoc_dir = cache_dir.join("apidoc");
     if apidoc_dir.is_dir() {
-        // バージョンファイルで検証
         let version_file = cache_dir.join("version");
         if let Ok(cached_version) = fs::read_to_string(&version_file) {
             if cached_version.trim() == APIDOC_DATA_VERSION {
