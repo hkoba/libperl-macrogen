@@ -3,7 +3,8 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 use libperl_macrogen::{
-    DerivedDecl, ExternalDecl, PPConfig, Parser, Preprocessor, StorageClass, TypeSpec,
+    DerivedDecl, Expr, ExprKind, ExternalDecl, Initializer, PPConfig, Parser, Preprocessor,
+    StorageClass, TypeSpec,
 };
 
 /// Helper to parse a source string and return translation unit
@@ -524,4 +525,53 @@ fn test_parser_marker_state_not_leaked() {
     // (markers should always balance: MacroBegin followed by MacroEnd)
     let decls = parse_with_markers("#define M(x) (x)\nint a = M(1);\nint b = M(2);\nint c = M(3);");
     assert_eq!(decls.len(), 3);
+}
+
+/// 先頭宣言の初期化子式を取り出すヘルパ (_Generic テスト用)
+fn init_expr(decls: &[ExternalDecl]) -> &Expr {
+    match &decls[0] {
+        ExternalDecl::Declaration(d) => match &d.declarators[0].init {
+            Some(Initializer::Expr(e)) => e,
+            other => panic!("unexpected initializer: {:?}", other),
+        },
+        other => panic!("unexpected decl: {:?}", other),
+    }
+}
+
+#[test]
+fn test_generic_selection_picks_default_branch() {
+    // glibc __glibc_const_generic (C23 const 修飾ジェネリック) と同型
+    let decls = parse(
+        "int x = _Generic(0 ? (const char *)0 : (void *)1, \
+         const void *: 1, default: 2);",
+    );
+    assert_eq!(decls.len(), 1);
+    assert!(matches!(&init_expr(&decls).kind, ExprKind::IntLit(2)));
+}
+
+#[test]
+fn test_generic_selection_no_default_picks_first() {
+    let decls = parse("int x = _Generic(1, int: 10, long: 20);");
+    assert_eq!(decls.len(), 1);
+    assert!(matches!(&init_expr(&decls).kind, ExprKind::IntLit(10)));
+}
+
+#[test]
+fn test_generic_selection_default_in_first_position() {
+    let decls = parse("int x = _Generic(1, default: 30, int: 40);");
+    assert_eq!(decls.len(), 1);
+    assert!(matches!(&init_expr(&decls).kind, ExprKind::IntLit(30)));
+}
+
+#[test]
+fn test_generic_selection_in_function_body() {
+    // glibc の memchr マクロ展開が関数本体中に現れるケース
+    let decls = parse(
+        "void *f(const void *p, int c, unsigned long n) {\
+           return _Generic(0 ? (p) : (void *) 1, \
+                           const void *: (const void *) (p), \
+                           default: (void *) (p)); }",
+    );
+    assert_eq!(decls.len(), 1);
+    assert!(matches!(decls[0], ExternalDecl::FunctionDef(_)));
 }
