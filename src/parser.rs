@@ -2118,6 +2118,10 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 // preserve_call マクロを MacroCall ノードとして処理
                 self.parse_macro_call_expr()
             }
+            TokenKind::KwGeneric => {
+                self.advance()?;
+                self.parse_generic_selection(loc)
+            }
             _ => Err(CompileError::Parse {
                 loc,
                 kind: ParseError::UnexpectedToken {
@@ -2126,6 +2130,51 @@ impl<'a, S: TokenSource> Parser<'a, S> {
                 },
             }),
         }
+    }
+
+    /// C11 ジェネリック選択 (_Generic) をパースし、選択枝の式へ脱糖する
+    ///
+    /// 制御式は未評価オペランド (C11 6.5.1.1) なので AST には残さない。
+    /// 本来の選択は制御式の型で決まるが、パース段階では型情報が無いため
+    /// default 枝（無ければ先頭の枝）を採用する。実世界での主用途である
+    /// glibc の __glibc_const_generic (C23 の const 修飾ジェネリック関数、
+    /// 全枝が const キャストの有無を除いて同値) ではこの近似で正しい値になる。
+    fn parse_generic_selection(&mut self, loc: SourceLocation) -> Result<Expr> {
+        self.expect(&TokenKind::LParen)?;
+        // 制御式（未評価なので捨てる）
+        let _controlling = self.parse_assignment_expr()?;
+
+        let mut default_expr: Option<Expr> = None;
+        let mut first_expr: Option<Expr> = None;
+
+        while self.check(&TokenKind::Comma) {
+            self.advance()?;
+            let is_default = if self.check(&TokenKind::KwDefault) {
+                self.advance()?;
+                true
+            } else {
+                let _type_name = self.parse_type_name()?;
+                false
+            };
+            self.expect(&TokenKind::Colon)?;
+            let expr = self.parse_assignment_expr()?;
+            if is_default {
+                if default_expr.is_none() {
+                    default_expr = Some(expr);
+                }
+            } else if first_expr.is_none() {
+                first_expr = Some(expr);
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+
+        default_expr.or(first_expr).ok_or_else(|| CompileError::Parse {
+            loc,
+            kind: ParseError::UnexpectedToken {
+                expected: "generic association".to_string(),
+                found: self.current.kind.clone(),
+            },
+        })
     }
 
     /// wrapped マクロ（assert 等）を Assert 式としてパース
