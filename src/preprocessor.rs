@@ -3230,6 +3230,23 @@ impl Preprocessor {
                         MacroKind::Function { params, is_variadic } => {
                             // 関数マクロ: 引数を収集できるかチェック
                             if let Some((args, consumed)) = self.try_collect_args_from_tokens(&tokens[i + 1..], params.len(), *is_variadic) {
+                                // 置換列が空の関数マクロ (非 DEBUGGING perl の DEBUG_Xv 等)
+                                // は C と同様、呼び出しごと消える — 引数は評価されず
+                                // 依存も生まない。preserve してしまうと C では存在しない
+                                // 呼び出しが AST に残り、引数内の PTR2UV / PerlIO_printf
+                                // などが偽の依存になって cascade を汚染する。
+                                // (名前でなくマクロ表の観測形状で判定するので、DEBUGGING
+                                //  perl では通常の展開/保存経路に自然に戻る)
+                                if def
+                                    .body
+                                    .iter()
+                                    .all(|t| matches!(t.kind, TokenKind::Space | TokenKind::Newline))
+                                {
+                                    let _ = args; // 未評価で破棄
+                                    i += 1 + consumed;
+                                    continue;
+                                }
+
                                 // 関数マクロの呼び出しを記録
                                 called_macros.insert(id);
 
