@@ -12,7 +12,10 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 
 /// apidoc データのバージョン（build.rs と一致させる）
-pub const APIDOC_DATA_VERSION: &str = "1.0";
+/// 1.1: PAD_SET_CUR / PAD_SET_CUR_NOSAVE / PAD_BASE_SV の
+///      arg_type_override 追加 (pad.h apidoc の `PADLIST padlist` ポインタ抜け)
+/// 1.2: MUTABLE_* の arg_type_override (void *) と AvFILL の return override (SSize_t) 追加
+pub const APIDOC_DATA_VERSION: &str = "1.2";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

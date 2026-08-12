@@ -40,6 +40,95 @@
       "source_loc": "/usr/lib64/perl5/CORE/op.h:977",
       "reason": "perl op.h macro definition `(Perl_custom_op_get_field(x, XOPe_xop_ptr).xop_ptr)` lacks `aTHX_`. The function expects 3 args (pTHX_ const OP *o, const xop_flags_enum field) but the macro only passes 2, causing Rust E0061 (function takes 3 arguments but 2 arguments were supplied). XopENTRYCUSTOM(o, xop_ptr) on line 967 is the correct alternative — it passes aTHX_ properly.",
       "upstream_status": "to-report"
+    },
+    {
+      "name": "PAD_SET_CUR",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "/usr/lib64/perl5/CORE/pad.h:294",
+      "reason": "pad.h apidoc declares `PADLIST padlist` (missing `*`); the macro body passes it to PadlistARRAY() which takes `PADLIST *`.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "PAD_SET_CUR_NOSAVE",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "/usr/lib64/perl5/CORE/pad.h:303",
+      "reason": "pad.h apidoc declares `PADLIST padlist` (missing `*`); the macro body passes it to PadlistARRAY() which takes `PADLIST *`.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "PAD_BASE_SV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "/usr/lib64/perl5/CORE/pad.h:291",
+      "reason": "pad.h apidoc declares `PADLIST padlist` (missing `*`); the macro body passes it to PadlistARRAY() which takes `PADLIST *`.",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_AV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:69",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_CV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:70",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_GV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:71",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_HV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:72",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_IO",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:73",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "MUTABLE_SV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "void *",
+      "source_loc": "/usr/lib64/perl5/CORE/handy.h:75",
+      "reason": "handy.h apidoc declares the param with the target type, but the macro's real contract is `void *` -> cast: the body is `((T*)MUTABLE_PTR(p))` and callers pass unrelated pointer types (e.g. SAVECOMPPAD passes PAD* to MUTABLE_SV).",
+      "upstream_status": "to-report"
+    },
+    {
+      "name": "AvFILL",
+      "kind": "return_type_override",
+      "value": "SSize_t",
+      "source_loc": "/usr/lib64/perl5/CORE/av.h:112",
+      "reason": "av.h apidoc_defn declares SSize_t but the bundled apidoc data carries I32 (stale); the macro body branches yield SSize_t (AvFILLp / mg_size).",
+      "upstream_status": "n/a (bundled-data fix)"
     }
   ]
 }
