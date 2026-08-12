@@ -487,6 +487,19 @@ fn best_constraint_for_macro_param(
 ) -> Option<crate::type_repr::TypeRepr> {
     let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
 
+    // param_constraints (マクロ自身の apidoc パラメータ宣言など) を先に走査する:
+    // tier 同点のとき「自身の宣言」が「呼び出し先由来の制約」に勝つように
+    // (厳密未満 `<` の比較なので先着が優先される)。
+    if let Some(constraints) = info.type_env.get_param_constraints(param.name) {
+        for c in constraints {
+            if c.ty.is_void() { continue; }
+            let tier = c.ty.confidence_tier();
+            if best.is_none() || tier < best.unwrap().1 {
+                best = Some((&c.ty, tier));
+            }
+        }
+    }
+
     let mut all_expr_ids: Vec<crate::ast::ExprId> = info
         .type_env
         .param_to_exprs
@@ -3494,12 +3507,15 @@ impl<'a> RustCodegen<'a> {
                     return syn::parse_str("false").unwrap_or_else(|_| int_lit(0));
                 }
                 let e = self.build_syn_expr(inner, info);
-                let bool_e = if self.is_bool_expr_with_dict(inner) {
-                    e
-                } else if self.is_pointer_expr_unified(inner, info)
-                    || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer()) {
-                    // ポインタ → .is_null() (否定なし、外側の ! が担当)
-                    syn::Expr::MethodCall(syn::ExprMethodCall {
+                if !self.is_bool_expr_with_dict(inner)
+                    && (self.is_pointer_expr_unified(inner, info)
+                        || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer()))
+                {
+                    // C の `!ptr` は「ptr が NULL か」そのもの。`.is_null()` が
+                    // 否定を内包するので、外側に ! を重ねてはならない
+                    // (かつて二重否定になっており、SvPVXtrue 等の null ガードが
+                    // 反転していた)。
+                    return syn::Expr::MethodCall(syn::ExprMethodCall {
                         attrs: vec![],
                         receiver: Box::new(e),
                         dot_token: Default::default(),
@@ -3507,7 +3523,10 @@ impl<'a> RustCodegen<'a> {
                         turbofish: None,
                         paren_token: Default::default(),
                         args: syn::punctuated::Punctuated::new(),
-                    })
+                    });
+                }
+                let bool_e = if self.is_bool_expr_with_dict(inner) {
+                    e
                 } else {
                     // 整数 → != 0 して bool に変換、否定は外側 ! が担当
                     wrap_as_bool(e)
@@ -6420,6 +6439,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             .map(|c| self.interner.get(*c).to_string())
                             .collect())
                         .unwrap_or_default();
+                    // HashSet 由来の列挙順を決定化 (run ごとのコメント揺れ防止)
+                    let mut cascade_deps = cascade_deps;
+                    cascade_deps.sort();
+                    let mut absent = absent;
+                    absent.sort();
                     if absent.is_empty() {
                         writeln!(self.writer,
                             "// [CASCADE_UNAVAILABLE] {} - dependency not generated: {}",
@@ -6448,6 +6472,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 }
                 InlineGenResult::UnresolvedNames { code, unresolved } => {
                     let name_str = self.interner.get(name);
+                    let mut unresolved = unresolved.clone();
+                    unresolved.sort(); // 列挙順の決定化
                     writeln!(self.writer, "// [UNRESOLVED_NAMES] {} - inline function", name_str)?;
                     writeln!(self.writer, "// Unresolved: {}", unresolved.join(", "))?;
                     for line in code.lines() {
@@ -6485,12 +6511,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     } else {
                         // カスケード降格: 呼び出し先の inline 関数が codegen 時に失敗
                         let name_str = self.interner.get(name);
-                        let unavailable: Vec<String> = result.inline_fn_dict.get_called_functions(name)
+                        let mut unavailable: Vec<String> = result.inline_fn_dict.get_called_functions(name)
                             .map(|calls| calls.iter()
                                 .filter(|c| inline_set.contains(c) && !self.successfully_generated_inlines.contains(c))
                                 .map(|c| self.interner.get(*c).to_string())
                                 .collect())
                             .unwrap_or_default();
+                        unavailable.sort(); // 列挙順の決定化
                         writeln!(self.writer, "// [CASCADE_UNAVAILABLE] {} - dependency not generated: {}",
                             name_str, unavailable.join(", "))?;
                         for line in code.lines() {
@@ -6810,9 +6837,12 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     ) -> io::Result<()> {
         let name_str = self.interner.get(info.name);
         let thx_info = if info.is_thx_dependent { " [THX]" } else { "" };
+        let mut deps: Vec<&String> = unavailable_deps.iter().collect();
+        deps.sort(); // 列挙順の決定化
+        let deps: Vec<&str> = deps.iter().map(|s| s.as_str()).collect();
         writeln!(self.writer,
             "// [CASCADE_UNAVAILABLE] {}{} - dependency not generated: {}",
-            name_str, thx_info, unavailable_deps.join(", "))?;
+            name_str, thx_info, deps.join(", "))?;
         writeln!(self.writer)?;
         Ok(())
     }
@@ -6927,6 +6957,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             .collect();
 
         if !unavailable_fns.is_empty() {
+            let mut unavailable_fns = unavailable_fns;
+            unavailable_fns.sort(); // 列挙順の決定化
             writeln!(self.writer, "// Unavailable: {}", unavailable_fns.join(", "))?;
         }
 
