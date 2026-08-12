@@ -80,6 +80,9 @@ pub enum RustTypeSource {
     Const { const_name: String },
     /// 文字列からパースされた型（具体的な出所は不明）
     Parsed { raw: String },
+    /// 確定済みマクロのパラメータ型キャッシュから伝播した型。
+    /// 中身は推論結果なので確度は Tier 4 (apidoc 等の宣言情報より弱い)。
+    Propagated { raw: String },
 }
 
 // ============================================================================
@@ -711,6 +714,7 @@ impl TypeRepr {
                 | RustTypeSource::FnReturn { .. }
                 | RustTypeSource::Const { .. } => 1,
                 RustTypeSource::Parsed { .. } => 3,
+                RustTypeSource::Propagated { .. } => 4,
             },
             TypeRepr::CType { source, .. } => match source {
                 CTypeSource::InlineFn { .. } | CTypeSource::Header => 2,
@@ -875,6 +879,20 @@ impl TypeRepr {
         TypeRepr::RustType {
             repr,
             source: RustTypeSource::Parsed {
+                raw: s.to_string(),
+            },
+        }
+    }
+
+    /// **伝播型用**: 確定済みマクロのパラメータ型キャッシュから取り出した
+    /// Rust 形式の型文字列をパースする。`from_rust_string` と同じ表現に
+    /// なるが、出所が推論結果であることを保持し Tier 4 として扱う
+    /// (apidoc の宣言 (Tier 3) を上書きしない)。
+    pub fn from_rust_string_propagated(s: &str) -> Self {
+        let repr = RustTypeRepr::from_type_string(s);
+        TypeRepr::RustType {
+            repr,
+            source: RustTypeSource::Propagated {
                 raw: s.to_string(),
             },
         }

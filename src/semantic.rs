@@ -2078,10 +2078,12 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(param_types) = self.get_macro_param_types(macro_name_str) {
                     for (i, arg) in args.iter().enumerate() {
                         if let Some((param_name, type_str)) = param_types.get(i) {
-                            // キャッシュには Rust 形式の型文字列が保存されている
+                            // キャッシュには Rust 形式の型文字列が保存されている。
+                            // 中身は推論結果なので Propagated (Tier 4) として登録し、
+                            // apidoc 宣言 (Tier 3) を上書きしない。
                             let constraint = TypeEnvConstraint::new(
                                 arg.id,
-                                TypeRepr::from_rust_string(type_str),
+                                TypeRepr::from_rust_string_propagated(type_str),
                                 format!("arg {} ({}) of macro {}()", i, param_name, macro_name_str),
                             );
                             type_env.add_constraint(constraint);
@@ -2252,10 +2254,12 @@ impl<'a> SemanticAnalyzer<'a> {
         if let Some(param_types) = self.get_macro_param_types(func_name_str) {
             for (i, arg) in args.iter().enumerate() {
                 if let Some((param_name, type_str)) = param_types.get(i) {
-                    // キャッシュには Rust 形式の型文字列が保存されている
+                    // キャッシュには Rust 形式の型文字列が保存されている。
+                    // 中身は推論結果なので Propagated (Tier 4) として登録し、
+                    // apidoc 宣言 (Tier 3) を上書きしない。
                     let constraint = TypeEnvConstraint::new(
                         arg.id,
-                        TypeRepr::from_rust_string(type_str),
+                        TypeRepr::from_rust_string_propagated(type_str),
                         format!("arg {} ({}) of macro {}()", i, param_name, func_name_str),
                     );
                     type_env.add_constraint(constraint);

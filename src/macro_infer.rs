@@ -119,6 +119,14 @@ impl ExplicitExpandSymbols {
     }
 
     /// 全シンボルをイテレート
+    ///
+    /// 注: `mutable_ptr` は含めない。MUTABLE_PTR をインライン展開すると
+    /// `MUTABLE_SV(p)` 等の本体が `((SV*)({void*p_=(p);p_;}))` になり、
+    /// identity StmtExpr 越しに外側キャストがパラメータへ逆伝播して
+    /// `p: *mut SV` に狭まる (SAVECOMPPAD 等の呼び出し側で型不一致)。
+    /// 呼び出しとして保存すれば `MUTABLE_PTR(p: *mut c_void)` の引数制約から
+    /// `p: *mut c_void` が正しく付き、呼び出し側は cast_arg_syn_if_needed が
+    /// `as *mut c_void` を挿す。
     pub fn iter(&self) -> impl Iterator<Item = InternedStr> {
         [
             self.sv_any,
@@ -134,7 +142,6 @@ impl ExplicitExpandSymbols {
             self.int2ptr,
             self.assert_not_rok,
             self.assert_not_glob,
-            self.mutable_ptr,
         ].into_iter()
     }
 }
@@ -328,6 +335,12 @@ pub struct MacroInferInfo {
 
     /// bool を返すマクロか（依存順解析で確定）
     pub is_bool_return: bool,
+
+    /// Statement 本体が Rust fn として表現できない要素を含む:
+    /// ローカル宣言 (BlockItem::Decl — fn 内に落としても無意味) や、
+    /// typedef 名を値として使う式 (dTHXa 等の宣言マクロの誤パース跡)。
+    /// これが立っている場合は Statement 確定 (= fn 生成) を行わない。
+    pub stmt_unrepresentable: bool,
 }
 
 impl MacroInferInfo {
@@ -358,6 +371,7 @@ impl MacroInferInfo {
             resolved_return_type: None,
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
+            stmt_unrepresentable: false,
         }
     }
 
@@ -443,6 +457,29 @@ impl MacroInferInfo {
         }
 
         best.map(|(ty, _)| ty)
+    }
+
+    /// 複数文マクロで、全パラメータに型制約が集まっているか。
+    ///
+    /// Statement マクロの戻り値は定義上 `()` なので、ルート式の型制約
+    /// (Expression マクロの確定根拠) は存在しない。代わりに「引数側の
+    /// 制約が揃っていること」を確定条件にする (PAD_SET_CUR_NOSAVE 等)。
+    /// 制約の無いパラメータが残るものは従来どおり未確定に落とし、
+    /// `/* unknown */` 型のまま fn を emit してしまう事故を防ぐ。
+    pub fn is_statement_with_resolvable_params(&self) -> bool {
+        !self.stmt_unrepresentable
+            && matches!(self.parse_result, ParseResult::Statement(_))
+            && self.params.iter().all(|p| {
+                self.type_env.param_constraints.contains_key(&p.name)
+                    || self
+                        .type_env
+                        .param_to_exprs
+                        .get(&p.name)
+                        .is_some_and(|ids| {
+                            ids.iter()
+                                .any(|id| self.type_env.expr_constraints.contains_key(id))
+                        })
+            })
     }
 }
 
@@ -594,12 +631,17 @@ impl MacroInferContext {
             .copied()
             .collect();
 
-        // 使用マクロ数でソート
+        // 使用マクロ数でソート。第2キーに InternedStr (intern 順) を使い、
+        // HashSet 由来の順序揺れを排除する — 確定順が揺れると
+        // param_types_cache の内容が変わり、生成コードが run ごとに揺れる。
         candidates.sort_by_key(|name| {
-            self.macros
-                .get(name)
-                .map(|info| info.uses.len())
-                .unwrap_or(0)
+            (
+                self.macros
+                    .get(name)
+                    .map(|info| info.uses.len())
+                    .unwrap_or(0),
+                *name,
+            )
         });
 
         candidates
@@ -645,22 +687,25 @@ impl MacroInferContext {
 
             // パラメータの型を取得（param_to_exprs 経由）
             let type_str = if let Some(expr_ids) = info.type_env.param_to_exprs.get(&param.name) {
-                // 最初の非 void 型制約を使用
-                let mut found_type = None;
+                // 非 void 制約のうち最も確度の高い (tier 最小) ものを使用。
+                // 「最初に見つかったもの」だと symbol lookup (tier 4) が
+                // apidoc/コールサイト由来 (tier ≤ 3) を覆い隠し、伝播先の
+                // マクロが誤った型 (例: PADLIST 値渡し) を継承してしまう。
+                let mut best: Option<(&crate::type_repr::TypeRepr, u8)> = None;
                 for expr_id in expr_ids {
                     if let Some(constraints) = info.type_env.expr_constraints.get(expr_id) {
                         for c in constraints {
-                            if !c.ty.is_void() {
-                                found_type = Some(c.ty.to_rust_string(interner));
-                                break;
+                            if c.ty.is_void() {
+                                continue;
+                            }
+                            let tier = c.ty.confidence_tier();
+                            if best.is_none() || tier < best.unwrap().1 {
+                                best = Some((&c.ty, tier));
                             }
                         }
                     }
-                    if found_type.is_some() {
-                        break;
-                    }
                 }
-                found_type
+                best.map(|(ty, _)| ty.to_rust_string(interner))
             } else {
                 // フォールバック: param.expr の ExprId から取得
                 let expr_id = param.expr_id();
@@ -830,6 +875,27 @@ impl MacroInferContext {
             &expanded_tokens, interner, files, typedefs, generic_params,
         );
         info.parse_result = parse_result;
+
+        // 本体が Rust fn として表現できないか判定:
+        // - ローカル宣言 (fn 内に落ちても呼び出し側に届かず無意味)
+        // - typedef 名を値として使う式 — `PerlInterpreter *my_perl = (a)` の
+        //   ような宣言マクロ (dTHXa 等) が乗算/代入式に誤パースされた跡。
+        //   Expression としてパースされた場合 (セミコロンなし) も同様。
+        match &info.parse_result {
+            ParseResult::Statement(items) => {
+                info.stmt_unrepresentable = items.iter().any(|it| match it {
+                    BlockItem::Decl(_) => true,
+                    BlockItem::Stmt(crate::ast::Stmt::Expr(Some(e), _)) => {
+                        Self::expr_uses_typedef_as_value(e, typedefs)
+                    }
+                    BlockItem::Stmt(_) => false,
+                });
+            }
+            ParseResult::Expression(e) => {
+                info.stmt_unrepresentable = Self::expr_uses_typedef_as_value(e, typedefs);
+            }
+            ParseResult::Unparseable(_) => {}
+        }
         info.function_call_count = stats.function_call_count;
         info.deref_count = stats.deref_count;
 
@@ -995,6 +1061,80 @@ impl MacroInferContext {
                     analyzer.collect_stmt_constraints(stmt, &mut info.type_env);
                 }
             }
+
+            // デバッグ出力: 型制約の内容 (Expression 分岐と同等)
+            if is_debug {
+                eprintln!("  [type_env after collect_stmt_constraints]");
+                // (自身の apidoc param 制約は後段で追加される)
+                for (expr_id, constraints) in &info.type_env.expr_constraints {
+                    for c in constraints {
+                        eprintln!("    expr_id={:?}: {} ({})", expr_id, c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_constraints]");
+                for (param_id, constraints) in &info.type_env.param_constraints {
+                    for c in constraints {
+                        eprintln!("    param={}: {} ({})", interner.get(*param_id), c.ty.to_display_string(interner), c.context);
+                    }
+                }
+                eprintln!("  [param_to_exprs]");
+                for (param, expr_ids) in &info.type_env.param_to_exprs {
+                    eprintln!("    param={}: {:?}", interner.get(*param), expr_ids);
+                }
+            }
+        }
+
+        // マクロ自身の apidoc パラメータ宣言を Tier 3 の param 制約として登録。
+        // symbol table 経由 (symbol lookup, Tier 4) だけだと、呼び出し先マクロの
+        // apidoc 由来制約 (Tier 3) との競合に負ける (例: HvFILL の hv が
+        // MUTABLE_HV の void* に引きずられて型消失する)。
+        // apidoc の誤りは apidoc_patches (arg_type_override) 側で正す前提。
+        if let Some(apidoc_dict) = apidoc {
+            if let Some(entry) = apidoc_dict.get(macro_name_str) {
+                if let Some(info) = self.macros.get_mut(&name) {
+                    let decls: Vec<(InternedStr, crate::ast::ExprId, String)> = info
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, mp)| {
+                            entry
+                                .args
+                                .get(i)
+                                .filter(|a| !a.ty.is_empty())
+                                .map(|a| (mp.name, mp.expr_id(), a.ty.clone()))
+                        })
+                        .collect();
+                    for (pname, expr_id, ty_str) in decls {
+                        // from_apidoc_string の簡易パーサは "HV *const" (postfix
+                        // const) 等を Void に潰すため、本パーサ経由で読み、
+                        // 出所だけ Apidoc (Tier 3) に付け替える。
+                        let mut tr =
+                            TypeRepr::from_c_type_string(&ty_str, interner, files, typedefs);
+                        if let TypeRepr::CType { source, .. } = &mut tr {
+                            *source = crate::type_repr::CTypeSource::Apidoc {
+                                raw: ty_str.clone(),
+                            };
+                        }
+                        if tr.is_void() {
+                            continue; // パース不能 (可変長引数 "..." 等) は登録しない
+                        }
+                        if is_debug {
+                            eprintln!(
+                                "  [apidoc param decl] {}: {:?} (from {:?})",
+                                interner.get(pname), tr, ty_str
+                            );
+                        }
+                        info.type_env.add_param_constraint(
+                            pname,
+                            TypeConstraint::new(
+                                expr_id,
+                                tr,
+                                format!("apidoc param decl of {}", macro_name_str),
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1037,6 +1177,17 @@ impl MacroInferContext {
             }
         }
         false
+    }
+
+    /// 複数文パース結果から空文 (`;` 単体 = Stmt::Expr(None)) を除く。
+    /// 空定義マクロ (非 DEBUGGING の DEBUG_Xv 等) の呼び出しを
+    /// preprocessor が消した跡に残るセミコロン対策。
+    fn strip_empty_stmts(items: Vec<BlockItem>) -> Vec<BlockItem> {
+        use crate::ast::Stmt;
+        items
+            .into_iter()
+            .filter(|it| !matches!(it, BlockItem::Stmt(Stmt::Expr(None, _))))
+            .collect()
     }
 
     /// トークン列を式または文としてパース試行
@@ -1095,7 +1246,7 @@ impl MacroInferContext {
                 match parse_block_items_from_tokens_ref_with_stats(tokens.to_vec(), interner, files, typedefs) {
                     Ok((items, stats)) => {
                         return (
-                            ParseResult::Statement(items),
+                            ParseResult::Statement(Self::strip_empty_stmts(items)),
                             stats,
                             HashSet::new(),
                         );
@@ -1106,7 +1257,7 @@ impl MacroInferContext {
                 match parse_block_items_from_tokens_ref_with_generic_params(tokens.to_vec(), interner, files, typedefs, generic_params.clone()) {
                     Ok((items, stats, detected)) => {
                         return (
-                            ParseResult::Statement(items),
+                            ParseResult::Statement(Self::strip_empty_stmts(items)),
                             stats,
                             detected,
                         );
@@ -1639,8 +1790,10 @@ impl MacroInferContext {
         loop {
             let candidates = self.get_inference_candidates();
             if candidates.is_empty() {
-                // 残りの未確定マクロにも型推論を実行（apidoc 情報を適用するため）
-                let remaining: Vec<_> = self.unconfirmed.iter().copied().collect();
+                // 残りの未確定マクロにも型推論を実行（apidoc 情報を適用するため）。
+                // HashSet 順序の揺れを排除するためソートする (決定的生成)。
+                let mut remaining: Vec<_> = self.unconfirmed.iter().copied().collect();
+                remaining.sort();
                 for name in remaining {
                     // パラメータを取得
                     let params: Vec<InternedStr> = macro_table
@@ -1657,9 +1810,16 @@ impl MacroInferContext {
                         &return_types_cache, &param_types_cache,
                     );
 
-                    // apidoc から型が確定した場合は confirmed に
+                    // apidoc から型が確定した場合は confirmed に。
+                    // Statement マクロは戻り値 () 固定なので、引数制約が
+                    // 揃っていれば確定とする。
+                    // 本体が Rust fn として表現不能 (宣言マクロ等) なら確定させない。
                     let is_confirmed = self.macros.get(&name)
-                        .map(|info| info.get_return_type().is_some())
+                        .map(|info| {
+                            !info.stmt_unrepresentable
+                                && (info.get_return_type().is_some()
+                                    || info.is_statement_with_resolvable_params())
+                        })
                         .unwrap_or(false);
 
                     if is_confirmed {
@@ -1695,8 +1855,13 @@ impl MacroInferContext {
                 let is_confirmed = self.macros.get(&name)
                     .map(|info| {
                         // 戻り値型が決まっていれば confirmed とする
-                        // MacroInferInfo::get_return_type() を使用（ルート式の型も考慮）
-                        info.get_return_type().is_some()
+                        // MacroInferInfo::get_return_type() を使用（ルート式の型も考慮）。
+                        // Statement マクロは戻り値 () 固定なので、引数制約が
+                        // 揃っていれば確定とする。
+                        // 本体が Rust fn として表現不能 (宣言マクロ等) なら確定させない。
+                        !info.stmt_unrepresentable
+                            && (info.get_return_type().is_some()
+                                || info.is_statement_with_resolvable_params())
                     })
                     .unwrap_or(false);
 
@@ -1715,6 +1880,54 @@ impl MacroInferContext {
 
         // ローカルキャッシュを self.macro_param_types に同期
         self.macro_param_types = param_types_cache;
+    }
+
+    /// 式が typedef 名を「値」として参照しているか (再帰)。
+    ///
+    /// `sizeof(T)` / キャストの型部は値使用ではないので走査しない。
+    /// collect_uses_from_expr と同じ走査形だが、目的が異なるので分ける。
+    pub fn expr_uses_typedef_as_value(expr: &Expr, typedefs: &HashSet<InternedStr>) -> bool {
+        match &expr.kind {
+            ExprKind::Ident(name) => typedefs.contains(name),
+            ExprKind::Call { func, args } => {
+                // 関数位置の Ident は値使用とみなさない (呼び出し名)
+                let func_hit = match &func.kind {
+                    ExprKind::Ident(_) => false,
+                    _ => Self::expr_uses_typedef_as_value(func, typedefs),
+                };
+                func_hit || args.iter().any(|a| Self::expr_uses_typedef_as_value(a, typedefs))
+            }
+            ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Assign { lhs, rhs, .. }
+            | ExprKind::Comma { lhs, rhs } => {
+                Self::expr_uses_typedef_as_value(lhs, typedefs)
+                    || Self::expr_uses_typedef_as_value(rhs, typedefs)
+            }
+            ExprKind::Cast { expr: inner, .. }
+            | ExprKind::PreInc(inner)
+            | ExprKind::PreDec(inner)
+            | ExprKind::PostInc(inner)
+            | ExprKind::PostDec(inner)
+            | ExprKind::AddrOf(inner)
+            | ExprKind::Deref(inner)
+            | ExprKind::UnaryPlus(inner)
+            | ExprKind::UnaryMinus(inner)
+            | ExprKind::BitNot(inner)
+            | ExprKind::LogNot(inner) => Self::expr_uses_typedef_as_value(inner, typedefs),
+            ExprKind::Index { expr: base, index } => {
+                Self::expr_uses_typedef_as_value(base, typedefs)
+                    || Self::expr_uses_typedef_as_value(index, typedefs)
+            }
+            ExprKind::Member { expr: base, .. } | ExprKind::PtrMember { expr: base, .. } => {
+                Self::expr_uses_typedef_as_value(base, typedefs)
+            }
+            ExprKind::Conditional { cond, then_expr, else_expr } => {
+                Self::expr_uses_typedef_as_value(cond, typedefs)
+                    || Self::expr_uses_typedef_as_value(then_expr, typedefs)
+                    || Self::expr_uses_typedef_as_value(else_expr, typedefs)
+            }
+            _ => false,
+        }
     }
 
     /// 式から使用される関数/マクロを再帰的に収集
@@ -2973,7 +3186,7 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 14);
+        assert_eq!(syms.len(), 13);
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.cv_flags));
@@ -2986,6 +3199,9 @@ mod tests {
         assert!(syms.contains(&symbols.str_with_len));
         assert!(syms.contains(&symbols.assert_not_rok));
         assert!(syms.contains(&symbols.assert_not_glob));
-        assert!(syms.contains(&symbols.mutable_ptr));
+        // MUTABLE_PTR は明示展開しない (iter のコメント参照):
+        // インライン展開すると外側キャストの逆伝播で MUTABLE_SV 系の
+        // パラメータ型が誤って狭まるため、呼び出しとして保存する。
+        assert!(!syms.contains(&symbols.mutable_ptr));
     }
 }

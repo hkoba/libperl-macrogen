@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
 /// インターン済み文字列の識別子
-#[derive(Clone, Copy, Eq, PartialEq, Hash, Debug, Default)]
+///
+/// Ord は intern 順 (= 入力の出現順) による決定的な全順序。HashSet/HashMap
+/// 由来の非決定順序を排除するためのソートキーに使う (推論の確定順が揺れると
+/// 型伝播キャッシュ経由で生成コードまで run ごとに揺れる)。
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct InternedStr(u32);
 
 impl InternedStr {
