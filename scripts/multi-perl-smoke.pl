@@ -308,9 +308,12 @@ for my $check (@bound_checks) {
 
 # ── assertion: thx ─────────────────────────────────────────
 if ($threaded) {
+    # 生成されなかった名前は must-generate 側で報告済みなので、
+    # thx 検査は実際に生成された名前の doc 行だけを見る (二重報告を防ぐ)
     my @missing = grep {
         my $n = $_;
-        $generated !~ /^\/\/\/ \Q$n\E \[THX\]/m;
+        fn_generated($n, $generated)
+            && $generated !~ /^\/\/\/ \Q$n\E \[THX\]/m;
     } @thx_required;
     record_checked('thx',
         $counts{thx_markers} > 0 && !@missing,

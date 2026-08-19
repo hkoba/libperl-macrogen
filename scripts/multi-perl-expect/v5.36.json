@@ -1,22 +1,22 @@
 {
   "comment": [
-    "非 threaded bounds は 2026-08-19 の podman leg 実測 (suppressed=13,",
-    "unresolved=98, fn=1532) + headroom。threaded 側は Phase 6 (全範囲",
+    "bounds は 2026-08-19 の podman leg 実測 (non-threaded: suppressed=13,",
+    "unresolved=98, fn=1532) + headroom。threaded 側 bounds は Phase 6 (全範囲",
     "baseline 採取) で設定する。"
+  ],
+  "known_failures": {
+    "must_generate": ["OP_CLASS"]
+  },
+  "known_failures_comment": [
+    "OP_CLASS: 依存先 XopENTRYCUSTOM が 5.36 で生成されない",
+    "(CASCADE_UNAVAILABLE、threaded / non-threaded 両モードで発生)。",
+    "5.42 では生成されるため版固有。原因調査は green 化フェーズ (Phase 9)。"
   ],
   "non-threaded": {
     "bounds": {
       "codegen_suppressed_max": 20,
       "unresolved_names_max": 115,
       "generated_fn_min": 1370
-    },
-    "known_failures": {
-      "must_generate": ["OP_CLASS"]
-    },
-    "known_failures_comment": [
-      "OP_CLASS: 依存先 XopENTRYCUSTOM が 5.36 非 threaded で生成されない",
-      "(CASCADE_UNAVAILABLE)。5.42 非 threaded では生成されるため版固有。",
-      "原因調査は green 化フェーズ (Phase 9) で行う。"
-    ]
+    }
   }
 }

@@ -1,22 +1,29 @@
 #!/bin/bash
 # multi-perl-inner.sh — perl:X.Y コンテナ内で実行される glue。
-# scripts/multi-perl.zsh から起動される (直接手で叩いても動く)。
+# scripts/multi-perl.tcl から起動される (直接手で叩いても動く)。
 #
-# usage: multi-perl-inner.sh {smoke|shell} [-- macrogen への追加引数...]
+# usage: multi-perl-inner.sh {smoke|downstream|shell} [-- macrogen への追加引数...]
 #
 # 期待するマウント:
 #   /app               macrogen working tree
 #   /opt/rust          共有 RUSTUP_HOME + CARGO_HOME (全コンテナ共通、初回のみ rustup install)
 #   /cargo-target-root macrogen の CARGO_TARGET_DIR 置き場 (Debian codename 別に共有)
 #   /out               この leg の成果物出力先
+#   /downstream        (downstream のみ) libperl-rs の scratch copy
+#                      ([patch.crates-io] で libperl-macrogen -> /app 済み)
+#   /downstream-target (downstream のみ) leg 別 CARGO_TARGET_DIR
 # 環境変数 (wrapper が設定):
-#   MP_LEG           例 5.36-non-threaded (--require に渡す)
-#   MP_SHELL_ON_FAIL 1 なら検査失敗時に対話 shell へ
-#   MP_BASELINE      1 なら --baseline
-#   MP_STRICT        1 なら --strict
+#   MP_LEG             例 5.36-non-threaded (--require に渡す)
+#   MP_SHELL_ON_FAIL   1 なら検査失敗時に対話 shell へ
+#   MP_BASELINE        1 なら --baseline
+#   MP_STRICT          1 なら --strict
+#   MP_USE_ARCHIVE     auto|yes|no: EOL Debian の apt を archive.debian.org へ
+#                      書き換えるか (auto = stretch/buster のとき)
+#   MP_DOWNSTREAM_TEST 1 なら downstream で cargo test --workspace も実行
 #
 # スモーク経路は apt を使わない (curl/gcc は buildpack-deps に同梱)。
 # これにより apt リポジトリが EOL の古いイメージ (buster 等) でも素で動く。
+# apt が要るのは downstream (bindgen 用 clang/libclang) だけ。
 
 set -u
 
@@ -48,18 +55,18 @@ cd /app || exit 1
 
 echo "== multi-perl-inner: perl=$(perl -e 'print $]') codename=$codename leg=${MP_LEG:-unset} =="
 
-cargo build || exit 1
-
 # apidoc cache は leg 毎に隔離 (cache key が APIDOC_DATA_VERSION のみのため、
 # apidoc データ編集中の leg 間汚染を防ぐ。成果物としても残る)
 export LIBPERL_APIDOC_CACHE_DIR=/out/apidoc-cache
 
 case $subcmd in
     shell)
+        cargo build || exit 1
         echo "== multi-perl-inner: interactive shell (workspace /app, out /out) =="
         exec bash -l
         ;;
     smoke)
+        cargo build || exit 1
         args=(--require "${MP_LEG:?MP_LEG not set}" --out /out)
         [ "${MP_BASELINE:-0}" = 1 ] && args+=(--baseline)
         [ "${MP_STRICT:-0}" = 1 ] && args+=(--strict)
@@ -76,8 +83,68 @@ case $subcmd in
         fi
         exit $st
         ;;
+    downstream)
+        # ── apt: bindgen 用の clang/libclang (この層だけ) ──
+        use_archive=${MP_USE_ARCHIVE:-auto}
+        apt_opts=()
+        if [ "$use_archive" = yes ] || { [ "$use_archive" = auto ] && \
+             { [ "$codename" = stretch ] || [ "$codename" = buster ]; }; }; then
+            echo "== multi-perl-inner: rewriting apt sources to archive.debian.org ($codename) =="
+            cat > /etc/apt/sources.list <<EOF
+deb http://archive.debian.org/debian/ $codename main
+deb http://archive.debian.org/debian-security/ $codename/updates main
+EOF
+            apt_opts=(-o Acquire::Check-Valid-Until=false)
+        fi
+        apt-get "${apt_opts[@]}" update || exit 1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            llvm-dev libclang-dev clang || exit 1
+
+        export CARGO_TARGET_DIR=/downstream-target
+        cd /downstream/libperl-sys || exit 1
+
+        # scratch の Cargo.lock が crates.io 版 macrogen を pin したままだと
+        # semver 互換な [patch.crates-io] は適用されない ([[patch.unused]])。
+        # patch 先 (path = /app) へ明示的に更新し、適用を検証する
+        cargo update -p libperl-macrogen
+        if ! cargo tree -p libperl-sys 2>/dev/null | grep -q 'libperl-macrogen v[0-9.]* (/app)'; then
+            echo "FATAL: [patch.crates-io] libperl-macrogen -> /app が効いていない" >&2
+            cargo tree -p libperl-sys 2>/dev/null | grep libperl-macrogen >&2 || true
+            exit 1
+        fi
+
+        set -o pipefail
+        cargo build 2>&1 | tee /out/build-error.log
+        st=$?
+        if [ $st -eq 0 ] && [ "${MP_DOWNSTREAM_TEST:-0}" = 1 ]; then
+            (cd /downstream && cargo test --workspace 2>&1 | tee /out/downstream-test.log)
+            st=$?
+        fi
+        set +o pipefail
+
+        # ── 成否に関わらず生成物を回収 (vpatches ツールの入力になる) ──
+        gen=$(perl -nle 'm,--> (\S+/out/macro_bindings\.rs):, and print $1 and exit' \
+              /out/build-error.log 2>/dev/null || true)
+        if [ -z "$gen" ]; then
+            gen=$(find "$CARGO_TARGET_DIR"/debug/build -name macro_bindings.rs 2>/dev/null | head -1)
+        fi
+        if [ -n "$gen" ] && [ -f "$gen" ]; then
+            cp -v "$gen" /out/macro_bindings.rs
+            [ -f "${gen%/*}/bindings.rs" ] && cp -v "${gen%/*}/bindings.rs" /out/bindings.rs
+        else
+            echo "== multi-perl-inner: macro_bindings.rs not found (build died before macrogen?) =="
+        fi
+
+        if [ $st -ne 0 ] && [ "${MP_SHELL_ON_FAIL:-0}" = 1 ] && [ -t 0 ]; then
+            echo
+            echo "== downstream FAILED (exit $st) — interactive shell =="
+            echo "   downstream tree: /downstream/libperl-sys   results: /out"
+            exec bash -l
+        fi
+        exit $st
+        ;;
     *)
-        echo "unknown subcommand: $subcmd (expected smoke|shell)" >&2
+        echo "unknown subcommand: $subcmd (expected smoke|downstream|shell)" >&2
         exit 2
         ;;
 esac
