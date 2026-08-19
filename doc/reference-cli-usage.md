@@ -19,6 +19,11 @@ cargo run -- --auto -E --gcc-format samples/xs-wrapper.h
 ```
 
 The `--auto` option automatically retrieves include paths and defines from Perl's `Config.pm`.
+`-I` は `--auto` と併用でき、追加のインクルードパスとして auto 設定の後にマージされる。
+ビルド済み perl (actions-setup-perl / 古い perl-build 製) の `$Config{incpth}` が
+実行環境の gcc と食い違って stddef.h 等が見つからない場合は
+`-I "$(cc -print-file-name=include)"` を補うこと
+(`scripts/multi-perl-smoke.pl` はこれを自動で行う)。
 
 ## Testing Rust Function Generation (--gen-rust)
 
@@ -75,6 +80,26 @@ cargo run -- -E \
   -D_LP64 \
   samples/xs-wrapper.h
 ```
+
+## Codegen List Options
+
+- `--skip-codegen-list <FILE>`: codegen を抑制する関数名リスト (1 行 1 名、`#` コメント可、複数指定可)。
+  運用ポリシーは CLAUDE.md の「skip_codegen 運用ポリシー」を参照
+- `--require-codegen-list <FILE>`: **必ず生成されるべき**関数名リスト (書式は同上、複数指定可)。
+  生成されなかった名前があれば、名前ごとの理由 (CASCADE_UNAVAILABLE の依存先、
+  apidoc 宣言なし、CODEGEN_SUPPRESSED の patch reason 等) を stderr に表示して
+  exit 1 する。**出力自体は最後まで書き切られる** (診断に使えるように)。
+  同名が skip リストにも載っている設定矛盾は起動時に即エラー。
+  partial eval 必須 API セットは `samples/require-partial-eval.txt`
+
+```bash
+cargo run -- samples/xs-wrapper.h --auto --gen-rust --bindings samples/bindings.rs \
+  --require-codegen-list samples/require-partial-eval.txt
+```
+
+Pipeline API からは `PipelineBuilder::with_require_codegen_list()` /
+`GeneratedPipeline::report` (CodegenReport) が対応する
+(違反は `PipelineError::RequireCodegen`)。
 
 ## Macro Tracking CLI Options
 

@@ -14,9 +14,34 @@
 
 The target Perl C header files (e.g., `sv.h`, `inline.h`, `perl.h`, `handy.h`) are located at `/usr/lib64/perl5/CORE/`. When investigating how Perl C macros or inline functions work, check these headers directly.
 
-検証用の非 threaded perl は `tmp/perls/v5.42.2/bin/perl` に用意されている。
-ヘッダ・libperl も同梱。`PATH=$PWD/tmp/perls/v5.42.2/bin:$PATH ...` で対象
+検証用の非 threaded perl は `tmp/perls/v5.42.3/bin/perl` に用意されている
+(無ければ `perl-build -j 8 --noman 5.42.3 $PWD/tmp/perls/v5.42.3` で再構築)。
+ヘッダ・libperl も同梱。`PATH=$PWD/tmp/perls/v5.42.3/bin:$PATH ...` で対象
 perl を切り替えてビルド検証できる。
+**注意**: 過去にビルドした perl は `$Config{incpth}` に当時の gcc パスを
+埋め込んでおり、ホストの gcc 更新後は preprocess が失敗する (stddef.h 不明)。
+その場合は perl を作り直すか `-I "$(cc -print-file-name=include)"` を補う。
+
+## 複数バージョン Perl テスト
+
+対象範囲は偶数マイナー **5.20〜5.42 × {threaded, non-threaded}**
+(5.44 は apidoc データ未対応 — issue #6)。詳細は
+[doc/multi-perl-testing.md](doc/multi-perl-testing.md)。
+
+```bash
+scripts/multi-perl.tcl 5.30-threaded          # podman で 1 leg スモーク
+scripts/multi-perl.tcl --downstream 5.30-threaded  # libperl-sys ビルドまで
+perl scripts/multi-perl-smoke.pl --require 5.42-threaded  # ホスト perl 直接
+```
+
+- 期待値は `scripts/multi-perl-expect/` (known_failures = XFAIL で既知 red を
+  可視化したまま green 運用。解消したら XPASS 警告が出るので引き締める)
+- **必須生成リスト**: `--require-codegen-list samples/require-partial-eval.txt`
+  で partial eval 必須 API (Cv 一族等) の生成を保証。生成できない場合は
+  理由付きで exit 1。その版の Perl に存在しない API は期待値の
+  `must_not_generate` (正当な不在) に登録し、無理に生成しない
+- golden 回帰テスト (`tests/rust_codegen_regression.rs`) は基準 perl
+  (5.42-threaded) 固定で、他版では自動 skip (`MACROGEN_GOLDEN_FORCE=1` で強制)
 
 ## TinyCC Reference Rule
 
