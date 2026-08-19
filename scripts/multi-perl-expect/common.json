@@ -49,5 +49,16 @@
     "codegen_suppressed_max": null,
     "unresolved_names_max": null,
     "generated_fn_min": null
+  },
+  "non-threaded": {
+    "comment": [
+      "threaded スナップショットの samples/bindings.rs には非 threaded の",
+      "PL_* interpreter 変数が無い (bindgen 既知制限、",
+      "doc/verification-non-threaded-build.md 参照)。全バージョンの非 threaded",
+      "leg に共通で効く。版別 bindings が用意できたら外す。"
+    ],
+    "known_failures": {
+      "must_generate": ["Perl_cx_topblock", "AMG_CALLunary"]
+    }
   }
 }

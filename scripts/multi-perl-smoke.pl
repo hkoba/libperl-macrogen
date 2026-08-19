@@ -171,30 +171,26 @@ my $expect = -f $common_file ? $json->decode(slurp($common_file)) : {};
 my $overlay_file = File::Spec->catfile($opt{expect}, "v$ver_major.$ver_minor.json");
 my $overlay = -f $overlay_file ? $json->decode(slurp($overlay_file)) : {};
 
-# overlay はモード別サブセクション ("threaded" / "non-threaded", 同スキーマ)
-# を持てる。マージ順: common → overlay 直下 → overlay->{当該モード}
-my $mode_overlay = $overlay->{$mode_name} || {};
+# common / overlay ともモード別サブセクション ("threaded" / "non-threaded",
+# 同スキーマ) を持てる。マージ順 (後勝ち):
+#   common 直下 → common->{当該モード} → overlay 直下 → overlay->{当該モード}
+# 例: threaded スナップショット bindings.rs 起因の非 threaded 共通制限は
+# common の "non-threaded" に、版固有の失敗は v5.X.json 側に置く。
+my @layers = ( $expect, $expect->{$mode_name} || {},
+               $overlay, $overlay->{$mode_name} || {} );
 
 my @must_generate = (
-    @{ $expect->{must_generate}             || [] },
-    @{ $overlay->{must_generate_extra}      || [] },
-    @{ $mode_overlay->{must_generate_extra} || [] },
+    @{ $expect->{must_generate} || [] },
+    map { @{ $_->{must_generate_extra} || [] } } @layers,
 );
-my @must_not_generate = (
-    @{ $overlay->{must_not_generate}      || [] },
-    @{ $mode_overlay->{must_not_generate} || [] },
-);
+my @must_not_generate = map { @{ $_->{must_not_generate} || [] } } @layers;
 my @thx_required = @{ $expect->{thx_required} || [] };
-my %bounds = ( %{ $expect->{bounds}       || {} },
-               %{ $overlay->{bounds}      || {} },
-               %{ $mode_overlay->{bounds} || {} } );
+my %bounds = map { %{ $_->{bounds} || {} } } @layers;
 
-my $known      = $overlay->{known_failures}      || {};
-my $mode_known = $mode_overlay->{known_failures} || {};
 %xfail_must_gen = map { ($_ => 1) }
-    (@{ $known->{must_generate} || [] }, @{ $mode_known->{must_generate} || [] });
+    map { @{ ($_->{known_failures} || {})->{must_generate} || [] } } @layers;
 %xfail_assert = map { ($_ => 1) }
-    (@{ $known->{assertions} || [] }, @{ $mode_known->{assertions} || [] });
+    map { @{ ($_->{known_failures} || {})->{assertions} || [] } } @layers;
 
 record('expect', 'INFO', sprintf(
     "common=%s overlay=%s (must_generate=%d, known_failures: %d names, %d assertions)",

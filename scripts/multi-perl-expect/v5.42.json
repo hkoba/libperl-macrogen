@@ -11,14 +11,9 @@
   },
   "non-threaded": {
     "comment": [
-      "threaded スナップショットの samples/bindings.rs には非 threaded の",
-      "PL_* interpreter 変数が無い (bindgen 既知制限、",
-      "doc/verification-non-threaded-build.md 参照) ため未解決が増える。",
-      "版別 bindings が用意できたら known_failures を外し bounds を締める。"
+      "非 threaded の未解決増加は common.json の non-threaded 節に記載の",
+      "bindings.rs 既知制限による (実測 117)。"
     ],
-    "bounds": { "unresolved_names_max": 140 },
-    "known_failures": {
-      "must_generate": ["Perl_cx_topblock", "AMG_CALLunary"]
-    }
+    "bounds": { "unresolved_names_max": 140 }
   }
 }

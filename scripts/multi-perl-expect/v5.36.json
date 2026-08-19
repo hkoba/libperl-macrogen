@@ -1,7 +1,22 @@
 {
   "comment": [
-    "placeholder: bounds は Phase 6 (全範囲 baseline 採取) で",
-    "`scripts/multi-perl.zsh 5.36 --baseline` の実測から設定する。",
-    "それまで bounds は common の null (report-only) を引き継ぐ。"
-  ]
+    "非 threaded bounds は 2026-08-19 の podman leg 実測 (suppressed=13,",
+    "unresolved=98, fn=1532) + headroom。threaded 側は Phase 6 (全範囲",
+    "baseline 採取) で設定する。"
+  ],
+  "non-threaded": {
+    "bounds": {
+      "codegen_suppressed_max": 20,
+      "unresolved_names_max": 115,
+      "generated_fn_min": 1370
+    },
+    "known_failures": {
+      "must_generate": ["OP_CLASS"]
+    },
+    "known_failures_comment": [
+      "OP_CLASS: 依存先 XopENTRYCUSTOM が 5.36 非 threaded で生成されない",
+      "(CASCADE_UNAVAILABLE)。5.42 非 threaded では生成されるため版固有。",
+      "原因調査は green 化フェーズ (Phase 9) で行う。"
+    ]
+  }
 }
