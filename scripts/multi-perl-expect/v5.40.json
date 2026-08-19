@@ -3,25 +3,20 @@
       "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
       "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
       "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
-      "実測 counts: threaded fn=1643 unresolved=31 / non-threaded fn=1532 unresolved=98"
+      "実測 counts: threaded fn=1868 unresolved=24 / non-threaded fn=1673 unresolved=119"
    ],
-   "known_failures" : {
-      "must_generate" : [
-         "OP_CLASS"
-      ]
-   },
    "non-threaded" : {
       "bounds" : {
-         "codegen_suppressed_max" : 18,
-         "generated_fn_min" : 1378,
-         "unresolved_names_max" : 116
+         "codegen_suppressed_max" : 5,
+         "generated_fn_min" : 1505,
+         "unresolved_names_max" : 140
       }
    },
    "threaded" : {
       "bounds" : {
-         "codegen_suppressed_max" : 18,
-         "generated_fn_min" : 1478,
-         "unresolved_names_max" : 39
+         "codegen_suppressed_max" : 5,
+         "generated_fn_min" : 1681,
+         "unresolved_names_max" : 31
       }
    }
 }

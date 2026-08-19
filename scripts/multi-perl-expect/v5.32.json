@@ -1,0 +1,36 @@
+{
+   "comment" : [
+      "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
+      "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
+      "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
+      "実測 counts: threaded fn=1419 unresolved=30 / non-threaded fn=1346 unresolved=85"
+   ],
+   "known_failures" : {
+      "must_generate" : [
+         "CvDEPTH",
+         "CvFILE",
+         "CvISXSUB",
+         "CvPADLIST",
+         "CvROOT",
+         "CvSTART",
+         "CvSTASH",
+         "HvFILL",
+         "OP_CLASS",
+         "newSVpvs"
+      ]
+   },
+   "non-threaded" : {
+      "bounds" : {
+         "codegen_suppressed_max" : 54,
+         "generated_fn_min" : 1211,
+         "unresolved_names_max" : 101
+      }
+   },
+   "threaded" : {
+      "bounds" : {
+         "codegen_suppressed_max" : 54,
+         "generated_fn_min" : 1277,
+         "unresolved_names_max" : 38
+      }
+   }
+}

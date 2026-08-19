@@ -184,10 +184,18 @@ my @must_generate = (
     map { @{ $_->{must_generate_extra} || [] } } @layers,
 );
 my @must_not_generate = map { @{ $_->{must_not_generate} || [] } } @layers;
+# must_not_generate は二重の意味を持つ: (a) 生成されないことの検査、
+# (b) common の must_generate からの除外。この版の Perl にその名前の API が
+# 存在しない (embed.fnc に無い等) 場合の正当な不在を表す。
+# 「直すべき失敗」は known_failures (XFAIL) の側に置くこと
+my %must_not = map { ($_ => 1) } @must_not_generate;
+@must_generate = grep { !$must_not{$_} } @must_generate;
 my @thx_required = @{ $expect->{thx_required} || [] };
 my %bounds = map { %{ $_->{bounds} || {} } } @layers;
 
+# must_not_generate で除外された名前は xfail 側からも除く (二重報告防止)
 %xfail_must_gen = map { ($_ => 1) }
+    grep { !$must_not{$_} }
     map { @{ ($_->{known_failures} || {})->{must_generate} || [] } } @layers;
 %xfail_assert = map { ($_ => 1) }
     map { @{ ($_->{known_failures} || {})->{assertions} || [] } } @layers;
