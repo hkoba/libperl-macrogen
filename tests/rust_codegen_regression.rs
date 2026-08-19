@@ -193,16 +193,41 @@ fn load_expected(fn_name: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))
 }
 
+/// 実行環境の cc の内部 include dir を返す (存在しなければ None)。
+/// ビルド済み perl (actions-setup-perl 等) の $Config{incpth} はビルド時の
+/// gcc パスを埋め込んでおり、実行環境の gcc と食い違うと stddef.h が
+/// 見つからないため、-I で補う (scripts/multi-perl-smoke.pl と同じ対策)
+fn cc_include_dir() -> Option<String> {
+    for cc in ["cc", "gcc"] {
+        let Ok(output) = Command::new(cc).arg("-print-file-name=include").output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !dir.is_empty() && Path::new(&dir).is_dir() {
+            return Some(dir);
+        }
+    }
+    None
+}
+
 /// cargo run で Rust コードを生成する
 fn generate_rust_code() -> Result<String, String> {
+    let mut args = vec![
+        "run".to_string(), "--".to_string(),
+        "--auto".to_string(),
+        "--gen-rust".to_string(),
+        "samples/xs-wrapper.h".to_string(),
+        "--bindings".to_string(), "samples/bindings.rs".to_string(),
+    ];
+    if let Some(dir) = cc_include_dir() {
+        args.push("-I".to_string());
+        args.push(dir);
+    }
     let output = Command::new("cargo")
-        .args([
-            "run", "--",
-            "--auto",
-            "--gen-rust",
-            "samples/xs-wrapper.h",
-            "--bindings", "samples/bindings.rs",
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("Failed to run cargo: {}", e))?;
 
