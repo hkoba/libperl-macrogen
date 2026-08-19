@@ -1,0 +1,53 @@
+{
+  "comment": [
+    "全バージョン・全モード共通の契約。版別の緩和は v<major>.<minor>.json の",
+    "overlay (must_generate_extra / must_not_generate / bounds / known_failures)",
+    "で行い、このファイルを緩める変更には正当化が必要。",
+    "must_generate の先頭 5 つは partial eval 必須 API",
+    "(samples/require-partial-eval.txt と同期; doc/plan/todo-2026-08-19.md)、",
+    "残りは golden 回帰テスト (tests/rust_codegen_regression.rs) の対象関数。",
+    "bounds は版依存なので common では未設定 (null = report-only)。"
+  ],
+  "must_generate": [
+    "CvFILE",
+    "CvROOT",
+    "CvSTART",
+    "CvPADLIST",
+    "CvISXSUB",
+    "Perl_CvDEPTH",
+    "Perl_cx_topblock",
+    "OP_CLASS",
+    "CvDEPTH",
+    "CvGV",
+    "CvSTASH",
+    "CopFILE",
+    "CopFILEAV",
+    "CopLABEL",
+    "HvFILL",
+    "PerlIO_seek",
+    "PerlIO_tell",
+    "AMG_CALLunary",
+    "newSVpvs",
+    "sv_upgrade",
+    "SvOK_off",
+    "SvIOK_only_UV"
+  ],
+  "thx_required": [
+    "Perl_cx_topblock",
+    "OP_CLASS",
+    "CvGV",
+    "CopFILEAV",
+    "CopLABEL",
+    "HvFILL",
+    "PerlIO_seek",
+    "PerlIO_tell",
+    "AMG_CALLunary",
+    "newSVpvs",
+    "sv_upgrade"
+  ],
+  "bounds": {
+    "codegen_suppressed_max": null,
+    "unresolved_names_max": null,
+    "generated_fn_min": null
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "comment": [
+    "placeholder: bounds は Phase 6 (全範囲 baseline 採取) で",
+    "`scripts/multi-perl.zsh 5.36 --baseline` の実測から設定する。",
+    "それまで bounds は common の null (report-only) を引き継ぐ。"
+  ]
+}

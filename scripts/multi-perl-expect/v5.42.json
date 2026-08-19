@@ -1,0 +1,24 @@
+{
+  "comment": [
+    "基準版 (システム perl 5.42.3-threaded / tmp/perls/v5.42.3 非 threaded で確認)。",
+    "bounds は 2026-08-19 の実測 (threaded: suppressed=1, unresolved=25, fn=1887 /",
+    "non-threaded: unresolved=117, fn=1707) + headroom。--baseline の出力で更新できる。"
+  ],
+  "bounds": {
+    "codegen_suppressed_max": 5,
+    "unresolved_names_max": 32,
+    "generated_fn_min": 1690
+  },
+  "non-threaded": {
+    "comment": [
+      "threaded スナップショットの samples/bindings.rs には非 threaded の",
+      "PL_* interpreter 変数が無い (bindgen 既知制限、",
+      "doc/verification-non-threaded-build.md 参照) ため未解決が増える。",
+      "版別 bindings が用意できたら known_failures を外し bounds を締める。"
+    ],
+    "bounds": { "unresolved_names_max": 140 },
+    "known_failures": {
+      "must_generate": ["Perl_cx_topblock", "AMG_CALLunary"]
+    }
+  }
+}
