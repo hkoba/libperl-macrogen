@@ -1,0 +1,65 @@
+# フル matrix スモーク: 偶数マイナー 5.20〜5.42 × {threaded, non-threaded}。
+# 期待値 (scripts/multi-perl-expect/) の known_failures により既知の red は
+# XFAIL として green になる。真の退行 (新しい失敗) だけが fail する。
+#
+# NOTE: perl '5' (現在 5.44) は同梱 apidoc データが 5.42 までのため除外
+# (resolve_apidoc_path が exact match 必須 — macrogen issue #6)。
+# apidoc/v5.44.json 追加後に matrix へ戻すこと。
+#
+# NOTE: 5.20/5.22 の actions-setup-perl prebuilt が現行 runner に無い場合は、
+# 当該 leg を container: perl:5.2x-buster 方式へ切り替える (スモークは apt
+# 不要なので EOL イメージでも動く)。初回 dispatch で確認すること。
+name: Full Matrix
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        perl-version:
+          - '5.20'
+          - '5.22'
+          - '5.24'
+          - '5.26'
+          - '5.28'
+          - '5.30'
+          - '5.32'
+          - '5.34'
+          - '5.36'
+          - '5.38'
+          - '5.40'
+          - '5.42'
+        threaded: [ true, false ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl-version }}
+          multi-thread: ${{ matrix.threaded }}
+      - run: cargo build --locked
+      - name: Run smoke harness
+        env:
+          LIBPERL_APIDOC_CACHE_DIR: ${{ runner.temp }}/apidoc-${{ matrix.perl-version }}-${{ matrix.threaded }}
+        run: |
+          MODE=$([ "${{ matrix.threaded }}" = true ] && echo threaded || echo non-threaded)
+          perl scripts/multi-perl-smoke.pl \
+            --require ${{ matrix.perl-version }}-$MODE \
+            --out tmp/multi-perl/out/ci
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.perl-version }}-${{ matrix.threaded && 'threaded' || 'non-threaded' }}
+          path: tmp/multi-perl/out/ci/

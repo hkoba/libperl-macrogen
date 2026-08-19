@@ -1,0 +1,82 @@
+# 下流統合ビルド (dispatch のみ): libperl-rs の指定ブランチを clone し、
+# libperl-macrogen をこの working tree へ [patch.crates-io] で差し替えて
+# libperl-sys をビルドする。publish 前の検証用
+# (crates.io へバージョンを無駄撃ちしない — doc/plan/todo-2026-08-19.md)。
+# 失敗時の build-error.log / macro_bindings.rs は artifact になり、
+# tools/build-error-to-vpatches.pl の入力にできる。
+name: Downstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      perl-version:
+        description: 'Perl version (e.g. 5.30)'
+        default: '5.30'
+        required: true
+      threaded:
+        description: 'threaded build'
+        type: boolean
+        default: true
+      libperl-rs-branch:
+        description: 'libperl-rs branch'
+        default: '12-macrogen-2'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - name: Install bindgen dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang libnsl-dev
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ inputs.perl-version }}
+          multi-thread: ${{ inputs.threaded }}
+      - name: Clone libperl-rs and patch to this working tree
+        run: |
+          git clone --depth 1 --branch '${{ inputs.libperl-rs-branch }}' \
+            https://github.com/hkoba/libperl-rs downstream
+          cat >> downstream/Cargo.toml <<EOF
+
+          # --- appended by downstream.yml ---
+          [patch.crates-io]
+          libperl-macrogen = { path = "${{ github.workspace }}" }
+          EOF
+          # 既存 Cargo.lock が crates.io 版を pin していると semver 互換な
+          # patch は適用されない — patch 先へ明示更新して適用を検証する
+          cd downstream/libperl-sys
+          cargo update -p libperl-macrogen
+          cargo tree -p libperl-sys | grep 'libperl-macrogen v[0-9.]* (' \
+            || { echo '::error::[patch.crates-io] not applied'; exit 1; }
+      - name: Build libperl-sys
+        run: |
+          cd downstream/libperl-sys
+          cargo build 2>&1 | tee "$RUNNER_TEMP/build-error.log"
+          exit "${PIPESTATUS[0]}"
+      - name: Collect generated bindings
+        if: always()
+        run: |
+          GEN=$(find downstream/target/debug/build -name macro_bindings.rs | head -1 || true)
+          mkdir -p "$RUNNER_TEMP/collected"
+          cp "$RUNNER_TEMP/build-error.log" "$RUNNER_TEMP/collected/" 2>/dev/null || true
+          if [ -n "$GEN" ]; then
+            cp "$GEN" "$RUNNER_TEMP/collected/"
+            [ -f "$(dirname "$GEN")/bindings.rs" ] && cp "$(dirname "$GEN")/bindings.rs" "$RUNNER_TEMP/collected/"
+            echo "=== [CODEGEN_SUPPRESSED] count ==="
+            grep -c '\[CODEGEN_SUPPRESSED\]' "$GEN" || echo 0
+          fi
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: downstream-${{ inputs.perl-version }}-${{ inputs.threaded && 'threaded' || 'non-threaded' }}
+          path: ${{ runner.temp }}/collected/
