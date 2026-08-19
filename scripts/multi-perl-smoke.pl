@@ -210,6 +210,20 @@ record('expect', 'INFO', sprintf(
 die "macrogen binary not found: $macrogen (run `cargo build` first)\n"
     unless -x $macrogen;
 
+# ビルド済み perl (actions-setup-perl / 古い perl-build 製) の $Config{incpth}
+# はビルド時の gcc の内部 include パスを埋め込んでおり、実行環境の gcc と
+# 食い違うと stddef.h 等が見つからない。実行環境の cc の内部 include dir を
+# -I で補う (libperl-sys build.rs の cc_system_includes() と同じ役割)
+for my $cc (qw(cc gcc)) {
+    next unless which($cc);
+    chomp(my $inc = `$cc -print-file-name=include 2>/dev/null`);
+    if ($inc && -d $inc) {
+        push @macrogen_extra_args, '-I', $inc;
+        record('cc-include', 'INFO', "supplementing include path: $inc");
+        last;
+    }
+}
+
 # require リスト = must_generate − known_failures (XFAIL 分は自前 grep で判定)
 my @require_list = grep { !$xfail_must_gen{$_} } @must_generate;
 my $require_file = File::Spec->catfile($out_dir, 'require-list.txt');

@@ -217,12 +217,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = Pipeline::builder(&input);
 
     if cli.auto {
-        // --auto: Perl Config.pm から設定を取得
-        if !cli.include.is_empty() {
-            return Err("--auto cannot be used with -I options".into());
-        }
+        // --auto: Perl Config.pm から設定を取得。
+        // -I は追加のインクルードパスとしてマージする (かつては併用禁止だったが、
+        // ビルド済み perl の $Config{incpth} がビルド時の gcc パスを埋め込んだ
+        // まま実行環境の gcc と食い違う場合 (actions-setup-perl / 古い
+        // perl-build 製 perl)、`cc -print-file-name=include` を -I で補う必要が
+        // ある。libperl-sys build.rs の cc_system_includes() と同じ役割)
         builder = builder.with_auto_perl_config()
             .map_err(|e| format!("Failed to get Perl config: {}", e))?;
+        for path in &cli.include {
+            builder = builder.with_include(path);
+        }
 
         // 追加の -D オプションがあればマージ
         for (name, value) in parse_defines(&cli.define) {
