@@ -31,6 +31,98 @@ const TARGET_FUNCTIONS: &[&str] = &[
     "SvIOK_only_UV",
 ];
 
+/// tests/expected_rust/ の golden が前提とする基準 perl。
+/// 生成結果は ambient perl のバージョンと build mode (usethreads) に依存するため、
+/// 基準と異なる perl では本テストを skip する(版別の検証は
+/// scripts/multi-perl-smoke.pl 側の役割)。
+const REFERENCE_PERL_VERSION: (u32, u32) = (5, 42);
+const REFERENCE_USETHREADS: bool = true;
+
+/// ambient perl の (major, minor, threaded) を検出する。
+/// perl_config クレートには依存せず、テスト単体で完結させる。
+fn ambient_perl() -> Result<(u32, u32, bool), String> {
+    let output = Command::new("perl")
+        .args([
+            "-MConfig",
+            "-le",
+            r#"print "$Config{version} $Config{usethreads}""#,
+        ])
+        .output()
+        .map_err(|e| format!("failed to run perl: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "perl -MConfig failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut fields = stdout.split_whitespace();
+    let version = fields
+        .next()
+        .ok_or_else(|| format!("unexpected perl output: {:?}", stdout))?;
+    // 非 threaded では $Config{usethreads} が undef のため 2 フィールド目は現れない
+    let threaded = fields.next() == Some("define");
+
+    let mut parts = version.split('.');
+    let major: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("unexpected perl version: {:?}", version))?;
+    let minor: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("unexpected perl version: {:?}", version))?;
+    Ok((major, minor, threaded))
+}
+
+fn mode_name(threaded: bool) -> &'static str {
+    if threaded { "threaded" } else { "non-threaded" }
+}
+
+/// 基準 perl と一致しない場合に skip すべき理由を返す。
+/// MACROGEN_GOLDEN_FORCE (非空・"0" 以外) で強制実行できる。
+fn golden_skip_reason() -> Option<String> {
+    let force = std::env::var("MACROGEN_GOLDEN_FORCE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if force {
+        return None;
+    }
+    match ambient_perl() {
+        Ok((major, minor, threaded))
+            if (major, minor) == REFERENCE_PERL_VERSION
+                && threaded == REFERENCE_USETHREADS =>
+        {
+            None
+        }
+        Ok((major, minor, threaded)) => Some(format!(
+            "ambient perl is {}.{} ({}) but goldens are pinned to {}.{} ({})",
+            major,
+            minor,
+            mode_name(threaded),
+            REFERENCE_PERL_VERSION.0,
+            REFERENCE_PERL_VERSION.1,
+            mode_name(REFERENCE_USETHREADS),
+        )),
+        Err(e) => Some(format!("cannot detect ambient perl: {}", e)),
+    }
+}
+
+/// skip 判定と表示をまとめたガード。skip したら true。
+fn skip_unless_reference_perl(test_name: &str) -> bool {
+    match golden_skip_reason() {
+        Some(reason) => {
+            eprintln!(
+                "SKIP {}: {}. Per-version checks live in scripts/multi-perl-smoke.pl; \
+                 set MACROGEN_GOLDEN_FORCE=1 to run anyway.",
+                test_name, reason
+            );
+            true
+        }
+        None => false,
+    }
+}
+
 /// 生成された Rust コードから特定の関数を抽出する
 fn extract_function(output: &str, fn_name: &str) -> Option<String> {
     let lines: Vec<&str> = output.lines().collect();
@@ -214,6 +306,10 @@ fn normalize_whitespace(s: &str) -> String {
 
 #[test]
 fn test_rust_codegen_regression() {
+    if skip_unless_reference_perl("test_rust_codegen_regression") {
+        return;
+    }
+
     // Rust コードを生成
     let generated = generate_rust_code().expect("Failed to generate Rust code");
 
@@ -284,6 +380,9 @@ mod individual_tests {
     /// 単一の関数をテストする
     #[allow(dead_code)]
     fn test_single_function(fn_name: &str) {
+        if skip_unless_reference_perl(fn_name) {
+            return;
+        }
         let generated = generate_rust_code().expect("Failed to generate Rust code");
         let expected = load_expected(fn_name).expect("Failed to load expected output");
         let actual = extract_function(&generated, fn_name)
