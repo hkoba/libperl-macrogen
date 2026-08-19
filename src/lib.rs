@@ -153,6 +153,7 @@ pub use type_repr::{
 };
 pub use unified_type::{IntSize, SourcedType, TypeSource, UnifiedType};
 pub use rust_codegen::{CodegenConfig, CodegenDriver, CodegenStats, GeneratedCode, GenerateStatus, RustCodegen};
+pub use rust_codegen::{CodegenReport, RequireCodegenError, RequireViolation};
 pub use pipeline::{
     Pipeline, PipelineBuilder, PipelineError,
     PreprocessConfig, InferConfig as PipelineInferConfig, CodegenConfig as PipelineCodegenConfig,

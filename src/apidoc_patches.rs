@@ -155,6 +155,29 @@ pub struct ApidocPatchSet {
     pub source_paths: Vec<PathBuf>,
 }
 
+/// テキスト形式の関数名リストファイルを読み込む。
+/// `--skip-codegen-list` / `--require-codegen-list` 共通の書式:
+///
+/// - 1 行に 1 つの関数名（マクロまたは inline 関数）
+/// - `#` 以降は comment として無視
+/// - 前後の空白はトリム、空行は無視
+///
+/// 出現順を保持して返す（重複除去はしない）。
+pub fn load_name_list<P: AsRef<Path>>(path: P) -> io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(path.as_ref())?;
+    Ok(content
+        .lines()
+        .filter_map(|raw_line| {
+            let line = raw_line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                None
+            } else {
+                Some(line.to_string())
+            }
+        })
+        .collect())
+}
+
 impl ApidocPatchSet {
     pub fn empty() -> Self { Self::default() }
 
@@ -331,18 +354,15 @@ impl ApidocPatchSet {
     /// reason は `"skip-list: <filename>"` を埋め込む。
     pub fn merge_skip_list<P: AsRef<Path>>(&mut self, path: P) -> io::Result<usize> {
         let path_ref = path.as_ref();
-        let content = std::fs::read_to_string(path_ref)?;
         let display_name = path_ref.file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| path_ref.display().to_string());
         let reason = format!("skip-list: {}", display_name);
         let mut added = 0usize;
-        for raw_line in content.lines() {
-            let line = raw_line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() { continue; }
+        for name in load_name_list(path_ref)? {
             // 既存（JSON patches 等）を優先、同名は上書きしない
-            if !self.skip_codegen.contains_key(line) {
-                self.skip_codegen.insert(line.to_string(), reason.clone());
+            if !self.skip_codegen.contains_key(&name) {
+                self.skip_codegen.insert(name, reason.clone());
                 added += 1;
             }
         }
@@ -492,6 +512,18 @@ mod tests {
               "reason": "common: macro lacks aTHX_" }
         ]
     }"#;
+
+    #[test]
+    fn test_load_name_list_parses_comments_and_blanks() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_json(
+            tmp.path(),
+            "require.txt",
+            "# header comment\nCvFILE\n\n  CvROOT  # trailing comment\n#\nCvSTART\n",
+        );
+        let names = load_name_list(&path).unwrap();
+        assert_eq!(names, vec!["CvFILE", "CvROOT", "CvSTART"]);
+    }
 
     #[test]
     fn test_load_common_only() {

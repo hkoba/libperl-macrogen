@@ -1,0 +1,10 @@
+# Partial evaluation に必須の API セット (doc/plan/todo-2026-08-19.md 参照)。
+# これらが生成されない状態は libperl-rs 側の partial eval 実装を壊すため、
+# --require-codegen-list samples/require-partial-eval.txt で生成時に検証する。
+#
+# 書式: 1 行 1 名前、# 以降はコメント (skip-codegen-list と同一書式)
+CvFILE
+CvROOT
+CvSTART
+CvPADLIST
+CvISXSUB

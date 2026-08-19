@@ -2,7 +2,7 @@
 //!
 //! 型推論結果から Rust コードを生成する。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{self, Write};
 
 use crate::ast::{AssertKind, AssignOp, BinOp, BlockItem, CompoundStmt, Declaration, DeclSpecs, DerivedDecl, Expr, ExprKind, ForInit, FunctionDef, Initializer, ParamDecl, Stmt, TypeSpec};
@@ -1454,6 +1454,84 @@ pub struct CodegenStats {
     pub inline_fns_contains_goto: usize,
 }
 
+/// codegen の関数別結果。emit された名前と、されなかった名前 → 理由。
+///
+/// `CodegenDriver` が出力 (Pass 3) の各マーカー分岐で記録する。
+/// `--require-codegen-list` の検証 (`check_required`) に使う。
+/// BTree 系なのは違反レポートの列挙順を決定化するため。
+#[derive(Debug, Clone, Default)]
+pub struct CodegenReport {
+    /// 実関数として emit された名前
+    pub emitted: BTreeSet<String>,
+    /// emit されなかった名前 → 理由 (マーカー種別 + 詳細)
+    pub skipped: BTreeMap<String, String>,
+}
+
+impl CodegenReport {
+    fn record_emit(&mut self, name: impl Into<String>) {
+        self.emitted.insert(name.into());
+    }
+
+    fn record_skip(&mut self, name: impl Into<String>, reason: impl Into<String>) {
+        self.skipped.insert(name.into(), reason.into());
+    }
+
+    /// required のうち emit されなかったものを理由付きで返す。
+    /// 全て emit 済みなら Ok。emitted にも skipped にも無い名前は
+    /// codegen 対象に現れなかったもの (apidoc 宣言なし、ヘッダに定義なし等)。
+    pub fn check_required(&self, required: &[String]) -> Result<(), RequireCodegenError> {
+        let mut violations = Vec::new();
+        for name in required {
+            if self.emitted.contains(name) {
+                continue;
+            }
+            let reason = match self.skipped.get(name) {
+                Some(r) => r.clone(),
+                None => "not a codegen target (no apidoc declaration or not defined in headers)"
+                    .to_string(),
+            };
+            violations.push(RequireViolation {
+                name: name.clone(),
+                reason,
+            });
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(RequireCodegenError { violations })
+        }
+    }
+}
+
+/// `--require-codegen-list` 違反 (必須名が emit されなかった)
+#[derive(Debug, Clone)]
+pub struct RequireCodegenError {
+    pub violations: Vec<RequireViolation>,
+}
+
+/// 1 件の違反: 名前と、emit されなかった理由
+#[derive(Debug, Clone)]
+pub struct RequireViolation {
+    pub name: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for RequireCodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "require-codegen-list violation: {} function(s) not generated:",
+            self.violations.len()
+        )?;
+        for v in &self.violations {
+            writeln!(f, "  {} - {}", v.name, v.reason)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RequireCodegenError {}
+
 /// 一つの関数の生成結果
 #[derive(Debug, Clone)]
 pub struct GeneratedCode {
@@ -1560,6 +1638,8 @@ pub struct CodegenDriver<'a, W: Write> {
     bindings_info: BindingsInfo,
     config: CodegenConfig,
     stats: CodegenStats,
+    /// 関数別の生成結果 (--require-codegen-list 検証用)
+    report: CodegenReport,
     /// 生成されたコード全体で使用された libc 関数名
     used_libc_fns: HashSet<String>,
     /// 正常生成された inline 関数名（クロスドメインカスケード検出用）
@@ -6044,6 +6124,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             bindings_info,
             config,
             stats: CodegenStats::default(),
+            report: CodegenReport::default(),
             used_libc_fns: HashSet::new(),
             successfully_generated_inlines: HashSet::new(),
             generatable_macros: HashSet::new(),
@@ -6064,6 +6145,11 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
     /// 統計情報を取得
     pub fn stats(&self) -> &CodegenStats {
         &self.stats
+    }
+
+    /// 関数別の生成結果を取得 (generate() 完了後に有効)
+    pub fn report(&self) -> &CodegenReport {
+        &self.report
     }
 
     /// 全体を生成
@@ -6448,10 +6534,16 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         writeln!(self.writer,
                             "// [CASCADE_UNAVAILABLE] {} - dependency not generated: {}",
                             name_str, cascade_deps.join(", "))?;
+                        self.report.record_skip(name_str, format!(
+                            "CASCADE_UNAVAILABLE: dependency not generated: {}",
+                            cascade_deps.join(", ")));
                     } else {
                         writeln!(self.writer,
                             "// [CALLS_UNAVAILABLE] {} - calls unavailable function(s): {}",
                             name_str, absent.join(", "))?;
+                        self.report.record_skip(name_str, format!(
+                            "CALLS_UNAVAILABLE: calls unavailable function(s): {}",
+                            absent.join(", ")));
                     }
                     writeln!(self.writer)?;
                     self.stats.inline_fns_cascade_unavailable += 1;
@@ -6460,6 +6552,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let name_str = self.interner.get(name);
                     writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, "CONTAINS_GOTO: excluded (contains goto)");
                     self.stats.inline_fns_contains_goto += 1;
                 }
                 InlineGenResult::Suppressed { reason } => {
@@ -6469,6 +6562,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         name_str)?;
                     writeln!(self.writer, "// Reason: {}", reason)?;
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, format!(
+                        "CODEGEN_SUPPRESSED (apidoc patch): {}", reason));
                 }
                 InlineGenResult::UnresolvedNames { code, unresolved } => {
                     let name_str = self.interner.get(name);
@@ -6480,6 +6575,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         writeln!(self.writer, "// {}", line)?;
                     }
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, format!(
+                        "UNRESOLVED_NAMES: {}", unresolved.join(", ")));
                     self.stats.inline_fns_unresolved_names += 1;
                 }
                 InlineGenResult::CodegenError { code, errors } => {
@@ -6492,6 +6589,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         writeln!(self.writer, "// {}", line)?;
                     }
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, format!(
+                        "CODEGEN_ERROR: {}", errors.join("; ")));
                 }
                 InlineGenResult::Incomplete { code } => {
                     let name_str = self.interner.get(name);
@@ -6500,6 +6599,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         writeln!(self.writer, "// {}", line)?;
                     }
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, "CODEGEN_INCOMPLETE: type inference incomplete");
                     self.stats.inline_fns_type_incomplete += 1;
                 }
                 InlineGenResult::Success { code, used_libc } => {
@@ -6507,6 +6607,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         // 正常出力
                         write!(self.writer, "{}", code)?;
                         self.used_libc_fns.extend(used_libc.iter().cloned());
+                        self.report.record_emit(self.interner.get(name));
                         self.stats.inline_fns_success += 1;
                     } else {
                         // カスケード降格: 呼び出し先の inline 関数が codegen 時に失敗
@@ -6524,6 +6625,9 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             writeln!(self.writer, "// {}", line)?;
                         }
                         writeln!(self.writer)?;
+                        self.report.record_skip(name_str, format!(
+                            "CASCADE_UNAVAILABLE: dependency not generated: {}",
+                            unavailable.join(", ")));
                         self.stats.inline_fns_cascade_unavailable += 1;
                     }
                 }
@@ -6585,6 +6689,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     name_str_for_patch, thx_info)?;
                 writeln!(self.writer, "// Reason: {}", reason)?;
                 writeln!(self.writer)?;
+                self.report.record_skip(name_str_for_patch, format!(
+                    "CODEGEN_SUPPRESSED (apidoc patch): {}", reason));
                 continue;
             }
 
@@ -6647,6 +6753,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             writeln!(self.writer, "// {}", line)?;
                         }
                         writeln!(self.writer)?;
+                        self.report.record_skip(name_str, format!(
+                            "UNRESOLVED_NAMES: {}", generated.unresolved_names.join(", ")));
                         self.stats.macros_unresolved_names += 1;
                     } else if !generated.codegen_errors.is_empty() {
                         // codegen エラー検出：コメントアウトして問題点列挙
@@ -6660,10 +6768,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             writeln!(self.writer, "// {}", line)?;
                         }
                         writeln!(self.writer)?;
+                        self.report.record_skip(name_str, format!(
+                            "CODEGEN_ERROR: {}", generated.codegen_errors.join("; ")));
                     } else if generated.is_complete() {
                         // 完全な生成：そのまま出力
                         write!(self.writer, "{}", generated.code)?;
                         self.used_libc_fns.extend(generated.used_libc_fns.iter().cloned());
+                        self.report.record_emit(self.interner.get(info.name));
                         self.stats.macros_success += 1;
                         successfully_generated.insert(name);
                     } else {
@@ -6675,15 +6786,20 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                             writeln!(self.writer, "// {}", line)?;
                         }
                         writeln!(self.writer)?;
+                        self.report.record_skip(name_str, "CODEGEN_INCOMPLETE: type inference incomplete");
                         self.stats.macros_type_incomplete += 1;
                     }
                 }
                 GenerateStatus::ParseFailed => {
                     self.generate_macro_parse_failed(info)?;
+                    self.report.record_skip(self.interner.get(info.name),
+                        "PARSE_FAILED: macro body does not parse");
                     self.stats.macros_parse_failed += 1;
                 }
                 GenerateStatus::TypeIncomplete => {
                     self.generate_macro_type_incomplete(info, result)?;
+                    self.report.record_skip(self.interner.get(info.name),
+                        "TYPE_INCOMPLETE: parameter/return type could not be inferred");
                     self.stats.macros_type_incomplete += 1;
                 }
                 GenerateStatus::CallsUnavailable => {
@@ -6715,7 +6831,13 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         self.generate_macro_cascade_unavailable(info, &cascade_deps)?;
                         self.stats.macros_cascade_unavailable += 1;
                     } else {
+                        let mut absent_sorted: Vec<String> =
+                            absent.iter().map(|s| s.to_string()).collect();
+                        absent_sorted.sort();
                         self.generate_macro_calls_unavailable(info, result)?;
+                        self.report.record_skip(self.interner.get(info.name), format!(
+                            "CALLS_UNAVAILABLE: calls unavailable function(s): {}",
+                            absent_sorted.join(", ")));
                         self.stats.macros_calls_unavailable += 1;
                     }
                 }
@@ -6723,6 +6845,7 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                     let name_str = self.interner.get(info.name);
                     writeln!(self.writer, "// [CONTAINS_GOTO] {} - excluded (contains goto)", name_str)?;
                     writeln!(self.writer)?;
+                    self.report.record_skip(name_str, "CONTAINS_GOTO: excluded (contains goto)");
                 }
                 GenerateStatus::GenericUnsupported => {
                     let name_str = self.interner.get(info.name);
@@ -6742,10 +6865,14 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                         writeln!(self.writer, "// {}", line)?;
                     }
                     writeln!(self.writer)?;
+                    self.report.record_skip(self.interner.get(info.name),
+                        "GENERIC_UNSUPPORTED: Rust cannot cast to generic type T");
                     self.stats.macros_generic_unsupported += 1;
                 }
                 GenerateStatus::Skip => {
-                    // 何もしない
+                    // 出力なし。require 検証用に理由だけ記録する
+                    self.report.record_skip(self.interner.get(info.name),
+                        "SKIP: excluded from code generation");
                 }
             }
         }
@@ -6844,6 +6971,8 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             "// [CASCADE_UNAVAILABLE] {}{} - dependency not generated: {}",
             name_str, thx_info, deps.join(", "))?;
         writeln!(self.writer)?;
+        self.report.record_skip(name_str, format!(
+            "CASCADE_UNAVAILABLE: dependency not generated: {}", deps.join(", ")));
         Ok(())
     }
 
@@ -7126,5 +7255,66 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
             }
         }
         "<unknown>".to_string()
+    }
+}
+
+#[cfg(test)]
+mod codegen_report_tests {
+    use super::*;
+
+    fn sample_report() -> CodegenReport {
+        let mut report = CodegenReport::default();
+        report.record_emit("CvFILE");
+        report.record_emit("CvROOT");
+        report.record_skip("CvSTART", "CASCADE_UNAVAILABLE: dependency not generated: CvROOT");
+        report
+    }
+
+    #[test]
+    fn test_check_required_empty_list_is_noop() {
+        let report = sample_report();
+        assert!(report.check_required(&[]).is_ok());
+    }
+
+    #[test]
+    fn test_check_required_emitted_names_pass() {
+        let report = sample_report();
+        let required = vec!["CvFILE".to_string(), "CvROOT".to_string()];
+        assert!(report.check_required(&required).is_ok());
+    }
+
+    #[test]
+    fn test_check_required_skipped_name_reports_recorded_reason() {
+        let report = sample_report();
+        let required = vec!["CvSTART".to_string()];
+        let err = report.check_required(&required).unwrap_err();
+        assert_eq!(err.violations.len(), 1);
+        assert_eq!(err.violations[0].name, "CvSTART");
+        assert!(err.violations[0].reason.contains("CASCADE_UNAVAILABLE"));
+        // Display にも名前と理由が現れる
+        let msg = err.to_string();
+        assert!(msg.contains("CvSTART"));
+        assert!(msg.contains("CASCADE_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn test_check_required_unknown_name_reports_not_a_target() {
+        let report = sample_report();
+        let required = vec!["NoSuchFunction".to_string()];
+        let err = report.check_required(&required).unwrap_err();
+        assert_eq!(err.violations.len(), 1);
+        assert!(err.violations[0].reason.contains("not a codegen target"));
+    }
+
+    #[test]
+    fn test_check_required_collects_all_violations() {
+        let report = sample_report();
+        let required = vec![
+            "CvFILE".to_string(),        // emitted → OK
+            "CvSTART".to_string(),       // skipped → 違反
+            "NoSuchFunction".to_string(), // 不在 → 違反
+        ];
+        let err = report.check_required(&required).unwrap_err();
+        assert_eq!(err.violations.len(), 2);
     }
 }

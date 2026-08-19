@@ -2,6 +2,7 @@
 //!
 //! CファイルをパースしてS-expression形式で出力する
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -155,6 +156,12 @@ struct Cli {
     #[arg(long = "skip-codegen-list", value_name = "FILE")]
     skip_codegen_list: Vec<PathBuf>,
 
+    /// 必ず生成されるべき関数名リストファイル（書式は skip-codegen-list と同じ）。
+    /// 生成できなかった名前があれば理由を stderr に表示して exit 1
+    /// （出力自体は書き切る）。複数指定可。
+    #[arg(long = "require-codegen-list", value_name = "FILE")]
+    require_codegen_list: Vec<PathBuf>,
+
     /// 対象 perl の build mode（threaded / non-threaded / auto）
     /// 省略時は auto（実行時の `perl Config{usethreads}` から自動検出）
     #[arg(long = "perl-build-mode", value_name = "MODE", value_parser = parse_perl_build_mode)]
@@ -260,6 +267,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // skip-codegen リストファイル（複数指定可）
     for path in &cli.skip_codegen_list {
         builder = builder.with_skip_codegen_list(path);
+    }
+
+    // require-codegen リストファイル（複数指定可）。
+    // 同名が skip リストにも載っている設定矛盾は起動時に即エラー
+    if !cli.require_codegen_list.is_empty() {
+        let mut skip_names: HashSet<String> = HashSet::new();
+        for path in &cli.skip_codegen_list {
+            skip_names.extend(libperl_macrogen::apidoc_patches::load_name_list(path)?);
+        }
+        for path in &cli.require_codegen_list {
+            for name in libperl_macrogen::apidoc_patches::load_name_list(path)? {
+                if skip_names.contains(&name) {
+                    return Err(format!(
+                        "conflict: '{}' is listed in both --require-codegen-list ({}) \
+                         and --skip-codegen-list",
+                        name,
+                        path.display()
+                    )
+                    .into());
+                }
+            }
+            builder = builder.with_require_codegen_list(path);
+        }
     }
 
     // 対象 perl の build mode（省略時は auto-detect）
@@ -647,11 +677,15 @@ fn run_gen_rust_pipeline(
         }
     };
 
-    // まずバッファに生成
+    // まずバッファに生成。
+    // RequireCodegen 違反は「出力を書き切ってから exit 1」にするため、
+    // ここでは失敗にせず持ち回る（バッファには全出力が入っている）
     let mut buffer = Vec::new();
-    let generated = inferred.generate(&mut buffer)
-        .map_err(|e| format_pipeline_error(&e))?;
-    let stats = generated.stats();
+    let (stats, require_violation) = match inferred.generate(&mut buffer) {
+        Ok(generated) => (Some(generated.stats().clone()), None),
+        Err(PipelineError::RequireCodegen(e)) => (None, Some(e)),
+        Err(e) => return Err(format_pipeline_error(&e).into()),
+    };
 
     // rustfmt を適用
     let formatted = match apply_rustfmt(&buffer, rust_edition) {
@@ -679,15 +713,24 @@ fn run_gen_rust_pipeline(
         handle.flush()?;
     }
 
-    // 統計情報を出力
-    eprintln!("=== Rust Code Generation Stats ===");
-    eprintln!("Macros: {} success, {} parse failed, {} type incomplete, {} cascade unavailable, {} unresolved names",
-        stats.macros_success, stats.macros_parse_failed, stats.macros_type_incomplete,
-        stats.macros_cascade_unavailable, stats.macros_unresolved_names);
-    eprintln!("Inline functions: {} success, {} type incomplete, {} cascade unavailable, {} unresolved names, {} contains goto",
-        stats.inline_fns_success, stats.inline_fns_type_incomplete,
-        stats.inline_fns_cascade_unavailable, stats.inline_fns_unresolved_names,
-        stats.inline_fns_contains_goto);
+    // 統計情報を出力（RequireCodegen 違反時は GeneratedPipeline が
+    // 返らないため stats は得られない）
+    if let Some(stats) = stats {
+        eprintln!("=== Rust Code Generation Stats ===");
+        eprintln!("Macros: {} success, {} parse failed, {} type incomplete, {} cascade unavailable, {} unresolved names",
+            stats.macros_success, stats.macros_parse_failed, stats.macros_type_incomplete,
+            stats.macros_cascade_unavailable, stats.macros_unresolved_names);
+        eprintln!("Inline functions: {} success, {} type incomplete, {} cascade unavailable, {} unresolved names, {} contains goto",
+            stats.inline_fns_success, stats.inline_fns_type_incomplete,
+            stats.inline_fns_cascade_unavailable, stats.inline_fns_unresolved_names,
+            stats.inline_fns_contains_goto);
+    }
+
+    // require-codegen リスト違反: 出力は書き切ったので理由を表示して exit 1
+    if let Some(violation) = require_violation {
+        eprintln!("{}", violation);
+        std::process::exit(1);
+    }
 
     Ok(())
 }
@@ -891,6 +934,7 @@ fn format_pipeline_error(e: &PipelineError) -> String {
         PipelineError::Compile(ce) => format!("Compile error: {}", ce),
         PipelineError::Infer(ie) => format!("Inference error: {}", ie),
         PipelineError::Io(io_err) => format!("I/O error: {}", io_err),
+        PipelineError::RequireCodegen(re) => format!("{}", re),
     }
 }
 

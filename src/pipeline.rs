@@ -42,6 +42,7 @@ use std::path::PathBuf;
 use crate::perl_config::{get_perl_config, PerlConfigError, get_default_target_dir};
 use crate::preprocessor::{PPConfig, Preprocessor};
 use crate::rust_codegen::{BindingsInfo, CodegenConfig as RustCodegenConfig, CodegenDriver, CodegenStats};
+use crate::rust_codegen::{CodegenReport, RequireCodegenError};
 use crate::infer_api::{InferResult, InferError};
 use crate::error::EnrichedCompileError;
 
@@ -60,6 +61,8 @@ pub enum PipelineError {
     Infer(InferError),
     /// I/O エラー
     Io(std::io::Error),
+    /// require-codegen-list 違反（出力書き込み後に検出）
+    RequireCodegen(RequireCodegenError),
 }
 
 impl std::fmt::Display for PipelineError {
@@ -69,6 +72,7 @@ impl std::fmt::Display for PipelineError {
             PipelineError::Compile(e) => write!(f, "Compile error: {}", e),
             PipelineError::Infer(e) => write!(f, "Inference error: {}", e),
             PipelineError::Io(e) => write!(f, "I/O error: {}", e),
+            PipelineError::RequireCodegen(e) => write!(f, "{}", e),
         }
     }
 }
@@ -80,7 +84,14 @@ impl std::error::Error for PipelineError {
             PipelineError::Compile(e) => Some(e),
             PipelineError::Infer(e) => Some(e),
             PipelineError::Io(e) => Some(e),
+            PipelineError::RequireCodegen(e) => Some(e),
         }
+    }
+}
+
+impl From<RequireCodegenError> for PipelineError {
+    fn from(e: RequireCodegenError) -> Self {
+        PipelineError::RequireCodegen(e)
     }
 }
 
@@ -217,6 +228,10 @@ pub struct CodegenConfig {
     pub dump_ast_for: Option<String>,
     /// 型推論ダンプ対象関数名（デバッグ用）
     pub dump_types_for: Option<String>,
+    /// 必須生成関数名リストファイル（書式は skip-codegen-list と同じ）。
+    /// 生成後に検証し、emit されなかった名前があれば
+    /// `PipelineError::RequireCodegen`（出力自体は書き切った後）
+    pub require_codegen_lists: Vec<PathBuf>,
 }
 
 impl Default for CodegenConfig {
@@ -230,6 +245,7 @@ impl Default for CodegenConfig {
             use_statements: Vec::new(),
             dump_ast_for: None,
             dump_types_for: None,
+            require_codegen_lists: Vec::new(),
         }
     }
 }
@@ -374,6 +390,14 @@ impl PipelineBuilder {
     /// (`skip_codegen`) と同時指定できる（同名は patches 優先）。
     pub fn with_skip_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
         self.infer.skip_codegen_lists.push(path.into());
+        self
+    }
+
+    /// 必須生成関数名リストファイルを追加（書式は skip-codegen-list と同じ）。
+    /// 生成後に検証し、emit されなかった名前があれば
+    /// `PipelineError::RequireCodegen` を返す（出力は書き切られた後）
+    pub fn with_require_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
+        self.codegen.require_codegen_lists.push(path.into());
         self
     }
 
@@ -600,6 +624,12 @@ impl PreprocessedPipeline {
         self
     }
 
+    /// 必須生成関数名リストファイルを追加（書式は skip-codegen-list と同じ）
+    pub fn with_require_codegen_list(mut self, path: impl Into<PathBuf>) -> Self {
+        self.codegen_config.require_codegen_lists.push(path.into());
+        self
+    }
+
     /// Phase 2: 推論を実行
     pub fn infer(self) -> Result<InferredPipeline, PipelineError> {
         use crate::apidoc::resolve_apidoc_path;
@@ -744,6 +774,7 @@ impl InferredPipeline {
         driver.generate(&self.result)?;
 
         let stats = driver.stats().clone();
+        let report = driver.report().clone();
 
         // PERLVAR section: emit at end of macro_bindings.rs.
         // Empty dict (e.g. when collect_perlvars=false) is a no-op.
@@ -757,9 +788,20 @@ impl InferredPipeline {
         // 現状は CodegenDriver が rustfmt を呼び出さないため、
         // ここで別途 rustfmt を実行する必要がある
 
+        // require-codegen リストの検証。出力を書き切った後に行う
+        // （違反時も生成物を診断に使えるようにするため）
+        if !self.codegen_config.require_codegen_lists.is_empty() {
+            let mut required: Vec<String> = Vec::new();
+            for path in &self.codegen_config.require_codegen_lists {
+                required.extend(crate::apidoc_patches::load_name_list(path)?);
+            }
+            report.check_required(&required)?;
+        }
+
         Ok(GeneratedPipeline {
             result: self.result,
             stats,
+            report,
         })
     }
 }
@@ -773,12 +815,19 @@ pub struct GeneratedPipeline {
     result: InferResult,
     /// コード生成の統計情報
     pub stats: CodegenStats,
+    /// 関数別の生成結果（emit 済み名と skip 理由）
+    pub report: CodegenReport,
 }
 
 impl GeneratedPipeline {
     /// 統計情報を取得
     pub fn stats(&self) -> &CodegenStats {
         &self.stats
+    }
+
+    /// 関数別の生成結果を取得
+    pub fn report(&self) -> &CodegenReport {
+        &self.report
     }
 
     /// InferResult への参照を取得
