@@ -405,6 +405,15 @@ pub fn is_boolean_expr(expr: &Expr) -> bool {
         }
         // LogNot は常に bool を返す（if 式として生成される）
         ExprKind::LogNot(_) => true,
+        // 三項演算子: 両 arm が bool なら全体も bool。
+        // <=5.34 の cBOOL は `((c) ? (bool)1 : (bool)0)` で、arm は
+        // (bool) キャストにより bool として生成される。ここで ternary を
+        // 非 bool と誤分類すると外側に更に `!= 0` が付き、Rust では
+        // `bool != {integer}` (E0308) になる (5.36+ は cBOOL が
+        // `((bool)(c))` の単純キャストになったため露出しない)
+        ExprKind::Conditional { then_expr, else_expr, .. } => {
+            is_boolean_expr(then_expr) && is_boolean_expr(else_expr)
+        }
         _ => false,
     }
 }
