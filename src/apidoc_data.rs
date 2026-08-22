@@ -15,7 +15,10 @@ use tar::Archive;
 /// 1.1: PAD_SET_CUR / PAD_SET_CUR_NOSAVE / PAD_BASE_SV の
 ///      arg_type_override 追加 (pad.h apidoc の `PADLIST padlist` ポインタ抜け)
 /// 1.2: MUTABLE_* の arg_type_override (void *) と AvFILL の return override (SSize_t) 追加
-pub const APIDOC_DATA_VERSION: &str = "1.2";
+/// 1.3: add_decl 追加 (MUTABLE_* 一族 / AvARRAY / AvFILLp — 5.34 未満のヘッダに
+///      無い宣言を補い、旧 perl での Cv/Hv 一族 cascade 消滅を解消) と
+///      AvFILLp の return override (5.32 の `int` 宣言を SSize_t に訂正)
+pub const APIDOC_DATA_VERSION: &str = "1.3";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

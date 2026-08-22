@@ -129,6 +129,86 @@
       "source_loc": "/usr/lib64/perl5/CORE/av.h:112",
       "reason": "av.h apidoc_defn declares SSize_t but the bundled apidoc data carries I32 (stale); the macro body branches yield SSize_t (AvFILLp / mg_size).",
       "upstream_status": "n/a (bundled-data fix)"
+    },
+    {
+      "name": "MUTABLE_AV",
+      "kind": "add_decl",
+      "value": "Am|AV *|MUTABLE_AV|AV * p",
+      "source_loc": "perl-5.42 handy.h:69 (=for apidoc)",
+      "reason": "=for apidoc declaration absent from headers before 5.34 (verified v5.32.0 handy.h has none); the macro itself and its contract are identical in older perls. Without the declaration, dependent macros (Cv/Hv family) cascade away on <=5.32. No-op on 5.34+. The companion arg_type_override (void *) still applies on top.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_CV",
+      "kind": "add_decl",
+      "value": "Am|CV *|MUTABLE_CV|CV * p",
+      "source_loc": "perl-5.42 handy.h:70 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. See MUTABLE_AV.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_GV",
+      "kind": "add_decl",
+      "value": "Am|GV *|MUTABLE_GV|GV * p",
+      "source_loc": "perl-5.42 handy.h:71 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. See MUTABLE_AV.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_HV",
+      "kind": "add_decl",
+      "value": "Am|HV *|MUTABLE_HV|HV * p",
+      "source_loc": "perl-5.42 handy.h:72 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. See MUTABLE_AV.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_IO",
+      "kind": "add_decl",
+      "value": "Am|IO *|MUTABLE_IO|IO * p",
+      "source_loc": "perl-5.42 handy.h:73 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. See MUTABLE_AV.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_PTR",
+      "kind": "add_decl",
+      "value": "Am|void *|MUTABLE_PTR|void * p",
+      "source_loc": "perl-5.42 handy.h:74 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. Base macro of the MUTABLE_* family; its absence is the root of the Cv/Hv-family cascade on <=5.32. No arg override needed (header arg is already void *).",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "MUTABLE_SV",
+      "kind": "add_decl",
+      "value": "Am|SV *|MUTABLE_SV|SV * p",
+      "source_loc": "perl-5.42 handy.h:75 (=for apidoc_item)",
+      "reason": "=for apidoc declaration absent from headers before 5.34; contract identical in older perls. See MUTABLE_AV.",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "AvARRAY",
+      "kind": "add_decl",
+      "value": "Am|SV**|AvARRAY|AV* av",
+      "source_loc": "perl-5.42 av.h:80 (=for apidoc)",
+      "reason": "=for apidoc declaration absent from headers before 5.34 (verified v5.32.0 av.h); the macro and the xpvav layout are identical in older perls (xav_alloc/sv_u). Without it AvARRAY is mistyped downstream (E0308 on 5.30 libperl-sys).",
+      "upstream_status": "added-in-5.34"
+    },
+    {
+      "name": "AvFILLp",
+      "kind": "add_decl",
+      "value": "Cm|SSize_t|AvFILLp|AV* av",
+      "source_loc": "perl-5.42 av.h:74 (=for apidoc)",
+      "reason": "=for apidoc declaration absent from headers <=5.30; 5.32 declares it as `int` (add_decl is a no-op there -- corrected by the companion return_type_override below). struct xpvav.xav_fill is SSize_t in all supported versions (verified v5.20.0/v5.32.0 av.h).",
+      "upstream_status": "added-in-5.32, type corrected in 5.34"
+    },
+    {
+      "name": "AvFILLp",
+      "kind": "return_type_override",
+      "value": "SSize_t",
+      "source_loc": "perl-5.32 av.h (=for apidoc m|int|AvFILLp|AV* av)",
+      "reason": "5.32's av.h apidoc declares `int` but struct xpvav.xav_fill is SSize_t in all supported versions (verified v5.20.0/v5.32.0 sources); 5.34+ headers declare SSize_t. Identity for 5.34+ and for the injected add_decl.",
+      "upstream_status": "fixed-in-5.34"
     }
   ]
 }
