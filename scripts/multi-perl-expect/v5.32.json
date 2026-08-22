@@ -1,36 +1,33 @@
 {
-   "comment" : [
+   "comment": [
       "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
       "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
       "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
-      "実測 counts: threaded fn=1419 unresolved=30 / non-threaded fn=1346 unresolved=85"
+      "実測 counts: threaded fn=1419 unresolved=30 / non-threaded fn=1346 unresolved=85",
+      "2026-08-22: add_decl (apidoc data 1.4, MUTABLE_*/AvARRAY/AvFILLp/Pad* 補正)",
+      "導入後の再実測で Cv 一族 6 + HvFILL を known_failures から削除 (以後 enforced)、",
+      "bounds を再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
+      "実測 counts (2026-08-22): threaded fn=1525 unresolved=35 / non-threaded fn=1450 unresolved=90"
    ],
-   "known_failures" : {
-      "must_generate" : [
+   "known_failures": {
+      "must_generate": [
          "CvDEPTH",
-         "CvFILE",
-         "CvISXSUB",
-         "CvPADLIST",
-         "CvROOT",
-         "CvSTART",
-         "CvSTASH",
-         "HvFILL",
          "OP_CLASS",
          "newSVpvs"
       ]
    },
-   "non-threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 54,
-         "generated_fn_min" : 1211,
-         "unresolved_names_max" : 101
+   "non-threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 53,
+         "generated_fn_min": 1305,
+         "unresolved_names_max": 108
       }
    },
-   "threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 54,
-         "generated_fn_min" : 1277,
-         "unresolved_names_max" : 38
+   "threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 53,
+         "generated_fn_min": 1372,
+         "unresolved_names_max": 42
       }
    }
 }

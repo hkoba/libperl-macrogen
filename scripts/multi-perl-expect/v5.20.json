@@ -1,46 +1,43 @@
 {
-   "comment" : [
+   "comment": [
       "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
       "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
       "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
-      "実測 counts: threaded fn=1328 unresolved=33 / non-threaded fn=1267 unresolved=78"
+      "実測 counts: threaded fn=1328 unresolved=33 / non-threaded fn=1267 unresolved=78",
+      "2026-08-22: add_decl (apidoc data 1.4, MUTABLE_*/AvARRAY/AvFILLp/Pad* 補正)",
+      "導入後の再実測で Cv 一族 6 + HvFILL を known_failures から削除 (以後 enforced)、",
+      "bounds を再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
+      "実測 counts (2026-08-22): threaded fn=1437 unresolved=43 / non-threaded fn=1375 unresolved=89"
    ],
-   "known_failures" : {
-      "must_generate" : [
-         "CvFILE",
-         "CvISXSUB",
-         "CvPADLIST",
-         "CvROOT",
-         "CvSTART",
-         "CvSTASH",
-         "HvFILL",
+   "known_failures": {
+      "must_generate": [
          "OP_CLASS",
          "newSVpvs"
       ]
    },
-   "must_not_generate" : [
+   "must_not_generate": [
       "Perl_CvDEPTH",
       "Perl_cx_topblock"
    ],
-   "must_not_generate_comment" : [
+   "must_not_generate_comment": [
       "Perl_CvDEPTH: embed.fnc への登場は 5.32 から。5.20〜5.30 の CvDEPTH は S_CvDEPTHp 経由のマクロのみ (そちらは生成 PASS)",
       "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い"
    ],
-   "non-threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 5,
-         "generated_fn_min" : 1140,
-         "unresolved_names_max" : 93
+   "non-threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 5,
+         "generated_fn_min": 1237,
+         "unresolved_names_max": 107
       }
    },
-   "threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 5,
-         "generated_fn_min" : 1195,
-         "unresolved_names_max" : 41
+   "threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 5,
+         "generated_fn_min": 1293,
+         "unresolved_names_max": 52
       },
-      "known_failures" : {
-         "assertions" : [
+      "known_failures": {
+         "assertions": [
             "thx"
          ]
       }

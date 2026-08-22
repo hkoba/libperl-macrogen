@@ -1,43 +1,40 @@
 {
-   "comment" : [
+   "comment": [
       "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
       "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
       "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
-      "実測 counts: threaded fn=1356 unresolved=36 / non-threaded fn=1288 unresolved=87"
+      "実測 counts: threaded fn=1356 unresolved=36 / non-threaded fn=1288 unresolved=87",
+      "2026-08-22: add_decl (apidoc data 1.4, MUTABLE_*/AvARRAY/AvFILLp/Pad* 補正)",
+      "導入後の再実測で Cv 一族 6 + HvFILL を known_failures から削除 (以後 enforced)、",
+      "bounds を再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
+      "実測 counts (2026-08-22): threaded fn=1460 unresolved=41 / non-threaded fn=1391 unresolved=92"
    ],
-   "known_failures" : {
-      "must_generate" : [
-         "CvFILE",
-         "CvISXSUB",
-         "CvPADLIST",
-         "CvROOT",
-         "CvSTART",
-         "CvSTASH",
-         "HvFILL",
+   "known_failures": {
+      "must_generate": [
          "OP_CLASS",
          "newSVpvs"
       ]
    },
-   "must_not_generate" : [
+   "must_not_generate": [
       "Perl_CvDEPTH",
       "Perl_cx_topblock"
    ],
-   "must_not_generate_comment" : [
+   "must_not_generate_comment": [
       "Perl_CvDEPTH: embed.fnc への登場は 5.32 から。5.20〜5.30 の CvDEPTH は S_CvDEPTHp 経由のマクロのみ (そちらは生成 PASS)",
       "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い"
    ],
-   "non-threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 58,
-         "generated_fn_min" : 1159,
-         "unresolved_names_max" : 104
+   "non-threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 57,
+         "generated_fn_min": 1251,
+         "unresolved_names_max": 111
       }
    },
-   "threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 58,
-         "generated_fn_min" : 1220,
-         "unresolved_names_max" : 45
+   "threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 57,
+         "generated_fn_min": 1314,
+         "unresolved_names_max": 50
       }
    }
 }

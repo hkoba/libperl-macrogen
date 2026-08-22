@@ -172,20 +172,22 @@ CI は podman を使わず、actions-setup-perl の perl に対して
   固定。他版では自動 skip され、`MACROGEN_GOLDEN_FORCE=1` で強制実行できる。
   版別の検証は本基盤の役割
 
-## 既知の red (2026-08-19 時点、期待値に XFAIL 登録済み)
+## 既知の red (2026-08-22 時点、期待値に XFAIL 登録済み)
 
 green 化は実装計画の後半フェーズ (採取 → 分類 → カテゴリ別修正 → 引き締め) で行う:
 
-- **5.20〜5.32**: Cv 一族 6 + HvFILL が `MUTABLE_PTR` / `MUTABLE_HV` の
-  CASCADE_UNAVAILABLE で消滅。マクロ自体は旧 perl ヘッダに存在するが
-  `=for apidoc` 宣言が無い = `add_decl` パッチ機構 (doc/plan/todo-2026-08-19.md)
-  の対象
 - **〜5.36**: OP_CLASS (依存先 XopENTRYCUSTOM の cascade)。5.38+ は green
 - **〜5.34**: newSVpvs (PARSE_FAILED)
 - **5.32/5.34**: CvDEPTH (既存 `v5.3x.patches.json` の auto-generated skip)
 - **非 threaded 全版**: `samples/bindings.rs` が threaded スナップショットのため
   PL_* interpreter 変数が未解決 (common.json の non-threaded 節に登録)
 - **5.20/5.22 downstream**: rustc E0308/E0277/E0614 群 (採取済み、green 化対象)
+
+**解消済み (2026-08-22, apidoc data 1.4)**: 5.20〜5.32 の Cv 一族 6 + HvFILL
+消滅は `add_decl` パッチ (`MUTABLE_*` 一族 / `AvARRAY` / `AvFILLp` の宣言補充、
+doc/architecture-apidoc-patches.md) と `Pad*` 系 12 件の arg_type_override
+(<=5.30 pad.h の `*` 抜け) で解消し、known_failures から削除 = enforced 化。
+下流 libperl-sys ビルドは 5.30-threaded で green 確認済み (issue #5)。
 
 存在しないことが確認済みの API (must_not_generate):
 `Perl_CvDEPTH` / `Perl_cx_topblock` は **5.32 からこの名前になった**ため
