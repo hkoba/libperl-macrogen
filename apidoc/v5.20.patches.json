@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "comment": "Manual skip/override set for perl 5.20, built from the 2026-08-22 downstream re-evaluation (cleared-list run, classified per CLAUDE.md skip_codegen policy). Only entries that still fail after apidoc data 1.3-1.10 and the codegen fixes are registered.",
+  "patches": [
+    {
+      "name": "Perl_atof",
+      "kind": "skip_codegen",
+      "source_loc": "perl-5.20/5.22 perl.h (#define Perl_atof(s) Perl_my_atof(s) under USE_PERL_ATOF)",
+      "reason": "The macro lacks aTHX_: Perl_my_atof takes (pTHX_ const char *s) on threaded builds, so the expansion is a 1-arg call to a 2-arg function (E0061). Latent in C because core code calls my_atof (embed.h adds aTHX_). Fixed upstream in 5.36. Same entry as in v5.32/v5.34.patches.json.",
+      "upstream_status": "fixed-in-5.36"
+    },
+    {
+      "name": "S_perl_hash_djb2",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_sdbm",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_superfast",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_murmur3",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_one_at_a_time",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_one_at_a_time_hard",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_old_one_at_a_time",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified still failing in the 2026-08-22 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "sv_collxfrm",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "hv_exists",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "hv_exists_ent",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "gv_init",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "gv_autoload4",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvRXOK",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPV_nolen_const",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvCANCOW",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_MATCH_UTF8_on",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_MATCH_UTF8_off",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_ENGINE",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "S_isIDFIRST_lazy",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "S_isALNUM_lazy",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "PAD_RESTORE_LOCAL",
+      "kind": "skip_codegen",
+      "reason": "5.20's pad.h shape: the body passes opad (PAD * = AV *) to SvIS_FREED which takes SV *; the codegen does not insert the SV-family cast in this assert position (E0308 *const av vs *const sv). 5.22+ green. Candidate for a future codegen fix (family cast in call args).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "PAD_COMPNAME_FLAGS",
+      "kind": "skip_codegen",
+      "reason": "5.20's PAD_COMPNAME_* index the comppad_name AV directly ((*PAD_COMPNAME_SV(po)).sv_flags); the po index is inferred u64 where the generated PAD_COMPNAME_SV takes isize (E0308). 5.22+ green (padnamelist-based shape). Same residual index-type class.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "PAD_COMPNAME_PV",
+      "kind": "skip_codegen",
+      "reason": "See PAD_COMPNAME_FLAGS (same 5.20-only index-type mismatch).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "PAD_COMPNAME_OURSTASH",
+      "kind": "skip_codegen",
+      "reason": "See PAD_COMPNAME_FLAGS (same 5.20-only index-type mismatch).",
+      "upstream_status": "n/a (macrogen limitation)"
+    }
+  ]
+}

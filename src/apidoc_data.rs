@@ -36,7 +36,13 @@ use tar::Archive;
 ///      生成、2059 entries — issue #6)
 /// 1.10: v5.44.patches.json 新設 — hv_stores の第 3 引数を SV * に訂正
 ///      (5.44 で追加された apidoc_defn が `U32 flags` と誤記している上流バグ)
-pub const APIDOC_DATA_VERSION: &str = "1.10";
+/// 1.11: Padname* アクセサ 10 件の arg_type_override (<=5.30 pad.h の `*` 抜け、
+///      5.32 で上流修正) を common に追加。v5.20/v5.22.patches.json 新設 —
+///      下流実走再評価で残った真の失敗のみをクラス別理由付きで skip 登録
+///      (Perl_atof の aTHX_ 抜け / 旧ハッシュ inline 群 / bool・cast 残渣)
+/// 1.12: v5.20 に PAD_RESTORE_LOCAL / PAD_COMPNAME_* の 4 件を追加 (5.20 固有の
+///      マクロ形状。take4 の下流実走で判明)
+pub const APIDOC_DATA_VERSION: &str = "1.12";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

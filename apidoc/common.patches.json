@@ -407,6 +407,96 @@
       "source_loc": "perl-5.30 op.h (=for apidoc mx|void|CALL_BLOCK_HOOKS|which|arg)",
       "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which` (pasted into BhkENTRY). Fixed upstream in 5.38. Identity on 5.38+. Note: CAT2/STRINGIFY were reviewed for the same class -- <=5.30 has no apidoc declaration at all (nothing to override) and 5.34+ already carries `token`, so no patch is needed for them.",
       "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "PadnamePV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnamePV|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameLEN",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameLEN|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameUTF8",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameUTF8|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameSV",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameSV|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameIsOUR",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameIsOUR|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameOUTER",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameOUTER|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameIsSTATE",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameIsSTATE|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameTYPE",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameTYPE|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameREFCNT",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameREFCNT|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnameREFCNT_dec",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAME *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc ...|PadnameREFCNT_dec|PADNAME pn)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAME pn` (missing `*`); the macro derefs it. Fixed upstream in 5.32 (`PADNAME * pn`) -- identity there. Without it Padname accessors on 5.20/5.22 are generated with a by-value param (downstream E0614). Same class as PadARRAY/Padlist*. PadnameOURSTASH is excluded: its <=5.30 apidoc declares no argument at all, so there is no arg slot to override.",
+      "upstream_status": "fixed-in-5.32"
     }
   ]
 }

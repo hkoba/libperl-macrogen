@@ -181,11 +181,10 @@ green 化は実装計画の後半フェーズ (採取 → 分類 → カテゴ�
 - **5.20-threaded**: thx 検査 (CvGV の doc 行に [THX] マーカーが付かない)
 - **非 threaded 全版**: `samples/bindings.rs` が threaded スナップショットのため
   PL_* interpreter 変数が未解決 (common.json の non-threaded 節に登録)
-- **5.20/5.22 downstream**: rustc E0308/E0277/E0614 群 (主因は hv_func.h の
-  旧ハッシュ実装 inline 群。採取済み、green 化対象)
-- **5.32/5.34 の skip_codegen 残 16/21 件** (`v5.3x.patches.json`): 実走
-  再評価済みの真の失敗のみ。クラス別 (戻り値位置ポインタキャスト欠落 /
-  bool・int 変換残渣 / 個別型不一致) の理由付きで、将来の codegen 修正候補
+- **skip_codegen 残 (v5.20: 25 / v5.22: 19 / v5.32: 18 / v5.34: 23 件)**:
+  いずれも下流実走再評価済みの真の失敗のみ。クラス別 (旧ハッシュ実装
+  inline 群 / 戻り値位置ポインタキャスト欠落 / bool・int 変換残渣 /
+  上流ヘッダバグ) の理由付きで、将来の codegen 修正候補
 
 **解消済み (2026-08-22)**:
 
@@ -204,8 +203,15 @@ green 化は実装計画の後半フェーズ (採取 → 分類 → カテゴ�
   で補正 + 三項演算子 bool 分類の codegen 修正 + skip リスト実走再評価
   (apidoc data 1.8) で解消
 
+- **5.20/5.22 downstream**: Padname* アクセサの `*` 抜け override (common、
+  5.32 で上流修正されたクラス) + v5.20/v5.22.patches.json の分類済み skip
+  (apidoc data 1.11/1.12) で下流 libperl-sys ビルド green 化
+  (Phase 9 の当初要件完了)
+
 いずれも known_failures から削除 = enforced 化済み。**must_generate の
-既知 red は全版ゼロ**。5.30/5.32-threaded は例外ゼロの完全 green。
+既知 red は全版ゼロ**。5.22/5.30/5.32/5.44-threaded は例外ゼロの完全 green。
+**下流 libperl-sys ビルドは 5.20〜5.44 の検証済み threaded legs
+(5.20/5.22/5.30/5.32/5.34/5.44) すべて green**。
 
 存在しないことが確認済みの API (must_not_generate):
 `Perl_CvDEPTH` / `Perl_cx_topblock` は **5.32 からこの名前になった**ため
