@@ -24,7 +24,15 @@ use tar::Archive;
 /// 1.5: Xop*/Bhk*/CALL_BLOCK_HOOKS の `which` 引数に `token` 注釈 10 件
 ///      (<=5.36 の op.h apidoc は token 注釈を欠き、token-pasting マクロが
 ///      呼び出し扱いされて OP_CLASS 等が cascade 消滅。5.38 で上流修正済み)
-pub const APIDOC_DATA_VERSION: &str = "1.5";
+/// 1.6: v5.32/v5.34.patches.json の auto-generated skip リストを 1.3〜1.5 の
+///      根本修正後に下流ビルド実走で再評価し、まだ失敗するもののみに縮小
+/// 1.7: 再評価の結果を反映 — CvDEPTH の return override (embed.fnc エントリは
+///      Perl_CvDEPTH の記述で、deref するマクロ側は I32) と Perl_atof の
+///      skip (5.32/5.34 ヘッダの aTHX_ 抜け、5.36 で上流修正) を登録
+/// 1.8: 再評価で残った真の失敗のみをクラス別理由付きで skip_codegen に再登録
+///      (5.32: 16 件、5.34: 21 件 — 戻り値位置ポインタキャスト欠落 /
+///      bool・int 変換残渣 / 個別型不一致。旧 auto-generated 44/52 件から縮小)
+pub const APIDOC_DATA_VERSION: &str = "1.8";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

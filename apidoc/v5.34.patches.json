@@ -1,58 +1,147 @@
 {
   "schema_version": 1,
-  "comment": "Auto-generated skip_codegen patches for perl 5.34. Functions whose generated body fails to type-check on this perl version (often due to macro expansion differences vs newer perl). Re-run tools/build-error-to-vpatches.pl after each perl-headers update or libperl-macrogen change.",
+  "comment": "Auto-generated skip_codegen patches for perl 5.34. Functions whose generated body fails to type-check on this perl version. 2026-08-22: re-evaluated after the add_decl / Pad* / token-annotation / string-concat fixes (apidoc data 1.3-1.5) by clearing the list and re-running the downstream libperl-sys build; only entries that still fail are kept, with specific reasons.",
   "patches": [
-    { "name": "CopLINE", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "CopLINE_dec", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "CopLINE_inc", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "CvDEPTH", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "CvHASGV", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "DO_UTF8", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "IN_LC_COMPILETIME", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "OpHAS_SIBLING", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvREFCNT_dec", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvREFCNT_dec_NN", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvREFCNT_inc", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvREFCNT_inc_void", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvTRUE", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvTRUE_NN", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvTRUE_common", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_SvTRUE_nomg", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_append_utf8_from_native_byte", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_atof", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_isSTRICT_UTF8_CHAR", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_isUTF8_CHAR", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_is_strict_utf8_string_loclen", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_is_utf8_invariant_string_loc", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_is_utf8_non_invariant_string", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_is_utf8_string_loclen", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_is_utf8_valid_partial_char_flags", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_utf8n_to_uvchr_msgs", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "Perl_valid_utf8_to_uvchr", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "S_MgBYTEPOS", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvGETMAGIC", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPV_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPV_nolen_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPV_nomg_const", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPVbyte_or_null", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPVbyte_or_null_nomg", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPVutf8_or_null", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvPVutf8_or_null_nomg", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "SvRXOK", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "UTF8SKIP", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "UTF8_IS_SUPER", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "cBOOL", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "cop_hints_exists_pvs", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "cophh_exists_pv", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "cophh_exists_pvn", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "cophh_exists_sv", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "gv_init", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "hv_exists", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "hv_exists_ent", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "ibcmp", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "ibcmp_locale", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "ibcmp_utf8", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "sbox32_seed_state96", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" },
-    { "name": "zaphod32_seed_state", "kind": "skip_codegen", "reason": "type-check fails on perl 5.34 (auto-generated)" }
+    {
+      "name": "CvDEPTH",
+      "kind": "return_type_override",
+      "value": "I32",
+      "source_loc": "embed.fnc CvDEPTH (AiMTp|I32 *|CvDEPTH|NN const CV * const sv)",
+      "reason": "The embed.fnc entry documents Perl_CvDEPTH (returns I32 *); the CvDEPTH macro derefs it (*Perl_CvDEPTH(...)) so the macro returns I32. On 5.36+ a name-only '=for apidoc CvDEPTH' in inline.h overwrites the typed entry during header scrape-merge, so the deref-inferred I32 wins there; <=5.34 lacks that comment and the raw I32 * leaks into the macro return constraint (generated `-> *mut I32` with a deref body, downstream E0308). The inline fn Perl_CvDEPTH itself is typed from its parsed C signature and is unaffected by this hint.",
+      "upstream_status": "n/a (entry attribution fix; masked by inline.h comment from 5.36)"
+    },
+    {
+      "name": "Perl_atof",
+      "kind": "skip_codegen",
+      "source_loc": "perl-5.32/5.34 perl.h (#define Perl_atof(s) Perl_my_atof(s) under USE_PERL_ATOF)",
+      "reason": "The macro lacks aTHX_: Perl_my_atof takes (pTHX_ const char *s) on threaded builds, so the expansion is a 1-arg call to a 2-arg function (E0061). Latent in C because core code calls my_atof (embed.h adds aTHX_) instead. Fixed upstream in 5.36 (`Perl_my_atof(aTHX_ s)`). Same class as Perl_custom_op_xop in common.patches.json.",
+      "upstream_status": "fixed-in-5.36"
+    },
+    {
+      "name": "SvPV_const",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPV_nolen_const",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPV_nomg_const",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPVbyte_or_null",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPVbyte_or_null_nomg",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPVutf8_or_null",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPVutf8_or_null_nomg",
+      "kind": "skip_codegen",
+      "reason": "Return-position pointer cast gap: the body yields *mut c_void / *mut u8 where the declared return is *mut c_char (char* string macros with ternary/void* branches on this perl's SvPV macro shape). Candidate for a future codegen fix (cast insertion at return position); verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_isSTRICT_UTF8_CHAR",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_isUTF8_CHAR",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_is_strict_utf8_string_loclen",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_is_utf8_non_invariant_string",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_is_utf8_string_loclen",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_utf8n_to_uvchr_msgs",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_valid_utf8_to_uvchr",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "UTF8_IS_SUPER",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "gv_init",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion gap in complex expressions (pointer truthiness in bool position, bool used as integer operand) on this perl's macro shape; the ternary-bool codegen fix resolved the simple cases, these remain. Candidate for a future codegen fix; verified still failing after the 2026-08-22 re-evaluation (apidoc data 1.7).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "CopLINE",
+      "kind": "skip_codegen",
+      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "CopLINE_dec",
+      "kind": "skip_codegen",
+      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "CopLINE_inc",
+      "kind": "skip_codegen",
+      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "Perl_SvREFCNT_inc",
+      "kind": "skip_codegen",
+      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "S_MgBYTEPOS",
+      "kind": "skip_codegen",
+      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
+      "upstream_status": "n/a (macrogen limitation)"
+    }
   ]
 }
