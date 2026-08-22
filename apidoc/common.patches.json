@@ -69,6 +69,114 @@
       "upstream_status": "to-report"
     },
     {
+      "name": "PadARRAY",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PAD *",
+      "source_loc": "perl-5.30 pad.h:215 (=for apidoc Amx|SV **|PadARRAY|PAD pad)",
+      "reason": "pad.h apidoc in <=5.30 declares `PAD pad` (missing `*`); the macro body passes it to AvARRAY() which takes `AV *` (PAD = AV). Fixed upstream in 5.32 (`PAD * pad`) -- this override is identity there. Without it PadARRAY on <=5.30 is generated with a by-value `PAD` param (downstream E0308).",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadMAX",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PAD *",
+      "source_loc": "perl-5.30 pad.h:218 (=for apidoc Amx|SSize_t|PadMAX|PAD pad)",
+      "reason": "pad.h apidoc in <=5.30 declares `PAD pad` (missing `*`); the macro body passes it to AvFILLp() which takes `AV *`. Fixed upstream in 5.32. See PadARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistARRAY",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h:182 (=for apidoc Amx|PAD **|PadlistARRAY|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`); the macro body dereferences it as a pointer (xpadl_arr.xpadlarr_alloc). Fixed upstream in 5.32. See PadARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistMAX",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|SSize_t|PadlistMAX|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistNAMES",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|PADNAMELIST *|PadlistNAMES|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistNAMESARRAY",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|PADNAME **|PadlistNAMESARRAY|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistNAMESMAX",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|SSize_t|PadlistNAMESMAX|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadlistREFCNT",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADLIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|U32|PadlistREFCNT|PADLIST padlist)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADLIST padlist` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnamelistARRAY",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAMELIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|PADNAME **|PadnamelistARRAY|PADNAMELIST pnl)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAMELIST pnl` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnamelistMAX",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAMELIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|SSize_t|PadnamelistMAX|PADNAMELIST pnl)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAMELIST pnl` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnamelistREFCNT",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAMELIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|SSize_t|PadnamelistREFCNT|PADNAMELIST pnl)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAMELIST pnl` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
+      "name": "PadnamelistREFCNT_dec",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "PADNAMELIST *",
+      "source_loc": "perl-5.30 pad.h (=for apidoc Amx|void|PadnamelistREFCNT_dec|PADNAMELIST pnl)",
+      "reason": "pad.h apidoc in <=5.30 declares `PADNAMELIST pnl` (missing `*`). Fixed upstream in 5.32. See PadlistARRAY.",
+      "upstream_status": "fixed-in-5.32"
+    },
+    {
       "name": "MUTABLE_AV",
       "kind": "arg_type_override",
       "arg_index": 0,
