@@ -32,7 +32,11 @@ use tar::Archive;
 /// 1.8: 再評価で残った真の失敗のみをクラス別理由付きで skip_codegen に再登録
 ///      (5.32: 16 件、5.34: 21 件 — 戻り値位置ポインタキャスト欠落 /
 ///      bool・int 変換残渣 / 個別型不一致。旧 auto-generated 44/52 件から縮小)
-pub const APIDOC_DATA_VERSION: &str = "1.8";
+/// 1.9: v5.44.json 追加 (perl 5.44.0 の embed.fnc から --apidoc-to-json で
+///      生成、2059 entries — issue #6)
+/// 1.10: v5.44.patches.json 新設 — hv_stores の第 3 引数を SV * に訂正
+///      (5.44 で追加された apidoc_defn が `U32 flags` と誤記している上流バグ)
+pub const APIDOC_DATA_VERSION: &str = "1.10";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

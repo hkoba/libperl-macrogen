@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "comment": "Manual corrections for perl 5.44 headers. See src/apidoc_patches.rs for the schema and doc/architecture-apidoc-patches.md for the merge model.",
+  "patches": [
+    {
+      "name": "hv_stores",
+      "kind": "arg_type_override",
+      "arg_index": 2,
+      "value": "SV *",
+      "source_loc": "perl-5.44 hv.h (=for apidoc_defn Am|SV**|hv_stores|HV *hv|\"name\"|U32 flags)",
+      "reason": "The apidoc_defn added in 5.44 declares the 3rd arg as `U32 flags` (apparently copy-pasted from hv_deletes/hv_name_sets which do take flags), but the macro is hv_stores(hv, key, val) and passes val to hv_store's `SV *val` parameter. Without the fix the generated hv_stores types val as U32 (downstream E0308).",
+      "upstream_status": "to-report"
+    }
+  ]
+}
