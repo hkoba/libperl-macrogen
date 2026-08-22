@@ -528,7 +528,7 @@ pub fn run_inference_with_preprocessor(
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!(
-                "[apidoc-patches] loaded {} patch(es) from [{}] ({} return-type override applied, {} skip-codegen registered)",
+                "[apidoc-patches] loaded {} patch(es) from [{}] ({} override/add_decl applied, {} skip-codegen registered)",
                 apidoc_patches.count(),
                 paths_str,
                 applied.len(),

@@ -53,6 +53,32 @@
 //! `kind` は初版で `return_type_override` と `skip_codegen` の 2 種のみ対応。
 //! 必要に応じて `arg_type_override`、`param_type_override`、`inject_thx_to_call`
 //! 等を追加する。
+//!
+//! ## add_decl (宣言の追加)
+//!
+//! 旧 perl のヘッダに `=for apidoc` コメントが無いマクロ (例: `AvARRAY`、
+//! `MUTABLE_PTR` 一族 — 5.38 でヘッダに追記された) は apidoc 辞書に載らず、
+//! 依存する Cv 一族などが cascade で消える (todo-2026-08-19.md)。
+//! `kind: "add_decl"` は「辞書にその名前が **無ければ** 宣言を追加、有れば
+//! no-op」を行う。宣言の契約が全バージョン同一なら `common.patches.json` に
+//! 1 セット置くだけでよく、新しい perl では自動的に no-op になる。
+//!
+//! ```json
+//! {
+//!     "name": "AvARRAY",
+//!     "kind": "add_decl",
+//!     "value": "Am|SV**|AvARRAY|AV* av",
+//!     "source_loc": "perl-5.42 av.h:80 (=for apidoc)",
+//!     "reason": "declaration added to headers in 5.38; contract identical in older perls",
+//!     "upstream_status": "fixed-in-5.38"
+//! }
+//! ```
+//!
+//! `value` は embed.fnc 形式の apidoc 行 (`flags|return_type|name|args...`。
+//! `=for apidoc ` / `=for apidoc_item ` プレフィックス付きでも可 — ヘッダから
+//! コピペできる)。ロード時に即パースし、パース不能・`name` 不一致は
+//! fail-fast。`skip_codegen` との同名共存は許容される (宣言で caller の
+//! 型推論を助けつつ、当該マクロ自身の wrapper 生成は抑制する組合せは正当)。
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -60,7 +86,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::apidoc::ApidocDict;
+use crate::apidoc::{ApidocDict, ApidocEntry};
 
 /// `LIBPERL_MACROGEN_DEBUG_APIDOC=1` でデバッグ出力を有効化。
 pub(crate) fn is_apidoc_debug_enabled() -> bool {
@@ -134,6 +160,23 @@ pub enum PatchKind {
     /// された」ケースに使う。`value` などのフィールドは無視される。
     #[serde(rename = "remove")]
     Remove,
+    /// apidoc 辞書に宣言を追加する。**辞書に同名が既に有れば no-op**。
+    /// `value` に embed.fnc 形式の apidoc 行 (`flags|return_type|name|args...`、
+    /// `=for apidoc` プレフィックス付きも可) を書く。
+    /// 旧 perl のヘッダに `=for apidoc` が無い版非依存マクロの宣言を
+    /// `common.patches.json` で補うために使う (todo-2026-08-19.md)。
+    #[serde(rename = "add_decl")]
+    AddDecl,
+}
+
+/// ロード時にパース済みの add_decl 1 件
+#[derive(Debug, Clone)]
+pub struct AddDeclPatch {
+    /// `value` をパースした宣言。`source_file` にはパッチファイル名を
+    /// 埋めて出所を追跡可能にする
+    pub entry: ApidocEntry,
+    /// 必要理由 (JSON の `reason`)
+    pub reason: String,
 }
 
 /// ロード後の正規化された patch 集合（高速ルックアップ用）
@@ -145,6 +188,8 @@ pub struct ApidocPatchSet {
     pub arg_overrides: HashMap<String, Vec<(usize, String, String)>>,
     /// macro/fn 名 → reason（codegen 抑制対象）
     pub skip_codegen: HashMap<String, String>,
+    /// macro/fn 名 → 追加する宣言（辞書に無い場合のみ適用）
+    pub add_decls: HashMap<String, AddDeclPatch>,
     /// `kind: "remove"` で名指しされた、上位レイヤから取り除くべき名前。
     /// 単一ファイル `load_json` 単独では実体に影響しないが、
     /// `load_for_apidoc_path` の 2 段マージで version-specific から common
@@ -176,6 +221,22 @@ pub fn load_name_list<P: AsRef<Path>>(path: P) -> io::Result<Vec<String>> {
             }
         })
         .collect())
+}
+
+/// `add_decl` の `value` (apidoc 宣言行) をパースする。
+/// `=for apidoc ` / `=for apidoc_item ` プレフィックスは剥がして受理する
+/// (perl ヘッダからのコピペを想定)。型情報を持たない名前だけの行は
+/// 宣言として無意味なので None (ロード側で InvalidData になる)。
+fn parse_add_decl_value(value: &str) -> Option<ApidocEntry> {
+    let trimmed = value.trim();
+    if !trimmed.contains('|') {
+        return None;
+    }
+    if trimmed.starts_with("=for apidoc") {
+        ApidocEntry::parse_apidoc_line(trimmed)
+    } else {
+        ApidocEntry::parse_line(trimmed)
+    }
 }
 
 impl ApidocPatchSet {
@@ -219,6 +280,23 @@ impl ApidocPatchSet {
                     // 単独 load では実体には影響しない（removals に記録するだけ）。
                     // 2 段マージ時に上位レイヤから打ち消すために使われる。
                     set.removals.insert(p.name);
+                }
+                PatchKind::AddDecl => {
+                    let v = p.value.clone().ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("patch for {}: add_decl requires `value` \
+                                 (apidoc line: flags|return_type|name|args...)", p.name)))?;
+                    let mut entry = parse_add_decl_value(&v).ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("patch for {}: add_decl `value` is not a parsable \
+                                 apidoc line: {:?}", p.name, v)))?;
+                    if entry.name != p.name {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData,
+                            format!("patch for {}: add_decl `value` declares a different \
+                                     name `{}`", p.name, entry.name)));
+                    }
+                    entry.source_file = Some(format!("{} (add_decl)", path_ref.display()));
+                    set.add_decls.insert(p.name, AddDeclPatch { entry, reason: p.reason });
                 }
             }
         }
@@ -271,10 +349,12 @@ impl ApidocPatchSet {
             if debug {
                 cargo_warning(&format!(
                     "[apidoc-patches] loaded common.patches.json: \
-                     {} return_overrides, {} arg_overrides, {} skip_codegen, {} removals",
+                     {} return_overrides, {} arg_overrides, {} skip_codegen, \
+                     {} add_decls, {} removals",
                     common.return_overrides.len(),
                     common.arg_overrides.len(),
                     common.skip_codegen.len(),
+                    common.add_decls.len(),
                     common.removals.len(),
                 ));
             }
@@ -298,10 +378,11 @@ impl ApidocPatchSet {
             if debug {
                 cargo_warning(&format!(
                     "[apidoc-patches] loaded {}: \
-                     {} return_overrides, {} skip_codegen, {} removals",
+                     {} return_overrides, {} skip_codegen, {} add_decls, {} removals",
                     version_path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
                     version.return_overrides.len(),
                     version.skip_codegen.len(),
+                    version.add_decls.len(),
                     version.removals.len(),
                 ));
             }
@@ -310,6 +391,7 @@ impl ApidocPatchSet {
                 set.return_overrides.remove(name);
                 set.arg_overrides.remove(name);
                 set.skip_codegen.remove(name);
+                set.add_decls.remove(name);
             }
             // それから version 側のパッチを上書きマージ
             set.merge_overlay(version);
@@ -335,6 +417,9 @@ impl ApidocPatchSet {
         }
         for (k, v) in other.skip_codegen {
             self.skip_codegen.insert(k, v);
+        }
+        for (k, v) in other.add_decls {
+            self.add_decls.insert(k, v);
         }
         for name in other.removals {
             self.removals.insert(name);
@@ -374,6 +459,7 @@ impl ApidocPatchSet {
         self.return_overrides.is_empty()
             && self.arg_overrides.is_empty()
             && self.skip_codegen.is_empty()
+            && self.add_decls.is_empty()
     }
 
     /// パッチ件数
@@ -381,6 +467,7 @@ impl ApidocPatchSet {
         self.return_overrides.len()
             + self.arg_overrides.iter().map(|(_, v)| v.len()).sum::<usize>()
             + self.skip_codegen.len()
+            + self.add_decls.len()
     }
 
     /// `return_type_override` と `arg_type_override` を `ApidocDict` に適用
@@ -400,12 +487,36 @@ impl ApidocPatchSet {
         if debug {
             cargo_warning(&format!(
                 "[apidoc-patches] apply_to_apidoc: dict has {} entries; \
-                 patches: {} return_overrides, {} arg_overrides, {} skip_codegen",
+                 patches: {} return_overrides, {} arg_overrides, {} skip_codegen, \
+                 {} add_decls",
                 dict.len(),
                 self.return_overrides.len(),
                 self.arg_overrides.len(),
                 self.skip_codegen.len(),
+                self.add_decls.len(),
             ));
+        }
+
+        // add_decl は override 系より先に適用する
+        // (注入した宣言に return/arg override を重ねられる順序)
+        for (name, patch) in &self.add_decls {
+            if dict.get(name).is_none() {
+                dict.insert(name.clone(), patch.entry.clone());
+                applied.push(name.clone());
+                if debug {
+                    cargo_warning(&format!(
+                        "[apidoc-patches] add_decl ADDED `{}`: {} ({} args)",
+                        name,
+                        patch.entry.return_type.as_deref().unwrap_or("(none)"),
+                        patch.entry.args.len(),
+                    ));
+                }
+            } else if debug {
+                cargo_warning(&format!(
+                    "[apidoc-patches] add_decl `{}`: already present in dict, no-op",
+                    name
+                ));
+            }
         }
 
         for (name, (new_ty, _reason)) in &self.return_overrides {
@@ -595,6 +706,136 @@ mod tests {
         let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
         assert!(set.is_empty());
         assert_eq!(set.source_paths.len(), 0);
+    }
+
+    const ADD_DECL_PATCH: &str = r#"{
+        "schema_version": 1,
+        "patches": [
+            { "name": "AvARRAY", "kind": "add_decl",
+              "value": "Am|SV**|AvARRAY|AV* av",
+              "reason": "declaration added to headers in 5.38" },
+            { "name": "MUTABLE_PTR", "kind": "add_decl",
+              "value": "=for apidoc Am |void *|MUTABLE_PTR|void * p",
+              "reason": "prefix form should be accepted (copy-paste from header)" }
+        ]
+    }"#;
+
+    #[test]
+    fn test_add_decl_load() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_json(tmp.path(), "common.patches.json", ADD_DECL_PATCH);
+        let set = ApidocPatchSet::load_json(&path).unwrap();
+        assert_eq!(set.add_decls.len(), 2);
+        assert_eq!(set.count(), 2);
+        assert!(!set.is_empty());
+
+        let av = &set.add_decls["AvARRAY"];
+        assert_eq!(av.entry.return_type.as_deref(), Some("SV**"));
+        assert_eq!(av.entry.args.len(), 1);
+        assert!(av.entry.flags.is_macro);
+        assert!(av.entry.source_file.as_deref().unwrap().contains("add_decl"));
+
+        // `=for apidoc ` プレフィックス付きの value も受理される
+        let mp = &set.add_decls["MUTABLE_PTR"];
+        assert_eq!(mp.entry.return_type.as_deref(), Some("void *"));
+    }
+
+    #[test]
+    fn test_add_decl_applies_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_json(tmp.path(), "common.patches.json", ADD_DECL_PATCH);
+        let set = ApidocPatchSet::load_json(&path).unwrap();
+
+        let mut dict = ApidocDict::new();
+        let applied = set.apply_to_apidoc(&mut dict);
+        assert!(applied.contains(&"AvARRAY".to_string()));
+        assert_eq!(dict.get("AvARRAY").unwrap().return_type.as_deref(), Some("SV**"));
+        assert!(dict.get("MUTABLE_PTR").is_some());
+    }
+
+    #[test]
+    fn test_add_decl_noop_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_json(tmp.path(), "common.patches.json", ADD_DECL_PATCH);
+        let set = ApidocPatchSet::load_json(&path).unwrap();
+
+        // 辞書に既にヘッダ由来の (異なる) 宣言があるケース
+        let mut dict = ApidocDict::new();
+        let native = ApidocEntry::parse_line("Cm|SSize_t|AvARRAY|AV* av").unwrap();
+        dict.insert("AvARRAY".to_string(), native);
+
+        let applied = set.apply_to_apidoc(&mut dict);
+        // 既存エントリは上書きされない (no-op)
+        assert_eq!(dict.get("AvARRAY").unwrap().return_type.as_deref(), Some("SSize_t"));
+        assert!(!applied.contains(&"AvARRAY".to_string()));
+        // 不在だった MUTABLE_PTR は追加される
+        assert!(applied.contains(&"MUTABLE_PTR".to_string()));
+    }
+
+    #[test]
+    fn test_add_decl_value_errors() {
+        let tmp = TempDir::new().unwrap();
+        // value 欠落
+        let p1 = write_json(tmp.path(), "p1.patches.json", r#"{
+            "schema_version": 1,
+            "patches": [ { "name": "FOO", "kind": "add_decl", "reason": "r" } ]
+        }"#);
+        assert!(ApidocPatchSet::load_json(&p1).is_err());
+        // パース不能 (型情報の無い名前だけの行)
+        let p2 = write_json(tmp.path(), "p2.patches.json", r#"{
+            "schema_version": 1,
+            "patches": [ { "name": "FOO", "kind": "add_decl",
+                           "value": "FOO", "reason": "r" } ]
+        }"#);
+        assert!(ApidocPatchSet::load_json(&p2).is_err());
+        // name フィールドと value 内の名前の不一致
+        let p3 = write_json(tmp.path(), "p3.patches.json", r#"{
+            "schema_version": 1,
+            "patches": [ { "name": "FOO", "kind": "add_decl",
+                           "value": "Am|int|BAR|int x", "reason": "r" } ]
+        }"#);
+        assert!(ApidocPatchSet::load_json(&p3).is_err());
+    }
+
+    #[test]
+    fn test_add_decl_removed_by_version() {
+        let tmp = TempDir::new().unwrap();
+        write_json(tmp.path(), "common.patches.json", ADD_DECL_PATCH);
+        let version_json = r#"{
+            "schema_version": 1,
+            "patches": [
+                { "name": "AvARRAY", "kind": "remove",
+                  "reason": "this version must not inject AvARRAY" }
+            ]
+        }"#;
+        write_json(tmp.path(), "v5.42.patches.json", version_json);
+        let apidoc_path = tmp.path().join("v5.42.json");
+
+        let set = ApidocPatchSet::load_for_apidoc_path(&apidoc_path).unwrap();
+        assert!(!set.add_decls.contains_key("AvARRAY"));
+        assert!(set.add_decls.contains_key("MUTABLE_PTR"));
+    }
+
+    #[test]
+    fn test_add_decl_with_return_override() {
+        // add_decl で注入した宣言に return_type_override を重ねられる
+        // (add_decl が先に適用される順序の検証)
+        let tmp = TempDir::new().unwrap();
+        let json = r#"{
+            "schema_version": 1,
+            "patches": [
+                { "name": "AvARRAY", "kind": "add_decl",
+                  "value": "Am|SV**|AvARRAY|AV* av", "reason": "r" },
+                { "name": "AvARRAY", "kind": "return_type_override",
+                  "value": "SV *", "reason": "r" }
+            ]
+        }"#;
+        let path = write_json(tmp.path(), "common.patches.json", json);
+        let set = ApidocPatchSet::load_json(&path).unwrap();
+
+        let mut dict = ApidocDict::new();
+        set.apply_to_apidoc(&mut dict);
+        assert_eq!(dict.get("AvARRAY").unwrap().return_type.as_deref(), Some("SV *"));
     }
 
     #[test]

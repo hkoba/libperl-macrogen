@@ -88,8 +88,8 @@ apidoc/
 | `schema_version` | ✓ | 現在 `1` のみ |
 | `comment` |   | 自由記述（ファイル全体の意図） |
 | `patches[].name` | ✓ | 対象 macro/function 名 |
-| `patches[].kind` | ✓ | `return_type_override` / `arg_type_override` / `skip_codegen` / `remove` |
-| `patches[].value` | kind 依存 | `*_override` 系で必須（C 型文字列） |
+| `patches[].kind` | ✓ | `return_type_override` / `arg_type_override` / `skip_codegen` / `remove` / `add_decl` |
+| `patches[].value` | kind 依存 | `*_override` 系で必須（C 型文字列）。`add_decl` では apidoc 宣言行 |
 | `patches[].arg_index` | kind 依存 | `arg_type_override` で必須 |
 | `patches[].source_loc` |   | バグ箇所 `/path:line`（デバッグ・上流報告用） |
 | `patches[].reason` | ✓ | パッチが必要な理由（必須） |
@@ -146,6 +146,43 @@ inline comment 由来の entry にも、JSON 由来の entry にも適用可能�
 
 `value` などのフィールドは無視される。`name` と `reason` のみ意味を持つ。
 common 側に書いても打ち消す対象が無いので no-op。
+
+### `add_decl`
+
+apidoc 辞書に宣言を追加する。**辞書に同名が既に有れば no-op**(既存宣言は
+上書きしない)。`value` に embed.fnc 形式の apidoc 宣言行
+(`flags|return_type|name|args...`。`=for apidoc ` / `=for apidoc_item `
+プレフィックス付きも可 — perl ヘッダからコピペできる)を書き、ロード時に
+`ApidocEntry::parse_line` で即パースする(パース不能・`name` 不一致は
+fail-fast)。
+
+```json
+// apidoc/common.patches.json
+{ "name": "AvARRAY", "kind": "add_decl",
+  "value": "Am|SV**|AvARRAY|AV* av",
+  "source_loc": "perl-5.42 av.h:80 (=for apidoc)",
+  "reason": "declaration added to headers in 5.34; contract identical in older perls",
+  "upstream_status": "added-in-5.34" }
+```
+
+用途: 旧 perl のヘッダに `=for apidoc` コメントが無いマクロ
+(`MUTABLE_PTR` 一族 / `AvARRAY` / `AvFILLp` — 5.34 でヘッダに追記された)
+の宣言欠落を補う。宣言の契約が全バージョン同一なら `common.patches.json`
+に 1 セット置くだけでよく、新しい perl では自動的に no-op になる
+(バージョン別ファイルの分岐は増えない)。これが無いと依存マクロ
+(Cv/Hv 一族)が cascade で消える(doc/plan/todo-2026-08-19.md、issue #5)。
+
+適用順は **override 系より先**: 注入した宣言に `return_type_override` /
+`arg_type_override` を重ねられる(例: `AvFILLp` は add_decl + 5.32 の
+`int` 宣言訂正の return override を併設)。`skip_codegen` との同名共存も
+許容される(宣言で caller の型推論を助けつつ、当該マクロ自身の wrapper
+生成は抑制する組合せは正当)。version-specific の `kind: "remove"` で
+common 側の add_decl を打ち消すこともできる。
+
+**注意**: `apidoc/` 配下の JSON を編集したら `APIDOC_DATA_VERSION`
+(src/apidoc_data.rs) の bump が必要(実行時の展開キャッシュがこの
+バージョンだけをキーにしているため)。リリース時は `apidoc.tar.gz` の
+再生成 (`tar -czf apidoc.tar.gz -C . apidoc`) も忘れないこと。
 
 ## パイプライン統合
 
