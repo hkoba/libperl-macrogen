@@ -219,12 +219,17 @@ impl<'a> PPExprEvaluator<'a> {
                 Some(TokenKind::LtLt) => {
                     self.advance();
                     let right = self.additive()?;
-                    left <<= right;
+                    // シフト量はマスクする (TinyCC gen_opic の
+                    // `l1 <<= (l2 & shm)` と同方針)。C ではシフト量 >= 幅は
+                    // UB だが、perl 5.44 のヘッダに評価時 64 以上になる
+                    // #if 式が存在し、panic (shift overflow) してはならない
+                    left = left.wrapping_shl((right & 63) as u32);
                 }
                 Some(TokenKind::GtGt) => {
                     self.advance();
                     let right = self.additive()?;
-                    left >>= right;
+                    // i64 の >> は算術シフト = TinyCC の TOK_SAR 相当
+                    left >>= (right & 63) as u32;
                 }
                 _ => break,
             }
@@ -408,6 +413,38 @@ mod tests {
         let loc = SourceLocation::new(FileId::default(), 1, 1);
         let mut eval = PPExprEvaluator::new(tokens, interner, macros, loc);
         eval.evaluate().unwrap()
+    }
+
+    #[test]
+    fn test_shift_amount_is_masked() {
+        // シフト量 >= 64 で panic せず、TinyCC 同様 63 でマスクする
+        // (perl 5.44 のヘッダに評価時 64 以上になる #if シフト式が存在)
+        let interner = StringInterner::new();
+        let macros = MacroTable::new();
+
+        // 1 << 64 → 1 << 0 = 1
+        let tokens = vec![
+            make_token(TokenKind::IntLit(1)),
+            make_token(TokenKind::LtLt),
+            make_token(TokenKind::IntLit(64)),
+        ];
+        assert_eq!(eval_tokens(&tokens, &interner, &macros), 1);
+
+        // 1 << 65 → 1 << 1 = 2
+        let tokens = vec![
+            make_token(TokenKind::IntLit(1)),
+            make_token(TokenKind::LtLt),
+            make_token(TokenKind::IntLit(65)),
+        ];
+        assert_eq!(eval_tokens(&tokens, &interner, &macros), 2);
+
+        // 256 >> 68 → 256 >> 4 = 16
+        let tokens = vec![
+            make_token(TokenKind::IntLit(256)),
+            make_token(TokenKind::GtGt),
+            make_token(TokenKind::IntLit(68)),
+        ];
+        assert_eq!(eval_tokens(&tokens, &interner, &macros), 16);
     }
 
     #[test]
