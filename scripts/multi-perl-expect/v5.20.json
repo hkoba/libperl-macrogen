@@ -12,7 +12,11 @@
       "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
       "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
       "bounds 再較正。",
-      "実測 counts (2026-08-22 (3)): threaded fn=1464 unresolved=46 / non-threaded fn=1402 unresolved=92"
+      "2026-08-22 (5): 下流実走再評価に基づく v5.20/v5.22.patches.json 新設",
+      "(Perl_atof / 旧ハッシュ inline 群 / 残渣クラスの理由付き skip) と",
+      "Padname* の * 抜け override (common, apidoc data 1.12) を反映して bounds 再較正。",
+      "5.20/5.22 の下流 libperl-sys ビルドは green (Phase 9 の当初要件完了)。",
+      "実測 counts (2026-08-22 (5)): threaded fn=1436 unresolved=44 / non-threaded fn=1382 unresolved=87"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -24,16 +28,16 @@
    ],
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 5,
-         "generated_fn_min": 1261,
-         "unresolved_names_max": 111
+         "codegen_suppressed_max": 32,
+         "generated_fn_min": 1243,
+         "unresolved_names_max": 105
       }
    },
    "threaded": {
       "bounds": {
-         "codegen_suppressed_max": 5,
-         "generated_fn_min": 1317,
-         "unresolved_names_max": 56
+         "codegen_suppressed_max": 32,
+         "generated_fn_min": 1292,
+         "unresolved_names_max": 53
       },
       "known_failures": {
          "assertions": [
