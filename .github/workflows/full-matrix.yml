@@ -1,10 +1,7 @@
-# フル matrix スモーク: 偶数マイナー 5.20〜5.42 × {threaded, non-threaded}。
+# フル matrix スモーク: 偶数マイナー 5.20〜5.44 × {threaded, non-threaded}。
 # 期待値 (scripts/multi-perl-expect/) の known_failures により既知の red は
 # XFAIL として green になる。真の退行 (新しい失敗) だけが fail する。
 #
-# NOTE: perl '5' (現在 5.44) は同梱 apidoc データが 5.42 までのため除外
-# (resolve_apidoc_path が exact match 必須 — macrogen issue #6)。
-# apidoc/v5.44.json 追加後に matrix へ戻すこと。
 #
 # NOTE: 5.20/5.22 の actions-setup-perl prebuilt が現行 runner に無い場合は、
 # 当該 leg を container: perl:5.2x-buster 方式へ切り替える (スモークは apt
@@ -38,6 +35,7 @@ jobs:
           - '5.38'
           - '5.40'
           - '5.42'
+          - '5.44'
         threaded: [ true, false ]
     steps:
       - uses: actions/checkout@v6

@@ -1,0 +1,24 @@
+{
+   "comment": [
+      "2026-08-22 の 5.44 対応 (issue #6) で新設。apidoc data 1.9 (v5.44.json)",
+      "+ pp_expr シフト量マスク + sv.h マクロ改名 (SV_HEAD_/XPV_HEAD_/",
+      "XPVCV_COMMON_) 対応後の baseline から生成。known_failures は無し",
+      "(非 threaded 共通の bindings.rs 制限のみ = common.json 側)。",
+      "bounds は実測 + headroom (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
+      "実測 counts (2026-08-22): threaded fn=1849 unresolved=25 / non-threaded fn=1670 unresolved=119"
+   ],
+   "non-threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 5,
+         "generated_fn_min": 1503,
+         "unresolved_names_max": 143
+      }
+   },
+   "threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 5,
+         "generated_fn_min": 1664,
+         "unresolved_names_max": 30
+      }
+   }
+}

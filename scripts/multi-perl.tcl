@@ -14,7 +14,7 @@
 # flags:
 #   -n                dry-run (実行するコマンドを表示するだけ)
 #   --both            各 VERSION を threaded / non-threaded の両モードで
-#   --all             フル matrix (5.20〜5.42 偶数 × 両モード)。ディスク見積りを
+#   --all             フル matrix (5.20〜5.44 偶数 × 両モード)。ディスク見積りを
 #                     表示して確認を求める (--force-yes で省略)。デフォルトでは
 #                     絶対に発動しない
 #   --out DIR         成果物出力先 root (既定: tmp/multi-perl/out)。leg 毎に
@@ -40,7 +40,7 @@
 
 package require Tcl 8.6-
 
-set ALL_VERSIONS {5.20 5.22 5.24 5.26 5.28 5.30 5.32 5.34 5.36 5.38 5.40 5.42}
+set ALL_VERSIONS {5.20 5.22 5.24 5.26 5.28 5.30 5.32 5.34 5.36 5.38 5.40 5.42 5.44}
 set IMAGE_PREFIX docker.io/library/perl
 set DOWNSTREAM_URL https://github.com/hkoba/libperl-rs
 

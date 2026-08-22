@@ -24,8 +24,7 @@ perl を切り替えてビルド検証できる。
 
 ## 複数バージョン Perl テスト
 
-対象範囲は偶数マイナー **5.20〜5.42 × {threaded, non-threaded}**
-(5.44 は apidoc データ未対応 — issue #6)。詳細は
+対象範囲は偶数マイナー **5.20〜5.44 × {threaded, non-threaded}**。詳細は
 [doc/multi-perl-testing.md](doc/multi-perl-testing.md)。
 
 ```bash

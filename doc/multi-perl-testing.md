@@ -1,11 +1,12 @@
 # 複数バージョン Perl テスト基盤
 
-macrogen を偶数マイナー **perl 5.20〜5.42 × {threaded, non-threaded}** に対して
+macrogen を偶数マイナー **perl 5.20〜5.44 × {threaded, non-threaded}** に対して
 ローカル (podman) と CI で検証するための基盤。バージョン依存の退行
 (例: 旧 perl での Cv 一族消滅) を **publish 前に** 検出することが目的。
 
-perl `5.44` は同梱 apidoc データが 5.42 までのため対象外
-(`resolve_apidoc_path` は exact match 必須 — macrogen issue #6)。
+perl 5.44 は apidoc data 1.9 (`apidoc/v5.44.json`) で対応済み (issue #6)。
+新しい版が出たら `--apidoc-to-json <embed.fnc>` で JSON を生成して同梱する
+(`resolve_apidoc_path` は exact match 必須のため、データが無い版はエラーになる)。
 
 ## 構成
 
@@ -133,7 +134,7 @@ inner.sh が `cargo update -p libperl-macrogen` → `cargo tree` で適用を検
 | workflow | トリガー | 内容 |
 |---|---|---|
 | `ci.yml` | push | 単体テスト + golden (5.42-threaded で実走) + 代表スモーク 5.30/5.36/5.42 × 両モード |
-| `full-matrix.yml` | pull_request / dispatch | 5.20〜5.42 × 両モード |
+| `full-matrix.yml` | pull_request / dispatch | 5.20〜5.44 × 両モード |
 | `downstream.yml` | dispatch | libperl-sys 統合ビルド (perl 版・ブランチ指定)。publish 前検証用 |
 
 CI は podman を使わず、actions-setup-perl の perl に対して
