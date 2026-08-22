@@ -3800,13 +3800,23 @@ impl<'a> RustCodegen<'a> {
                 if let Some(ref hint) = type_hint {
                     let hint_ut = UnifiedType::from_rust_str(hint);
                     if hint_ut.is_pointer() {
-                        if is_null_literal(else_expr) {
+                        // type_hint (current_return_type) はマクロ全体の戻り値で、
+                        // call 引数内の入れ子三項にも渡ってくる。反対 arm の実推論型が
+                        // 非ポインタ (整数フラグ等) なら、この 0 はフラグの 0 であって
+                        // NULL ではない (例: 5.44 hv_fetch の
+                        // `HV_FETCH_JUST_SV | (lval ? HV_FETCH_LVALUE : 0)`)。
+                        // その場合は null 化せず arm ベースのフォールバックに任せる
+                        if is_null_literal(else_expr)
+                            && tt.as_ref().map_or(true, |t| t.is_pointer())
+                        {
                             let t = self.build_syn_expr(then_expr, info);
                             let e: syn::Expr = syn::parse_str(&null_ptr_expr(&hint_ut))
                                 .unwrap_or_else(|_| int_lit(0));
                             return if_else(cond_syn, t, e);
                         }
-                        if is_null_literal(then_expr) {
+                        if is_null_literal(then_expr)
+                            && et.as_ref().map_or(true, |t| t.is_pointer())
+                        {
                             let t: syn::Expr = syn::parse_str(&null_ptr_expr(&hint_ut))
                                 .unwrap_or_else(|_| int_lit(0));
                             let e = self.build_syn_expr(else_expr, info);
