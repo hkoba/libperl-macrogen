@@ -1,27 +1,25 @@
 {
-   "comment" : [
+   "comment": [
       "2026-08-19 の Phase 6 全範囲 baseline 採取 (podman legs) から生成。",
       "known_failures は green 化フェーズ (実装計画 Phase 9) で解消し次第",
       "削除する (解消すると XPASS 警告が出る)。bounds は実測 + headroom。",
-      "実測 counts: threaded fn=1643 unresolved=31 / non-threaded fn=1532 unresolved=98"
+      "実測 counts: threaded fn=1643 unresolved=31 / non-threaded fn=1532 unresolved=98",
+      "2026-08-22 (2): token 注釈補完 (apidoc data 1.5, Xop*/Bhk* の which) で",
+      "OP_CLASS が全 leg 復活 → known_failures から削除 (enforced 化)、bounds 再較正。",
+      "実測 counts (2026-08-22 (2)): threaded fn=1646 unresolved=31 / non-threaded fn=1535 unresolved=98"
    ],
-   "known_failures" : {
-      "must_generate" : [
-         "OP_CLASS"
-      ]
-   },
-   "non-threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 18,
-         "generated_fn_min" : 1378,
-         "unresolved_names_max" : 116
+   "non-threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 16,
+         "generated_fn_min": 1381,
+         "unresolved_names_max": 118
       }
    },
-   "threaded" : {
-      "bounds" : {
-         "codegen_suppressed_max" : 18,
-         "generated_fn_min" : 1478,
-         "unresolved_names_max" : 39
+   "threaded": {
+      "bounds": {
+         "codegen_suppressed_max": 16,
+         "generated_fn_min": 1481,
+         "unresolved_names_max": 38
       }
    }
 }

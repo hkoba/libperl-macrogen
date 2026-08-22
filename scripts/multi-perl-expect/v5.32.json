@@ -7,27 +7,28 @@
       "2026-08-22: add_decl (apidoc data 1.4, MUTABLE_*/AvARRAY/AvFILLp/Pad* 補正)",
       "導入後の再実測で Cv 一族 6 + HvFILL を known_failures から削除 (以後 enforced)、",
       "bounds を再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
-      "実測 counts (2026-08-22): threaded fn=1525 unresolved=35 / non-threaded fn=1450 unresolved=90"
+      "2026-08-22 (2): token 注釈補完 (apidoc data 1.5, Xop*/Bhk* の which) で",
+      "OP_CLASS が全 leg 復活 → known_failures から削除 (enforced 化)、bounds 再較正。",
+      "実測 counts (2026-08-22 (2)): threaded fn=1528 unresolved=38 / non-threaded fn=1453 unresolved=93"
    ],
    "known_failures": {
       "must_generate": [
          "CvDEPTH",
-         "OP_CLASS",
          "newSVpvs"
       ]
    },
    "non-threaded": {
       "bounds": {
          "codegen_suppressed_max": 53,
-         "generated_fn_min": 1305,
-         "unresolved_names_max": 108
+         "generated_fn_min": 1307,
+         "unresolved_names_max": 112
       }
    },
    "threaded": {
       "bounds": {
          "codegen_suppressed_max": 53,
-         "generated_fn_min": 1372,
-         "unresolved_names_max": 42
+         "generated_fn_min": 1375,
+         "unresolved_names_max": 46
       }
    }
 }
