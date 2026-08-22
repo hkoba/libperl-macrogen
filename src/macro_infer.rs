@@ -2455,10 +2455,25 @@ impl MacroInferContext {
                 if let crate::ast::DerivedDecl::Function(param_list) = dd {
                     for (i, param) in param_list.params.iter().enumerate() {
                         if let Some(ref decl) = param.declarator {
-                            let has_const = decl.derived.iter().any(|d| {
-                                matches!(d, crate::ast::DerivedDecl::Pointer(q) if q.is_const)
-                            });
-                            if has_const {
+                            let pointer_count = decl.derived.iter().filter(|d| {
+                                matches!(d, crate::ast::DerivedDecl::Pointer(_))
+                            }).count();
+                            // Rust の外側ポインタが *const になるのは
+                            // 「指し先が const」のとき:
+                            // - `const char *key` — const は DeclSpecs 側
+                            //   (pointee const)。単一ポインタなら外側 = *const。
+                            //   perl の inline fn (5.44 で hv_common_key_len 等が
+                            //   inline 化) はほぼこの形
+                            // - `T * const *` のような多段は中間ポインタの
+                            //   qual に付く (従来からの検査)
+                            // なお `char * const p` (束縛のみ const) を従来検査が
+                            // *const 扱いする不正確さは既存挙動として維持
+                            let has_const = (pointer_count == 1
+                                    && param.specs.qualifiers.is_const)
+                                || decl.derived.iter().any(|d| {
+                                    matches!(d, crate::ast::DerivedDecl::Pointer(q) if q.is_const)
+                                });
+                            if has_const && pointer_count > 0 {
                                 positions.insert(i);
                             }
                         }
