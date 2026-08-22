@@ -9,13 +9,11 @@
       "bounds を再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
       "2026-08-22 (2): token 注釈補完 (apidoc data 1.5, Xop*/Bhk* の which) で",
       "OP_CLASS が全 leg 復活 → known_failures から削除 (enforced 化)、bounds 再較正。",
-      "実測 counts (2026-08-22 (2)): threaded fn=1422 unresolved=47 / non-threaded fn=1352 unresolved=96"
+      "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
+      "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
+      "bounds 再較正。",
+      "実測 counts (2026-08-22 (3)): threaded fn=1448 unresolved=47 / non-threaded fn=1378 unresolved=96"
    ],
-   "known_failures": {
-      "must_generate": [
-         "newSVpvs"
-      ]
-   },
    "must_not_generate": [
       "Perl_CvDEPTH",
       "Perl_cx_topblock"
@@ -27,14 +25,14 @@
    "non-threaded": {
       "bounds": {
          "codegen_suppressed_max": 71,
-         "generated_fn_min": 1216,
+         "generated_fn_min": 1240,
          "unresolved_names_max": 116
       }
    },
    "threaded": {
       "bounds": {
          "codegen_suppressed_max": 71,
-         "generated_fn_min": 1279,
+         "generated_fn_min": 1303,
          "unresolved_names_max": 57
       }
    }

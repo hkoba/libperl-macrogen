@@ -176,18 +176,27 @@ CI は podman を使わず、actions-setup-perl の perl に対して
 
 green 化は実装計画の後半フェーズ (採取 → 分類 → カテゴリ別修正 → 引き締め) で行う:
 
-- **〜5.36**: OP_CLASS (依存先 XopENTRYCUSTOM の cascade)。5.38+ は green
-- **〜5.34**: newSVpvs (PARSE_FAILED)
 - **5.32/5.34**: CvDEPTH (既存 `v5.3x.patches.json` の auto-generated skip)
+- **5.20-threaded**: thx 検査 (CvGV の doc 行に [THX] マーカーが付かない)
 - **非 threaded 全版**: `samples/bindings.rs` が threaded スナップショットのため
   PL_* interpreter 変数が未解決 (common.json の non-threaded 節に登録)
-- **5.20/5.22 downstream**: rustc E0308/E0277/E0614 群 (採取済み、green 化対象)
+- **5.20/5.22 downstream**: rustc E0308/E0277/E0614 群 (主因は hv_func.h の
+  旧ハッシュ実装 inline 群。採取済み、green 化対象)
 
-**解消済み (2026-08-22, apidoc data 1.4)**: 5.20〜5.32 の Cv 一族 6 + HvFILL
-消滅は `add_decl` パッチ (`MUTABLE_*` 一族 / `AvARRAY` / `AvFILLp` の宣言補充、
-doc/architecture-apidoc-patches.md) と `Pad*` 系 12 件の arg_type_override
-(<=5.30 pad.h の `*` 抜け) で解消し、known_failures から削除 = enforced 化。
-下流 libperl-sys ビルドは 5.30-threaded で green 確認済み (issue #5)。
+**解消済み (2026-08-22)**:
+
+- **Cv 一族 6 + HvFILL (5.20〜5.32)**: `add_decl` パッチ (`MUTABLE_*` 一族 /
+  `AvARRAY` / `AvFILLp` の宣言補充、doc/architecture-apidoc-patches.md) と
+  `Pad*` 系 12 件の arg_type_override (<=5.30 pad.h の `*` 抜け) で解消
+  (apidoc data 1.3/1.4)。下流 libperl-sys ビルドは 5.30-threaded で green
+  確認済み (issue #5)
+- **OP_CLASS 一族 (〜5.36)**: `Xop*`/`Bhk*` の `which` 引数への `token` 注釈
+  補完 (apidoc data 1.5) + パッチ適用後辞書からの explicit-expand 導出で解消
+- **newSVpvs 一族 (〜5.34)**: パーサの隣接文字列リテラル連結に仮引数を許容
+  (`("" s "")` → `s` 還元) + `ASSERT_IS_LITERAL` の explicit-expand 化で解消
+
+いずれも known_failures から削除 = enforced 化済み。must_generate の既知 red
+は CvDEPTH (5.32/5.34) のみ。5.30-threaded は例外ゼロの完全 green。
 
 存在しないことが確認済みの API (must_not_generate):
 `Perl_CvDEPTH` / `Perl_cx_topblock` は **5.32 からこの名前になった**ため

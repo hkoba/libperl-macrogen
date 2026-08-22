@@ -6,25 +6,27 @@
       "実測 counts: threaded fn=1549 unresolved=36 / non-threaded fn=1472 unresolved=93",
       "2026-08-22 (2): token 注釈補完 (apidoc data 1.5, Xop*/Bhk* の which) で",
       "OP_CLASS が全 leg 復活 → known_failures から削除 (enforced 化)、bounds 再較正。",
-      "実測 counts (2026-08-22 (2)): threaded fn=1552 unresolved=39 / non-threaded fn=1475 unresolved=96"
+      "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
+      "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
+      "bounds 再較正。",
+      "実測 counts (2026-08-22 (3)): threaded fn=1580 unresolved=39 / non-threaded fn=1503 unresolved=96"
    ],
    "known_failures": {
       "must_generate": [
-         "CvDEPTH",
-         "newSVpvs"
+         "CvDEPTH"
       ]
    },
    "non-threaded": {
       "bounds": {
          "codegen_suppressed_max": 64,
-         "generated_fn_min": 1327,
+         "generated_fn_min": 1352,
          "unresolved_names_max": 116
       }
    },
    "threaded": {
       "bounds": {
          "codegen_suppressed_max": 64,
-         "generated_fn_min": 1396,
+         "generated_fn_min": 1422,
          "unresolved_names_max": 47
       }
    }
