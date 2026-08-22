@@ -291,18 +291,30 @@ pub fn run_inference_with_preprocessor(
     // ApidocCollector を Preprocessor に設定
     pp.set_comment_callback(Box::new(ApidocCollector::new()));
 
-    // _SV_HEAD マクロ呼び出しを監視
-    let sv_head_id = pp.interner_mut().intern("_SV_HEAD");
-    pp.set_macro_called_callback(sv_head_id, Box::new(MacroCallWatcher::new()));
+    // _SV_HEAD マクロ呼び出しを監視。
+    // perl 5.44 で予約識別子の整理により `_SV_HEAD` → `SV_HEAD_` に改名された
+    // (sv.h)。新旧両方を監視する (存在しない名前の watcher は発火しないだけで
+    // 無害なため、バージョン分岐は不要)。
+    const SV_HEAD_MACROS: &[&str] = &["_SV_HEAD", "SV_HEAD_"];
+    let sv_head_ids: Vec<InternedStr> = SV_HEAD_MACROS
+        .iter()
+        .map(|name| {
+            let id = pp.interner_mut().intern(name);
+            pp.set_macro_called_callback(id, Box::new(MacroCallWatcher::new()));
+            id
+        })
+        .collect();
 
     // 共通フィールド宣言マクロ（perl5 専用ハードコード）。
     // `_SV_HEAD` と同様、struct 通過時に Watcher を見て使用関係を fields_dict
     // に記録する。新規追加はこのリストに 1 行足すだけで良い。
+    // `XPV_HEAD_` / `XPVCV_COMMON_` は 5.44 での改名後の名前 (同上)。
     //
     // また、これらのマクロは perl.h / sv.h で `#undef` されるため、最終的な
     // MacroTable には残らない。本体（フィールド宣言列）は
     // `CommonMacroBodyCollector` が `#define` 時点で捕獲する。
-    const COMMON_FIELD_MACROS: &[&str] = &["_XPV_HEAD", "_XPVCV_COMMON"];
+    const COMMON_FIELD_MACROS: &[&str] =
+        &["_XPV_HEAD", "_XPVCV_COMMON", "XPV_HEAD_", "XPVCV_COMMON_"];
     let common_field_macro_ids: Vec<InternedStr> = COMMON_FIELD_MACROS
         .iter()
         .map(|name| {
@@ -386,18 +398,20 @@ pub fn run_inference_with_preprocessor(
         // 構造体定義の場合、_SV_HEAD と共通フィールドマクロのフラグをチェック
         if decl.is_target() {
             if let Some(struct_names) = extract_struct_names(decl) {
-                // _SV_HEAD が呼ばれていたら SV ファミリーに追加
-                if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
-                    if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
-                        if watcher.take_called() {
-                            // _SV_HEAD(typeName) の引数を取得
-                            let type_name = watcher.last_args()
-                                .and_then(|args| args.first().cloned())
-                                .unwrap_or_default();
+                // _SV_HEAD / SV_HEAD_ (5.44+) が呼ばれていたら SV ファミリーに追加
+                for &sv_head_id in &sv_head_ids {
+                    if let Some(cb) = pp.get_macro_called_callback(sv_head_id) {
+                        if let Some(watcher) = cb.as_any().downcast_ref::<MacroCallWatcher>() {
+                            if watcher.take_called() {
+                                // _SV_HEAD(typeName) の引数を取得
+                                let type_name = watcher.last_args()
+                                    .and_then(|args| args.first().cloned())
+                                    .unwrap_or_default();
 
-                            for name in &struct_names {
-                                // typeName → 構造体名マッピングも同時に登録
-                                fields_dict.add_sv_family_member_with_type(*name, &type_name);
+                                for name in &struct_names {
+                                    // typeName → 構造体名マッピングも同時に登録
+                                    fields_dict.add_sv_family_member_with_type(*name, &type_name);
+                                }
                             }
                         }
                     }
