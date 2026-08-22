@@ -317,6 +317,96 @@
       "source_loc": "perl-5.32 av.h (=for apidoc m|int|AvFILLp|AV* av)",
       "reason": "5.32's av.h apidoc declares `int` but struct xpvav.xav_fill is SSize_t in all supported versions (verified v5.20.0/v5.32.0 sources); 5.34+ headers declare SSize_t. Identity for 5.34+ and for the injected add_decl.",
       "upstream_status": "fixed-in-5.34"
+    },
+    {
+      "name": "XopENTRY",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h:838 (=for apidoc Am||XopENTRY|XOP *xop|which)",
+      "reason": "op.h apidoc in <=5.36 declares the `which` param without the `token` type. The macro pastes it (`xop->xop_##which` style), so macrogen must inline-expand call sites instead of generating a callable fn; the `token` annotation (added upstream in 5.38: `Amu|...|token which`) is that signal. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "XopENTRYCUSTOM",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h:846 (=for apidoc Am||XopENTRYCUSTOM|const OP *o|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`; the macro pastes it (`XOPe_##which`), leaving XOPe_which unresolved when treated as a callable fn and cascading OP_CLASS/OP_DESC/OP_NAME away. See XopENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "XopENTRY_set",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h:850 (=for apidoc Am|void|XopENTRY_set|XOP *xop|which|value)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See XopENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "XopDISABLE",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc Am|void|XopDISABLE|XOP *xop|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See XopENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "XopENABLE",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc Am|void|XopENABLE|XOP *xop|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See XopENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "BhkENTRY",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc mx|void *|BhkENTRY|BHK *hk|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which` (the macro pastes `bhk_##which`). Fixed upstream in 5.38 (`mxu|...|token which`). Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "BhkENTRY_set",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc Amx|void|BhkENTRY_set|BHK *hk|which|void *ptr)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See BhkENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "BhkDISABLE",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc Amx|void|BhkDISABLE|BHK *hk|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See BhkENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "BhkENABLE",
+      "kind": "arg_type_override",
+      "arg_index": 1,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc Amx|void|BhkENABLE|BHK *hk|which)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which`. See BhkENTRY. Identity on 5.38+.",
+      "upstream_status": "fixed-in-5.38"
+    },
+    {
+      "name": "CALL_BLOCK_HOOKS",
+      "kind": "arg_type_override",
+      "arg_index": 0,
+      "value": "token",
+      "source_loc": "perl-5.30 op.h (=for apidoc mx|void|CALL_BLOCK_HOOKS|which|arg)",
+      "reason": "op.h apidoc in <=5.36 lacks the `token` type on `which` (pasted into BhkENTRY). Fixed upstream in 5.38. Identity on 5.38+. Note: CAT2/STRINGIFY were reviewed for the same class -- <=5.30 has no apidoc declaration at all (nothing to override) and 5.34+ already carries `token`, so no patch is needed for them.",
+      "upstream_status": "fixed-in-5.38"
     }
   ]
 }

@@ -575,6 +575,20 @@ pub fn run_inference_with_preprocessor(
     }
     pp.add_explicit_expand_macros(token_type_macros.iter().copied());
 
+    // パッチ適用済みの apidoc 辞書からも token 型引数を持つマクロを登録する。
+    // collector 由来の token_type_macros はヘッダの `=for apidoc` スクレイプ
+    // のみが源で、パッチ適用前に確定している。旧 perl のヘッダは token 注釈を
+    // 欠く (例: <=5.36 の XopENTRYCUSTOM は型無し `which` — 5.38 で上流修正)
+    // ため、arg_type_override で補った token 注釈はここで拾う必要がある。
+    {
+        let dict_token_macros: Vec<InternedStr> = apidoc
+            .iter()
+            .filter(|(_, entry)| entry.has_token_arg())
+            .map(|(name, _)| pp.interner_mut().intern(name))
+            .collect();
+        pp.add_explicit_expand_macros(dict_token_macros);
+    }
+
     infer_ctx.analyze_all_macros(
         &mut pp,
         Some(&apidoc),

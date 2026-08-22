@@ -102,10 +102,22 @@ apidoc/
 `ApidocDict.entries[name].return_type` を `value` で上書き。
 inline comment 由来の entry にも、JSON 由来の entry にも適用可能。
 
-### `arg_type_override`（将来用）
+### `arg_type_override`
 
 `ApidocDict.entries[name].args[arg_index].ty` を `value` で上書き。
-初版未使用、必要時実装。
+主な用途は「旧 perl のヘッダ apidoc 宣言の誤り・情報欠落が上流で後から
+修正された」ケースの補正で、新しい版では宣言と同値 (identity) になるよう
+書く:
+
+- ポインタ `*` 抜け: `PAD_SET_CUR` 系 (現行ヘッダでも誤り)、
+  `Pad*`/`Padlist*`/`Padnamelist*` 12 件 (<=5.30、5.32 で上流修正)
+- 実契約への訂正: `MUTABLE_*` の引数を `void *` に
+- **`token` 注釈の補完**: `Xop*`/`Bhk*`/`CALL_BLOCK_HOOKS` の `which`
+  引数 (<=5.36、5.38 で上流修正)。`value: "token"` を設定すると
+  `ApidocEntry::has_token_arg()` が真になり、パッチ適用後の辞書から
+  explicit-expand リストに登録される (infer_api.rs) → token-pasting
+  マクロが呼び出し扱いされず call site でインライン展開されるため、
+  caller (OP_CLASS 等) が生成可能になる
 
 ### `skip_codegen`
 

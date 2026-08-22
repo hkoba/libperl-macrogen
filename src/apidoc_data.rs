@@ -21,7 +21,10 @@ use tar::Archive;
 /// 1.4: Pad*/Padlist*/Padnamelist* の arg_type_override 12 件
 ///      (<=5.30 の pad.h apidoc のポインタ `*` 抜け。5.32 で上流修正済み
 ///      = 新しい版では同値・無害)
-pub const APIDOC_DATA_VERSION: &str = "1.4";
+/// 1.5: Xop*/Bhk*/CALL_BLOCK_HOOKS の `which` 引数に `token` 注釈 10 件
+///      (<=5.36 の op.h apidoc は token 注釈を欠き、token-pasting マクロが
+///      呼び出し扱いされて OP_CLASS 等が cascade 消滅。5.38 で上流修正済み)
+pub const APIDOC_DATA_VERSION: &str = "1.5";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));
