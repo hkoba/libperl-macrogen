@@ -87,6 +87,10 @@ pub struct ExplicitExpandSymbols {
     pub assert_underscore_: InternedStr,
     /// STR_WITH_LEN マクロ（文字列リテラルと長さのペア）
     pub str_with_len: InternedStr,
+    /// ASSERT_IS_LITERAL マクロ（`("" x "")` の literal-only assert、
+    /// 5.36+ の STR_WITH_LEN が使用。意味的には identity なので展開し、
+    /// パーサの隣接文字列連結還元で `x` に潰す）
+    pub assert_is_literal: InternedStr,
     /// INT2PTR マクロ（整数からポインタへのキャスト）
     pub int2ptr: InternedStr,
     /// assert_not_ROK マクロ（assert_ ラッパー）
@@ -111,6 +115,7 @@ impl ExplicitExpandSymbols {
             cbool: interner.intern("cBOOL"),
             assert_underscore_: interner.intern("__ASSERT_"),
             str_with_len: interner.intern("STR_WITH_LEN"),
+            assert_is_literal: interner.intern("ASSERT_IS_LITERAL"),
             int2ptr: interner.intern("INT2PTR"),
             assert_not_rok: interner.intern("assert_not_ROK"),
             assert_not_glob: interner.intern("assert_not_glob"),
@@ -139,6 +144,7 @@ impl ExplicitExpandSymbols {
             self.cbool,
             self.assert_underscore_,
             self.str_with_len,
+            self.assert_is_literal,
             self.int2ptr,
             self.assert_not_rok,
             self.assert_not_glob,
@@ -3186,7 +3192,8 @@ mod tests {
         let symbols = ExplicitExpandSymbols::new(&mut interner);
 
         let syms: Vec<_> = symbols.iter().collect();
-        assert_eq!(syms.len(), 13);
+        assert_eq!(syms.len(), 14);
+        assert!(syms.contains(&symbols.assert_is_literal));
         assert!(syms.contains(&symbols.sv_any));
         assert!(syms.contains(&symbols.sv_flags));
         assert!(syms.contains(&symbols.cv_flags));

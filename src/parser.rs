@@ -2090,12 +2090,46 @@ impl<'a, S: TokenSource> Parser<'a, S> {
             TokenKind::StringLit(s) => {
                 let mut bytes = s.clone();
                 self.advance()?;
-                // 連続した文字列リテラルを結合
-                while let TokenKind::StringLit(s2) = &self.current.kind {
-                    bytes.extend_from_slice(s2);
-                    self.advance()?;
+                // 連続した文字列リテラルを結合 (C の隣接リテラル連結。
+                // TinyCC parse_mult_str と同方針で primary 解析位置で行う)。
+                // マクロ本体の解析では `("" s "")` (STR_WITH_LEN /
+                // ASSERT_IS_LITERAL の literal-only assert イディオム) の
+                // ように仮引数 Ident が挟まるため Ident も受理し、
+                // 「Ident 1 個 + 空リテラルのみ」なら意味的に等価なその
+                // Ident 式へ還元する。それ以外の Ident 混在 (非空リテラル
+                // との連結や Ident 2 個以上) は従来どおりエラー。
+                let mut param_ident: Option<InternedStr> = None;
+                let mut ident_count = 0usize;
+                loop {
+                    match &self.current.kind {
+                        TokenKind::StringLit(s2) => {
+                            bytes.extend_from_slice(s2);
+                            self.advance()?;
+                        }
+                        TokenKind::Ident(id) => {
+                            param_ident = Some(*id);
+                            ident_count += 1;
+                            self.advance()?;
+                        }
+                        _ => break,
+                    }
                 }
-                Ok(Expr::new(ExprKind::StringLit(bytes), loc))
+                match (ident_count, param_ident) {
+                    (0, _) => Ok(Expr::new(ExprKind::StringLit(bytes), loc)),
+                    (1, Some(id)) if bytes.is_empty() => {
+                        Ok(Expr::new(ExprKind::Ident(id), loc))
+                    }
+                    _ => Err(CompileError::Parse {
+                        loc,
+                        kind: ParseError::UnexpectedToken {
+                            expected: "adjacent string literals (string concatenation \
+                                       mixing macro parameters with non-empty literals \
+                                       is unsupported)"
+                                .to_string(),
+                            found: self.current.kind.clone(),
+                        },
+                    }),
+                }
             }
             TokenKind::LParen => {
                 self.advance()?;

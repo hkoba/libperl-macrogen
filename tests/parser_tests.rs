@@ -575,3 +575,53 @@ fn test_generic_selection_in_function_body() {
     assert_eq!(decls.len(), 1);
     assert!(matches!(decls[0], ExternalDecl::FunctionDef(_)));
 }
+
+/// パースがエラーになることを確認するヘルパ (隣接文字列連結の負のテスト用)
+fn parse_fails(source: &str) -> bool {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(source.as_bytes()).unwrap();
+    file.flush().unwrap();
+
+    let config = PPConfig {
+        include_paths: vec![],
+        predefined: vec![],
+        debug_pp: false,
+        target_dir: None,
+        ..Default::default()
+    };
+
+    let mut pp = Preprocessor::new(config);
+    pp.add_source_file(file.path()).unwrap();
+
+    let mut parser = Parser::new(&mut pp).unwrap();
+    parser.parse().is_err()
+}
+
+#[test]
+fn test_adjacent_string_literal_concat() {
+    // 純リテラル同士の隣接連結 (TinyCC parse_mult_str と同方針、従来挙動の不変確認)
+    let decls = parse(r#"char x[] = "abc" "def";"#);
+    match &init_expr(&decls).kind {
+        ExprKind::StringLit(bytes) => assert_eq!(bytes, b"abcdef"),
+        other => panic!("expected StringLit, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_empty_string_concat_with_ident_reduces_to_ident() {
+    // STR_WITH_LEN / ASSERT_IS_LITERAL の `("" s "")` イディオム
+    // (literal-only assert)。空リテラルとの連結は意味的に s そのもの
+    let decls = parse(r#"const char *x = ("" s "");"#);
+    match &init_expr(&decls).kind {
+        ExprKind::Ident(_) => {}
+        other => panic!("expected Ident, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_string_concat_mixing_ident_and_nonempty_literal_is_error() {
+    // 非空リテラルと仮引数の連結は未対応 (従来どおりエラー)
+    assert!(parse_fails(r#"const char *x = ("abc" s);"#));
+    // Ident 2 個以上も同様
+    assert!(parse_fails(r#"const char *x = ("" a b "");"#));
+}
