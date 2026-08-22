@@ -9,25 +9,23 @@
       "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
       "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
       "bounds 再較正。",
-      "実測 counts (2026-08-22 (3)): threaded fn=1580 unresolved=39 / non-threaded fn=1503 unresolved=96"
+      "2026-08-22 (4): skip リスト再評価 (apidoc data 1.8 — CvDEPTH override /",
+      "Perl_atof skip / 三項演算子 bool 修正) で CvDEPTH が復活 → known_failures",
+      "から削除。must_generate の既知 red はこれで全版ゼロ。bounds 再較正。",
+      "実測 counts (2026-08-22 (4)): threaded fn=1645 unresolved=43 / non-threaded fn=1543 unresolved=111"
    ],
-   "known_failures": {
-      "must_generate": [
-         "CvDEPTH"
-      ]
-   },
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 64,
-         "generated_fn_min": 1352,
-         "unresolved_names_max": 116
+         "codegen_suppressed_max": 28,
+         "generated_fn_min": 1388,
+         "unresolved_names_max": 134
       }
    },
    "threaded": {
       "bounds": {
-         "codegen_suppressed_max": 64,
-         "generated_fn_min": 1422,
-         "unresolved_names_max": 47
+         "codegen_suppressed_max": 28,
+         "generated_fn_min": 1480,
+         "unresolved_names_max": 52
       }
    }
 }
