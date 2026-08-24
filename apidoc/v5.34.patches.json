@@ -115,21 +115,11 @@
     },
     {
       "name": "CopLINE",
-      "kind": "skip_codegen",
-      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
-      "upstream_status": "n/a (macrogen limitation)"
-    },
-    {
-      "name": "CopLINE_dec",
-      "kind": "skip_codegen",
-      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
-      "upstream_status": "n/a (macrogen limitation)"
-    },
-    {
-      "name": "CopLINE_inc",
-      "kind": "skip_codegen",
-      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
-      "upstream_status": "n/a (macrogen limitation)"
+      "kind": "return_type_override",
+      "value": "line_t",
+      "source_loc": "perl-5.34/5.36 cop.h (=for apidoc Am|STRLEN|CopLINE|const COP * c)",
+      "reason": "The =for apidoc annotation (added in the 5.34 cycle) mis-declares the return type as STRLEN, but the macro reads (c)->cop_line whose type is line_t (U32). The scraped header entry wins over body inference, so the generated fn was `-> STRLEN` with a U32 body (E0308). Fixing the dict entry also fixes CopLINE_inc/CopLINE_dec, whose return types are inferred from CopLINE (they have no apidoc annotation of their own). Replaces the former skip_codegen entries for CopLINE/CopLINE_dec/CopLINE_inc. <=5.32 has no annotation (pure inference, correct); 5.38 corrected the annotation to line_t upstream.",
+      "upstream_status": "fixed-in-5.38 (cop.h annotation corrected to line_t)"
     },
     {
       "name": "Perl_SvREFCNT_inc",

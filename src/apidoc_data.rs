@@ -42,7 +42,11 @@ use tar::Archive;
 ///      (Perl_atof の aTHX_ 抜け / 旧ハッシュ inline 群 / bool・cast 残渣)
 /// 1.12: v5.20 に PAD_RESTORE_LOCAL / PAD_COMPNAME_* の 4 件を追加 (5.20 固有の
 ///      マクロ形状。take4 の下流実走で判明)
-pub const APIDOC_DATA_VERSION: &str = "1.12";
+/// 1.13: v5.34/v5.36 の CopLINE 系 skip_codegen 3 件を return_type_override
+///      line_t 1 件に置換 (cop.h の `=for apidoc Am|STRLEN|CopLINE|...` 誤記が
+///      原因。5.38 で上流修正。CopLINE_inc/_dec は CopLINE から推論されるため
+///      連動して復活。CopLINE_set は 5.38 以降と同じ CODEGEN_INCOMPLETE)
+pub const APIDOC_DATA_VERSION: &str = "1.13";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

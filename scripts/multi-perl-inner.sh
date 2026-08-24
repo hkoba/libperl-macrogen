@@ -123,10 +123,15 @@ EOF
         set +o pipefail
 
         # ── 成否に関わらず生成物を回収 (vpatches ツールの入力になる) ──
+        # 一次抽出の `--> .../out/macro_bindings.rs:` は rustc エラー出力に
+        # しか現れない → 成功ビルドでは fallback の find が主経路。build.rs の
+        # 再生成で hash dir が変わると旧 dir の stale copy が残るため、
+        # mtime 最新の 1 件を選ぶ (head -1 のディレクトリ順は不定)
         gen=$(perl -nle 'm,--> (\S+/out/macro_bindings\.rs):, and print $1 and exit' \
               /out/build-error.log 2>/dev/null || true)
         if [ -z "$gen" ]; then
-            gen=$(find "$CARGO_TARGET_DIR"/debug/build -name macro_bindings.rs 2>/dev/null | head -1)
+            gen=$(find "$CARGO_TARGET_DIR"/debug/build -name macro_bindings.rs \
+                       -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
         fi
         if [ -n "$gen" ] && [ -f "$gen" ]; then
             cp -v "$gen" /out/macro_bindings.rs
