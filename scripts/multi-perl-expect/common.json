@@ -23,6 +23,7 @@
     "CopFILE",
     "CopFILEAV",
     "CopLABEL",
+    "CopLINE",
     "HvFILL",
     "PerlIO_seek",
     "PerlIO_tell",

@@ -8,3 +8,4 @@ CvROOT
 CvSTART
 CvPADLIST
 CvISXSUB
+CopLINE  # runloop/raw.rs が参照。5.34/5.36 は cop.h apidoc 誤記 (STRLEN) を return_type_override で補正
