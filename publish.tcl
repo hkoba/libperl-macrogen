@@ -116,6 +116,8 @@ STEP 1 "前提チェック (clean tree / main / APIDOC_DATA_VERSION 整合)" {
         error "main ブランチではありません"
     }
 
+    RUN git pull
+
     # 前回リリース以降に apidoc/ が変わったなら APIDOC_DATA_VERSION も
     # 変わっていなければならない (利用者側キャッシュの stale 化防止)
     set apidocChanged [catch {=RUN git diff --quiet $::lastTag..HEAD -- apidoc}]
