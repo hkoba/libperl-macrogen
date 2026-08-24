@@ -1,10 +1,34 @@
 # 引継: perl 5.34/5.36 の CopLINE skip_codegen 解除 (真因調査と修正)
 
 - 作成: 2026-08-24 (perl-LibPerlRs-PartialEval 側セッションからの引継)
-- 状態: **未着手**
+- 状態: **解決済み (2026-08-24)** — 残りはリリース (0.1.9) と下流の最終確認 (§5-4, §6)
 - ゴール: v5.34/v5.36.patches.json の CopLINE 系 skip_codegen を「正しい生成」で
   置き換え、下流 perl-LibPerlRs-PartialEval の CI probe セル 5.34/5.36
   (ithreads) をビルド通過させる
+
+## 0. 解決サマリ (2026-08-24)
+
+**真因**: 5.34/5.36 の cop.h にある `=for apidoc Am|STRLEN|CopLINE|const COP * c`
+が戻り値型を STRLEN と**誤記**している (上流バグ、5.38 で line_t に修正。
+<=5.32 は注釈自体が無く純粋推論で正しい)。ヘッダ scrape がこのエントリを
+辞書に取り込み推論に勝つため、`-> STRLEN` + U32 本体の E0308 になっていた。
+skip 3 件を外した再現走で `pub unsafe fn CopLINE(c: *const COP) -> STRLEN`
+を実物確認済み。§4 の仮説 (b) = CvDEPTH と同系統の版別 override が正解だった。
+
+**修正** (apidoc data 1.13):
+- v5.34/v5.36.patches.json: CopLINE 系 skip_codegen 3 件 →
+  `return_type_override: line_t` 1 件に置換 (CopLINE_inc/_dec は注釈を持たず
+  CopLINE から推論されるため連動して復活。CopLINE_set は 5.38+ と同じ
+  CODEGEN_INCOMPLETE で parity — §5-1 の「4 関数」は 3 関数が正)
+- 再退行防止: `samples/require-partial-eval.txt` と multi-perl-expect
+  common.json の must_generate に CopLINE を追加
+- 副産物: multi-perl-inner.sh の成果物回収が「複数の libperl-sys-* build dir
+  から古い方を拾う」バグを発見・修正 (mtime 最新優先。下流 build.rs の
+  apidoc-version スタンプ再生成で新 hash dir ができると顕在化する)
+
+**検証**: 5.34/5.36-threaded downstream green (libperl-rs master、
+`CopLINE -> line_t` を実物確認)。smoke 5.20〜5.44 (+5.34 非 threaded)
+リグレッションなし。host cargo test + golden green。
 
 ## 1. なぜ今これか (下流の状況)
 
