@@ -201,6 +201,30 @@
       "name": "zaphod32_seed_state",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.28 (auto-generated)"
+    },
+    {
+      "name": "RCPV_LEN",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCOUNT",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCNT_inc",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCNT_dec",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
     }
   ]
 }

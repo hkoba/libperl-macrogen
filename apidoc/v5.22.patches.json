@@ -116,6 +116,30 @@
       "kind": "skip_codegen",
       "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
       "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RCPV_LEN",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCOUNT",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCNT_inc",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
+    },
+    {
+      "name": "RCPV_REFCNT_dec",
+      "kind": "remove",
+      "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
+      "upstream_status": "n/a (patch version-scoping)"
     }
   ]
 }
