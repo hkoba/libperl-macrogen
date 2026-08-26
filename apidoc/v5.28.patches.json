@@ -38,26 +38,6 @@
       "reason": "type-check fails on perl 5.28 (auto-generated)"
     },
     {
-      "name": "PadlistARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadlistMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadlistNAMESARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadlistNAMESMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
       "name": "PadnameIsOUR",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.28 (auto-generated)"
@@ -109,16 +89,6 @@
     },
     {
       "name": "S_MgBYTEPOS",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "S_SvREFCNT_dec",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "S_SvREFCNT_dec_NN",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.28 (auto-generated)"
     },
