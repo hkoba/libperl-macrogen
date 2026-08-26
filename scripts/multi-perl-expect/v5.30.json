@@ -12,15 +12,29 @@
       "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
       "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
       "bounds 再較正。",
-      "実測 counts (2026-08-22 (3)): threaded fn=1495 unresolved=44 / non-threaded fn=1426 unresolved=95"
+      "実測 counts (2026-08-22 (3)): threaded fn=1495 unresolved=44 / non-threaded fn=1426 unresolved=95",
+      "2026-08-26: SvREFCNT_dec/Padlist 系の auto-generated skip 6 件を実走再評価で解除",
+      "(apidoc data 1.14, doc/plan/unskip-refcnt-padlist-5.28-5.30.md)。復活分を",
+      "must_generate_extra で enforced 化 (PAD_SET_CUR は threaded のみ —",
+      "non-threaded は PAD_SET_CUR_NOSAVE が unresolved で従来から不生成)。",
+      "実測 counts (2026-08-26): threaded fn=1511 unresolved=46 / non-threaded fn=1435 unresolved=102"
+   ],
+   "must_generate_extra": [
+      "S_SvREFCNT_dec",
+      "S_SvREFCNT_dec_NN",
+      "SvREFCNT_dec",
+      "PadlistARRAY",
+      "PadlistMAX"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
-      "Perl_cx_topblock"
+      "Perl_cx_topblock",
+      "Perl_SvREFCNT_dec"
    ],
    "must_not_generate_comment": [
       "Perl_CvDEPTH: embed.fnc への登場は 5.32 から。5.20〜5.30 の CvDEPTH は S_CvDEPTHp 経由のマクロのみ (そちらは生成 PASS)",
-      "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い"
+      "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い",
+      "Perl_SvREFCNT_dec: この名前は 5.32 の inline 関数改名 (S_SvREFCNT_dec → Perl_SvREFCNT_dec) から。<=5.30 は S_SvREFCNT_dec (inline) + SvREFCNT_dec (マクロ) が正 (must_generate_extra で enforced)。Perl_ 名が要る下流は libperl-sys 側の compat shim で吸収する"
    ],
    "non-threaded": {
       "bounds": {
@@ -30,6 +44,9 @@
       }
    },
    "threaded": {
+      "must_generate_extra": [
+         "PAD_SET_CUR"
+      ],
       "bounds": {
          "codegen_suppressed_max": 60,
          "generated_fn_min": 1345,

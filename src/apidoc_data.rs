@@ -46,7 +46,17 @@ use tar::Archive;
 ///      line_t 1 件に置換 (cop.h の `=for apidoc Am|STRLEN|CopLINE|...` 誤記が
 ///      原因。5.38 で上流修正。CopLINE_inc/_dec は CopLINE から推論されるため
 ///      連動して復活。CopLINE_set は 5.38 以降と同じ CODEGEN_INCOMPLETE)
-pub const APIDOC_DATA_VERSION: &str = "1.13";
+/// 1.14: v5.28/v5.30 の auto-generated skip 6 件ずつ (S_SvREFCNT_dec{,_NN} /
+///      PadlistARRAY / PadlistMAX / PadlistNAMESARRAY / PadlistNAMESMAX) を
+///      下流ビルド実走再評価で解除 (0.1.8〜0.1.10 の型推論改善で解消済み
+///      だった)。SvREFCNT_dec / PAD_SET_CUR 等が連動して復活。
+///      Perl_SvREFCNT_dec という名前自体は 5.32 の inline 関数改名で登場
+///      したもので <=5.30 には存在しない (expect の must_not_generate に記録)。
+///      また common の RCPV_* return_type_override 4 件を 5.36 以前の各版で
+///      `kind: "remove"` により打ち消し (RCPV_* は 5.38 生まれ。それ以前は
+///      target 不在の MISS 警告ノイズになるだけだった — issue #17。
+///      v5.24.patches.json はこの打ち消しのために新設)
+pub const APIDOC_DATA_VERSION: &str = "1.14";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

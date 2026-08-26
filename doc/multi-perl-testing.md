@@ -123,6 +123,19 @@ macrogen 本体の `--require-codegen-list` (→ `doc/reference-cli-usage.md`) �
 semver 互換な patch は**そのままでは適用されない** (`[[patch.unused]]`)。
 inner.sh が `cargo update -p libperl-macrogen` → `cargo tree` で適用を検証する。
 
+**注意 (apidoc/ 編集の反復時)**: apidoc 展開キャッシュ
+(`LIBPERL_APIDOC_CACHE_DIR=/out/apidoc-cache`) の key は `APIDOC_DATA_VERSION`
+のみなので、**version を bump せずに apidoc/ を編集して再走すると前回走の
+stale データが使われる**。さらに macrogen 再ビルド後の再走では cargo が
+libperl-sys の build.rs を再実行せず、旧 macro_bindings.rs が成果物回収に
+拾われることがある。反復中は leg ごとに以下を挟むこと
+(2026-08-26 の unskip-refcnt-padlist 作業で実害、doc/plan/同名 §0' 参照):
+
+```bash
+rm -rf tmp/multi-perl/out/<leg>/apidoc-cache
+rm -rf tmp/multi-perl/target-downstream/<leg>/debug/build/libperl-sys-*
+```
+
 失敗時の `build-error.log` + `macro_bindings.rs` は
 `tools/build-error-to-vpatches.pl <ver> <log> <bindings>` の入力になる。
 ただし **CLAUDE.md の skip_codegen 運用ポリシー**に従い、出力された skip 候補は
