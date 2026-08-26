@@ -20,11 +20,13 @@
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
-      "Perl_cx_topblock"
+      "Perl_cx_topblock",
+      "Perl_SvREFCNT_dec"
    ],
    "must_not_generate_comment": [
       "Perl_CvDEPTH: embed.fnc への登場は 5.32 から。5.20〜5.30 の CvDEPTH は S_CvDEPTHp 経由のマクロのみ (そちらは生成 PASS)",
-      "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い"
+      "Perl_cx_topblock: この名前 (perl_prefix) は 5.32 から。 5.24〜5.30 は S_cx_topblock inline + PERL_CORE ガードの cx_topblock マクロ、5.20/5.22 には機能自体が無い",
+      "Perl_SvREFCNT_dec: この名前は 5.32 の inline 関数改名 (S_SvREFCNT_dec → Perl_SvREFCNT_dec) から。<=5.30 に存在するのは S_SvREFCNT_dec (inline) と SvREFCNT_dec (マクロ)"
    ],
    "non-threaded": {
       "bounds": {
