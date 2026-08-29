@@ -16,11 +16,19 @@ use warnings;
 my ($log_path, $bindings_path) = @ARGV;
 
 # 1) エラー行番号を収集
+#    note ブロック (`note: function defined here` 等) の span は呼ばれた側で
+#    あってエラー箇所ではないので除外 (build-error-to-vpatches.pl と同じ修正)
 open my $lf, '<', $log_path or die "open $log_path: $!";
 my %err_lines;
+my $in_primary = 0;
 while (<$lf>) {
+    if (/^error(?:\[E\d+\])?: /) {
+        $in_primary = 1;
+    } elsif (/^(?:warning|note|help)(?:\[.*?\])?: /) {
+        $in_primary = 0;
+    }
     # --> /path/to/macro_bindings.rs:LINE:COL
-    if (m{--> \S*/macro_bindings\.rs:(\d+):\d+}) {
+    if ($in_primary && m{--> \S*/macro_bindings\.rs:(\d+):\d+}) {
         $err_lines{$1} = 1;
     }
 }
