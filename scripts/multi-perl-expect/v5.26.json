@@ -12,7 +12,30 @@
       "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
       "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
       "bounds 再較正。",
-      "実測 counts (2026-08-22 (3)): threaded fn=1448 unresolved=47 / non-threaded fn=1378 unresolved=96"
+      "実測 counts (2026-08-22 (3)): threaded fn=1448 unresolved=47 / non-threaded fn=1378 unresolved=96",
+      "2026-08-29: 0.1.12 ラウンド (apidoc data 1.15, doc/plan/round-5.20-5.26.md) で",
+      "auto-generated skip 62 件を下流実走再評価 → 17 件恒久解除・真の失敗 12 件を",
+      "クラス別理由で再登録・sv_collxfrm (上流 sv.h typo) を skip 新設。復活分を",
+      "must_generate_extra で enforced 化。5.26 は 5.28/5.30 と違い non-threaded でも",
+      "PAD_SET_CUR は threaded 節のみ: smoke は threaded スナップショットの",
+      "samples/bindings.rs を使うため non-threaded では PL_comppad グローバルが",
+      "見えず SAVECOMPPAD/PAD_SET_CUR_NOSAVE が連鎖不生成になる (harness 制限)。",
+      "downstream の実 bindgen bindings では non-threaded でも生成される",
+      "(5.26/5.28/5.30/5.42 の downstream 産物で確認、2026-08-29)。",
+      "実測 counts (2026-08-29/30 検証スイープ): threaded fn=1479 sup=43 unres=49 / non-threaded fn=1401 sup=43 unres=105。",
+      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。"
+   ],
+   "must_generate_extra": [
+      "S_SvREFCNT_dec",
+      "S_SvREFCNT_dec_NN",
+      "SvREFCNT_dec",
+      "PadlistARRAY",
+      "PadlistMAX",
+      "PadnamePV",
+      "PadnameLEN",
+      "PadnameTYPE",
+      "PadnamelistARRAY",
+      "PadnamelistMAX"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -26,16 +49,19 @@
    ],
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 71,
-         "generated_fn_min": 1240,
-         "unresolved_names_max": 116
+         "codegen_suppressed_max": 51,
+         "generated_fn_min": 1260,
+         "unresolved_names_max": 126
       }
    },
    "threaded": {
       "bounds": {
-         "codegen_suppressed_max": 71,
-         "generated_fn_min": 1303,
-         "unresolved_names_max": 57
-      }
+         "codegen_suppressed_max": 51,
+         "generated_fn_min": 1331,
+         "unresolved_names_max": 58
+      },
+      "must_generate_extra": [
+         "PAD_SET_CUR"
+      ]
    }
 }

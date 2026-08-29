@@ -12,7 +12,14 @@
       "2026-08-22 (3): 隣接文字列リテラル連結のパーサ拡張 (STR_WITH_LEN の",
       "(\"\" s \"\") 対応) で newSVpvs 一族が全 leg 復活 → known_failures から削除、",
       "bounds 再較正。",
-      "実測 counts (2026-08-22 (3)): threaded fn=1508 unresolved=46 / non-threaded fn=1419 unresolved=108"
+      "実測 counts (2026-08-22 (3)): threaded fn=1508 unresolved=46 / non-threaded fn=1419 unresolved=108",
+      "2026-08-29: 0.1.12 ラウンド (apidoc data 1.15) で skip 21 件を採取・登録",
+      "(0.1.7 時代の auto 採取から 5.24 leg だけ漏れていた)。codegen_suppressed が",
+      "1 → 22 前後に増えるため max を暫定 27 に引き上げ (検証実測後 x1.2 で再較正)。",
+      "2026-08-29 (2): 5.24-non-threaded downstream 初実走で S__is_utf8_char_slow の",
+      "E0381 (未初期化 out-param、v5.22 と同一) が発覚 → skip 追加。",
+      "実測 counts (2026-08-29/30 検証スイープ): threaded fn=1487 sup=22 unres=45 / non-threaded fn=1398 sup=23 unres=106。",
+      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -26,16 +33,16 @@
    ],
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 5,
-         "generated_fn_min": 1277,
-         "unresolved_names_max": 130
+         "codegen_suppressed_max": 27,
+         "generated_fn_min": 1258,
+         "unresolved_names_max": 127
       }
    },
    "threaded": {
       "bounds": {
-         "codegen_suppressed_max": 5,
-         "generated_fn_min": 1357,
-         "unresolved_names_max": 56
+         "codegen_suppressed_max": 26,
+         "generated_fn_min": 1338,
+         "unresolved_names_max": 54
       }
    }
 }

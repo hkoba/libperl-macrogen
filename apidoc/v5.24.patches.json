@@ -1,7 +1,140 @@
 {
   "schema_version": 1,
-  "comment": "Patches for perl 5.24. Currently only cancels the common RCPV_* return_type_override entries that have no target before 5.38 (issue #17).",
+  "comment": "Version-specific patches for perl 5.24. skip_codegen entries were collected 2026-08-29 from the multi-perl 5.24 downstream leg (the 5.24 leg was missing from the original 0.1.7-era auto-collection; see doc/plan/round-5.20-5.26.md). Re-run tools/build-error-to-vpatches.pl after each perl-headers update or libperl-macrogen change.",
   "patches": [
+    {
+      "name": "Perl_atof",
+      "kind": "skip_codegen",
+      "reason": "The macro lacks aTHX_: Perl_my_atof takes (pTHX_ const char *s) on threaded builds, so the expansion is a 1-arg call to a 2-arg function (E0061). Latent in C because core code calls my_atof (embed.h adds aTHX_). Fixed upstream in 5.36. Same entry as in v5.20/v5.22/v5.32/v5.34.patches.json.",
+      "upstream_status": "fixed-in-5.36",
+      "source_loc": "perl-5.24 perl.h (#define Perl_atof(s) Perl_my_atof(s) under USE_PERL_ATOF)"
+    },
+    {
+      "name": "S_perl_hash_djb2",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_sdbm",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_superfast",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_murmur3",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_one_at_a_time",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_one_at_a_time_hard",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "S_perl_hash_old_one_at_a_time",
+      "kind": "skip_codegen",
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Same family as the v5.20/v5.22 entries; verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original auto-collection).",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
+    },
+    {
+      "name": "sv_collxfrm",
+      "kind": "skip_codegen",
+      "reason": "Upstream sv.h bug on this version: `#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` calls sv_cmp_flags instead of sv_collxfrm_flags, passing STRLEN* where SV* is expected (E0308). Latent in C because core code never calls the short name. Same entry as v5.26; fixed upstream by 5.34.",
+      "upstream_status": "fixed-in-5.34"
+    },
+    {
+      "name": "hv_exists",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "hv_exists_ent",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "gv_init",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "gv_autoload4",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvRXOK",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvPV_nolen_const",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "SvCANCOW",
+      "kind": "skip_codegen",
+      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection (the 5.24 leg was missing from the original 0.1.7-era auto-collection; build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_MATCH_UTF8_on",
+      "kind": "skip_codegen",
+      "reason": "Expands to `RXp_EXTFLAGS(ReANY(prog)) |= / &= flag` where RXp_EXTFLAGS is itself generated as a helper fn, so the compound assignment gets a function call on the left-hand side (E0067 invalid left-hand side of assignment). Write-through accessor support would be a new codegen feature (Signature Approval). Same entry as v5.26; verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_MATCH_UTF8_off",
+      "kind": "skip_codegen",
+      "reason": "Expands to `RXp_EXTFLAGS(ReANY(prog)) |= / &= flag` where RXp_EXTFLAGS is itself generated as a helper fn, so the compound assignment gets a function call on the left-hand side (E0067 invalid left-hand side of assignment). Write-through accessor support would be a new codegen feature (Signature Approval). Same entry as v5.26; verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "RX_ENGINE",
+      "kind": "skip_codegen",
+      "reason": "struct regexp's `engine` field is `const struct regexp_engine *` (regexp.h), so the generated body yields *const regexp_engine while the inferred return type is *mut regexp_engine (E0308). Const propagation from struct-field reads is a future codegen fix. Same entry as v5.26; verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "CX_POP_SAVEARRAY",
+      "kind": "skip_codegen",
+      "reason": "The 5.24 macro shape passes GvAV's GV argument where the callee expects *const sv without inserting the GV-to-SV cast (E0308 expected *const sv, found *mut gv). Cast-gap residual class (compiles from 5.26 on); candidate for a future codegen fix. Verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "MgPV_nolen_const",
+      "kind": "skip_codegen",
+      "reason": "The generated conditional mixes pointer mutability between branches: the SvPV_nolen_const branch yields *mut c_char while the mg_ptr branch is cast to *const c_char (E0308 types differ in mutability). Cast-gap residual class; candidate for a future codegen fix. Verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "S__is_utf8_char_slow",
+      "kind": "skip_codegen",
+      "reason": "The inline body declares `STRLEN actual_len;` uninitialized and passes &actual_len as an out-param to Perl_utf8n_to_uvchr, so the generated `let mut actual_len: STRLEN;` + `&raw mut actual_len` is rejected by rustc (E0381 used binding isn't initialized). Out-param zero-initialization would be a future codegen fix. Generated only on the non-threaded build of this version (threaded legs do not generate it). Same entry as v5.22; verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
     {
       "name": "RCPV_LEN",
       "kind": "remove",

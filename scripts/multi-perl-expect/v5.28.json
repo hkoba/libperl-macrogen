@@ -17,14 +17,28 @@
       "(apidoc data 1.14, doc/plan/unskip-refcnt-padlist-5.28-5.30.md)。復活分を",
       "must_generate_extra で enforced 化 (PAD_SET_CUR は threaded のみ —",
       "non-threaded は PAD_SET_CUR_NOSAVE が unresolved で従来から不生成)。",
-      "実測 counts (2026-08-26): threaded fn=1505 unresolved=46 / non-threaded fn=1429 unresolved=102"
+      "実測 counts (2026-08-26): threaded fn=1505 unresolved=46 / non-threaded fn=1429 unresolved=102",
+      "2026-08-29: 0.1.12 ラウンド (apidoc data 1.15) で Padname/Padnamelist 系の",
+      "auto-generated skip 8 件を解除 (5.26 での green 実証と同根 = data 1.11 の",
+      "common override で解消済みだった)。復活分 5 件を must_generate_extra に追加。",
+      "2026-08-29 補足: 「PAD_SET_CUR は threaded のみ」は smoke harness の制限",
+      "(threaded スナップショット samples/bindings.rs に PL_comppad グローバルが",
+      "無い) による。downstream の実 bindgen bindings では non-threaded でも",
+      "PAD_SET_CUR は生成される (downstream 産物で確認)。",
+      "実測 counts (2026-08-29/30 検証スイープ): threaded fn=1520 sup=33 unres=46 / non-threaded fn=1443 sup=33 unres=104。",
+      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。"
    ],
    "must_generate_extra": [
       "S_SvREFCNT_dec",
       "S_SvREFCNT_dec_NN",
       "SvREFCNT_dec",
       "PadlistARRAY",
-      "PadlistMAX"
+      "PadlistMAX",
+      "PadnamePV",
+      "PadnameLEN",
+      "PadnameTYPE",
+      "PadnamelistARRAY",
+      "PadnamelistMAX"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -38,9 +52,9 @@
    ],
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 57,
-         "generated_fn_min": 1278,
-         "unresolved_names_max": 114
+         "codegen_suppressed_max": 39,
+         "generated_fn_min": 1298,
+         "unresolved_names_max": 124
       }
    },
    "threaded": {
@@ -48,9 +62,9 @@
          "PAD_SET_CUR"
       ],
       "bounds": {
-         "codegen_suppressed_max": 57,
-         "generated_fn_min": 1340,
-         "unresolved_names_max": 53
+         "codegen_suppressed_max": 39,
+         "generated_fn_min": 1368,
+         "unresolved_names_max": 55
       }
    }
 }

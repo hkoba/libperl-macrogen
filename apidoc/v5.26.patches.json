@@ -13,11 +13,6 @@
       "reason": "type-check fails on perl 5.26 (auto-generated)"
     },
     {
-      "name": "CxLABEL",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
       "name": "DO_UTF8",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.26 (auto-generated)"
@@ -43,66 +38,6 @@
       "reason": "type-check fails on perl 5.26 (auto-generated)"
     },
     {
-      "name": "PadlistARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadlistMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadlistNAMESARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadlistNAMESMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnameIsOUR",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnameLEN",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnamePV",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnameREFCNT",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnameTYPE",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistREFCNT",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
       "name": "Perl_atof",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.26 (auto-generated)"
@@ -110,12 +45,14 @@
     {
       "name": "Perl_is_utf8_string",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "Perl_is_utf8_string_loclen",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "PmopSTASHPV",
@@ -125,30 +62,23 @@
     {
       "name": "RX_ENGINE",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "struct regexp's `engine` field is `const struct regexp_engine *` (regexp.h), so the generated body `(*ReANY(prog)).engine` yields *const regexp_engine while the inferred return type is *mut regexp_engine (E0308). Const propagation from struct-field reads is a future codegen fix; the name is not in the 5.26 apidoc dict so a return_type_override cannot patch it. Verified failing in the 2026-08-29 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "RX_MATCH_UTF8_off",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Expands to `RXp_EXTFLAGS(ReANY(prog)) |= / &= flag` where RXp_EXTFLAGS is itself generated as a helper fn, so the compound assignment gets a function call on the left-hand side (E0067 invalid left-hand side of assignment). Write-through accessor support would be a new codegen feature (Signature Approval). Verified failing in the 2026-08-29 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "RX_MATCH_UTF8_on",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Expands to `RXp_EXTFLAGS(ReANY(prog)) |= / &= flag` where RXp_EXTFLAGS is itself generated as a helper fn, so the compound assignment gets a function call on the left-hand side (E0067 invalid left-hand side of assignment). Write-through accessor support would be a new codegen feature (Signature Approval). Verified failing in the 2026-08-29 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_MgBYTEPOS",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "S_SvREFCNT_dec",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "S_SvREFCNT_dec_NN",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.26 (auto-generated)"
     },
@@ -175,37 +105,38 @@
     {
       "name": "S_is_c9strict_utf8_string",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_c9strict_utf8_string_loclen",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_strict_utf8_string",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_strict_utf8_string_loclen",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
-    },
-    {
-      "name": "S_is_utf8_fixed_width_buf_loclen_flags",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_utf8_string_flags",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_utf8_string_loclen_flags",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Old-style utf8 validity-check inline (5.26 utf8.h, before the 5.28 UTF-8 machinery rework) expands to bool/int-mixed condition chains that the codegen's bool coercion does not fully cover (E0308). Same residual class as the v5.32/v5.34 residual entries; candidate for a future codegen fix. Verified failing in the 2026-08-29 re-evaluation (build-error.log in tmp/multi-perl/out/). Note: S_is_utf8_fixed_width_buf_loclen_flags / isUTF8_CHAR_flags DO compile on 5.26 and were un-skipped in the same round.",
+      "upstream_status": "n/a (macrogen limitation)"
     },
     {
       "name": "S_is_utf8_valid_partial_char_flags",
@@ -215,7 +146,8 @@
     {
       "name": "S_perl_hash_one_at_a_time_hard",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Internal hash-function inline (hv_func.h) removed/reworked in modern perl. The old implementations use loop macros that reassign their induction variable (E0384 MURMUR_DOBYTES), u8/u32 mixed arithmetic (E0277) and assignment-position casts (E0067) that the codegen does not support. S_-prefixed internal implementation, not public API. Verified failing in the 2026-08-29 re-evaluation.",
+      "upstream_status": "n/a (macrogen limitation; API removed upstream)"
     },
     {
       "name": "SvCANCOW",
@@ -288,9 +220,10 @@
       "reason": "type-check fails on perl 5.26 (auto-generated)"
     },
     {
-      "name": "isUTF8_CHAR_flags",
+      "name": "sv_collxfrm",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.26 (auto-generated)"
+      "reason": "Upstream sv.h bug on this version: `#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` calls sv_cmp_flags instead of sv_collxfrm_flags, passing STRLEN* where SV* is expected (E0308). Latent in C because core code never calls the short name. Still present in 5.32 headers (see v5.32.patches.json), fixed upstream by 5.34.",
+      "upstream_status": "fixed-in-5.34"
     },
     {
       "name": "RCPV_LEN",

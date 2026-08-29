@@ -16,7 +16,15 @@
       "(Perl_atof / 旧ハッシュ inline 群 / 残渣クラスの理由付き skip) と",
       "Padname* の * 抜け override (common, apidoc data 1.12) を反映して bounds 再較正。",
       "5.20/5.22 の下流 libperl-sys ビルドは green (Phase 9 の当初要件完了)。",
-      "実測 counts (2026-08-22 (5)): threaded fn=1448 unresolved=45 / non-threaded fn=1392 unresolved=92"
+      "実測 counts (2026-08-22 (5)): threaded fn=1448 unresolved=45 / non-threaded fn=1392 unresolved=92",
+      "2026-08-29: 0.1.12 ラウンド (apidoc data 1.15) で GvALIASED_SV_{on,off} の",
+      "skip 2 件を追加 (gp_flags bitfield アクセサが代入 LHS になる E0067、5.22 のみ)。",
+      "suppressed 20 → 22 (max 24 内)。",
+      "2026-08-29 (2): 5.22-non-threaded downstream 初実走で S__is_utf8_char_slow の",
+      "E0381 (未初期化 out-param) が発覚 → skip 追加 (non-threaded のみ生成される関数)。",
+      "suppressed は nt で 23 (max 24 内)。",
+      "実測 counts (2026-08-29/30 検証スイープ): threaded fn=1446 sup=22 unres=45 / non-threaded fn=1389 sup=23 unres=92。",
+      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -30,15 +38,15 @@
    ],
    "non-threaded": {
       "bounds": {
-         "codegen_suppressed_max": 24,
-         "generated_fn_min": 1252,
-         "unresolved_names_max": 111
+         "codegen_suppressed_max": 27,
+         "generated_fn_min": 1250,
+         "unresolved_names_max": 110
       }
    },
    "threaded": {
       "bounds": {
-         "codegen_suppressed_max": 24,
-         "generated_fn_min": 1303,
+         "codegen_suppressed_max": 26,
+         "generated_fn_min": 1301,
          "unresolved_names_max": 54
       }
    }
