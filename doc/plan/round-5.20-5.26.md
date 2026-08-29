@@ -1,10 +1,86 @@
 # 引継: perl 5.20〜5.26 の downstream (libperl-sys) green 化ラウンド
 
 作成: 2026-08-29 (perl-LibPerlRs-PartialEval セッションからの依頼指示書)。
+状態: **解決済み (2026-08-29、apidoc data 1.15)** — 残りはリリース
+(0.1.12 publish.tcl) と下流の最終確認 (§5)。解決サマリは §0'。
 `unskip-copline-5.34-5.36.md` (0.1.10) / `unskip-refcnt-padlist-5.28-5.30.md`
 (0.1.11) に続く第 3 弾。対になる libperl-rs 側指示書 =
 `~/db/github/libperl-rs/docs/plan/plan-5.20-5.26-round.md`
 (その §1 が本書へ依頼する内容。§0 に下流 CI 実測の棚卸し全文)。
+
+## 0'. 解決サマリ (2026-08-29、apidoc data 1.15 / 0.1.12)
+
+版別の結果 (詳細な件数・理由は apidoc/v5.2X.patches.json の各 reason と
+src/apidoc_data.rs の 1.15 changelog):
+
+- **5.26 (本丸)**: auto-generated skip 62 件のうち 29 件を外して
+  `--downstream` 実走 → **17 件が恒久 unskip** (require 直撃の
+  Padlist* 4 / S_SvREFCNT_dec{,_NN} / **Padname·Padnamelist 全 8** /
+  CxLABEL / isUTF8_CHAR_flags / S_is_utf8_fixed_width_buf_loclen_flags)。
+  連鎖で SvREFCNT_dec / PAD_SET_CUR / PAD_BASE_SV / PadlistNAMES も復活。
+  §1 の PAD_SET_CUR_NOSAVE 連鎖仮説はそのとおり実証。さらに
+  **PAD_SET_CUR は downstream の実 bindgen bindings なら non-threaded でも
+  生成される** ことが判明 (5.26/5.28/5.30/5.42 の nt downstream 産物で確認)。
+  従来の「nt は不生成」は multi-perl smoke が threaded スナップショットの
+  samples/bindings.rs を使い PL_comppad グローバルが見えないことによる
+  harness 制限で、expect の enforced は従来どおり threaded 節のみ。
+  真の失敗 12 件 (旧型 utf8 検査系 8 = bool/int 混在 E0308、
+  RX_MATCH_UTF8_{on,off} = RXp_EXTFLAGS ヘルパ呼び出しが代入 LHS の E0067、
+  RX_ENGINE = regexp.engine が const フィールドで戻り値 *mut と不一致、
+  S_perl_hash_one_at_a_time_hard = hash inline クラス) はクラス別理由付きで
+  再登録。初露出の **sv_collxfrm は上流 sv.h の typo**
+  (`#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` —
+  sv_collxfrm_flags と書くべきところ。5.34 で修正) で skip 新設 +
+  v5.20〜v5.32 の既存 sv_collxfrm エントリの reason も正しい原因に更新。
+- **5.28/5.30 への波及**: Padname* 8 件ずつの skip も同根 (data 1.11 の
+  common override で解消済み) として解除。**注意: libperl-rs 側の
+  perl_core.rs 手書き Padname compat 5 関数 (cfg = ver28..ver32、
+  「future unskip round が外すまで」と明記されたミラー) は 0.1.12 bump と
+  同時に削除が必須** — native 生成と同一モジュールで衝突して E0428 になる
+  (compat を外した probe で 5.28/5.30 × 両モードの downstream green を確認
+  済み。Perl_SvREFCNT_dec の alias `pub use` は衝突しないので維持)。
+- **5.24 (採取漏れ)**: 実走で 44 エラー = 21 関数を特定し、クラス別
+  理由付きで skip 登録 (hash inline 7 / Perl_atof aTHX_ 抜け /
+  残渣クラス 7 / RX_* 3 / sv_collxfrm / 5.24 固有の CX_POP_SAVEARRAY =
+  GV→SV キャスト欠落と MgPV_nolen_const = 分岐間 const/mut 不一致)。
+- **5.22**: E0067 の正体は **GvALIASED_SV_{on,off}** (計画時の GvINTRO
+  推定は誤り)。gp_flags が 1-bit bitfield で bindgen がアクセサ
+  メソッド化するため代入 LHS にできない。skip 2 件で解決。
+- **non-threaded 初実走の発見**: 5.22/5.24 の non-threaded だけ
+  S__is_utf8_char_slow が生成され、C の未初期化 out-param パターン
+  (`STRLEN actual_len;` を `&actual_len` で渡す) が E0381 になる →
+  両版に skip 追加 (5.26 では生成されない)。「症状はモード非依存」の
+  §0 前提はこの 1 件だけ例外だった。
+- **5.20**: OpSIBLING require violation (正当な不在、libperl-rs 側対応) を
+  probe コピー (require から OpSIBLING を除去) で外して先を確認。
+  Padname*REFCNT{,_dec} の common override が 5.20 の dict に target を
+  持たず MISS ノイズになっていたため `remove` 4 件を追加 (issue #17 の
+  RCPV と同型)。
+- **ツール修正**: tools/build-error-to-{vpatches,skiplist}.pl が rustc の
+  `note: function defined here` span (呼ばれた側 = 正常関数) まで失敗扱い
+  していた誤計上を修正 (5.26 採取で sv_cmp_flags が誤混入した実例)。
+  なお本書 §1 の「実体は scripts/」は誤りで、実体は従来どおり `tools/`。
+
+**ハーネスの罠 (再確認)**: apidoc キャッシュの key は APIDOC_DATA_VERSION
+のみ、という前ラウンドの罠が今回も 2 形で発現: (1) 前セッションの
+「1.14 bump 後・RCPV remove 前」cache が残った leg で RCPV MISS が再表示
+(データは修正済みなのに)。(2) スイープ中に patches を追記した leg
+(5.22/5.24 non-threaded) は cache 削除 + 再実行が必要だった。
+
+**検証** (2026-08-29/30 の一括スイープ + 再検証):
+- 5.22/5.24/5.26 × threaded/non-threaded: smoke + downstream (libperl-rs
+  master) すべて green
+- 5.20 × 両モード: smoke green + downstream green (OpSIBLING を require から
+  外した probe コピーで確認 — macrogen 起因の残エラーはゼロ。旧観測の
+  unused_parens ×3 も再現せず)
+- 5.28/5.30 × 両モード: smoke green (Padname 5 件の must_generate_extra
+  込み)。downstream は master 相手だと手書き compat と E0428 で衝突
+  (上記のとおり設計どおりの追随待ち)、compat を外した probe 相手で green
+- 5.32〜5.44: smoke 回帰 9 leg (5.32/5.36/5.38/5.40/5.44 threaded、
+  5.34/5.42 両モード) すべて green、ホスト cargo test (golden 5.42-threaded
+  含む 9 suite) green
+- expect bounds は全対象 leg の実測で再較正 (x1.2 / x0.9)。RCPV /
+  Padname*REFCNT の override MISS 警告も対象 leg でゼロを確認
 
 **前例の必読箇所**: unskip-refcnt-padlist-5.28-5.30.md §0' — 「skip 6 件は
 stale だった (unskip だけで green)」の実績と、末尾「ハーネスの罠」
@@ -84,10 +160,10 @@ _one_at_a_time_hard / _old_one_at_a_time` の skip が無い。
 **v5.20 / v5.22 の patches.json には同一族が入っている** (だから両版では
 このクラスが出ない) — 5.24 だけ auto 採取から漏れている。
 
-作業: `scripts/build-error-to-vpatches.pl` で 5.24 leg のビルドエラーから
-再採取して patches.json に反映 (patches.json 冒頭コメントの
-`tools/build-error-to-vpatches.pl` というパスは stale — 実体は
-`scripts/`)。整数リテラル型推論 (u8 vs u32) の根治は任意 (やるなら
+作業: `tools/build-error-to-vpatches.pl` で 5.24 leg のビルドエラーから
+再採取して patches.json に反映 (2026-08-29 訂正: 実体は従来どおり
+`tools/` にある — patches.json 冒頭コメントのパスが正で、本書初版の
+「実体は scripts/」が誤りだった)。整数リテラル型推論 (u8 vs u32) の根治は任意 (やるなら
 別タスクに切り出し、まず skip で green を先行)。
 
 ### 5.22 — E0067 が 2 件だけ
