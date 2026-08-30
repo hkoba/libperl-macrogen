@@ -4483,6 +4483,17 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
                 let param = escape_rust_keyword(self.interner.get(*name));
+                // callee の期待型が分かればそれに cast する
+                // (memCHRs → libc::memchr の *const c_void 等。GH #15)。
+                // 不明時は従来どおり *const c_char
+                if let Some(callee_name) = callee {
+                    let func_name = self.interner.get(callee_name).to_string();
+                    if let Some(expected) = self.get_callee_param_type_extended(&func_name, arg_index) {
+                        if expected.is_pointer() {
+                            return format!("{}.as_ptr() as {}", param, expected.to_rust_string());
+                        }
+                    }
+                }
                 return format!("{}.as_ptr() as *const c_char", param);
             }
         }

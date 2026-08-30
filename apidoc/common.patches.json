@@ -239,6 +239,14 @@
       "upstream_status": "n/a (bundled-data fix)"
     },
     {
+      "name": "GvGP",
+      "kind": "add_decl",
+      "value": "Am|GP *|GvGP|GV * gv",
+      "source_loc": "perl-5.42 gv.h:79 (#define GvGP(gv) (0+(gv)->sv_u.svu_gp))",
+      "reason": "No =for apidoc declaration exists in any perl version, so the gv param is inferred at Tier 4 from the sv_u field access as SV*, generating `fn GvGP(gv: *const SV)`. GvGP itself compiles but every caller that passes a GV* (DEFSV_set, GvSV chain, ...) fails with E0308. The real contract is GV* -> GP* (GH #15).",
+      "upstream_status": "to-report (missing apidoc)"
+    },
+    {
       "name": "MUTABLE_AV",
       "kind": "add_decl",
       "value": "Am|AV *|MUTABLE_AV|AV * p",
