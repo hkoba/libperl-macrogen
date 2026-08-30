@@ -86,6 +86,7 @@ array set ::opts [cmdline::getoptions ::argv {
     {step.arg "" "Run only specific steps"}
     {smoke.arg "5.42" "smoke 検証の対象バージョン (multi-perl.tcl --both に渡す)"}
     {downstream.arg "5.30-threaded 5.44-threaded" "下流検証の legs"}
+    {minfree.arg 10 "STEP 1 で要求する空き容量 (GiB)"}
     {yes "publish 前の確認プロンプトを省略"}
 }]
 
@@ -108,7 +109,11 @@ set ::lastTag        [=RUN git tag -l v* --sort=-v:refname | head -1]
 
 puts "# libperl-macrogen $::currentVersion -> $::newVersion (前回 tag: $::lastTag)"
 
-STEP 1 "前提チェック (clean tree / main / APIDOC_DATA_VERSION 整合)" {
+STEP 1 "前提チェック (空き容量 / clean tree / main / APIDOC_DATA_VERSION 整合)" {
+    # STEP 5 (--downstream) はフル再構築時 数 GB 消費する。disk full で
+    # 途中停止する前に、ここで止めて掃除は人が判断する (df のみ・即答)
+    RUN scripts/disk-gc.tcl -assert-free $::opts(minfree)
+
     if {[=RUN git status --porcelain --untracked-files=no] ne ""} {
         error "working tree が clean ではありません (commit してから実行して下さい)"
     }

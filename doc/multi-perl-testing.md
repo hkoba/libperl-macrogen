@@ -158,13 +158,31 @@ CI は podman を使わず、actions-setup-perl の perl に対して
 ## ディスク予算と掃除
 
 - イメージ ~0.9〜1.1GB/版 (`-threaded` は base layer 共有で増分小)
-- `tmp/multi-perl/rust-home` ~1.5GB (全コンテナ共有、rustup は初回のみ)
-- `tmp/multi-perl/target/<codename>` ~1〜1.5GB (Debian base 別共有 —
+- `tmp/multi-perl/rust-home` ~0.8GB (全コンテナ共有、rustup は初回のみ)
+- `tmp/multi-perl/target/<codename>` 計 ~6GB (Debian base 別共有 —
   buster 系 5.20〜5.32 で 1 個)
-- `tmp/multi-perl/target-downstream/<leg>` ~1.5〜2GB (leg 毎、`--downstream` 時のみ)
+- `tmp/multi-perl/target-downstream/<leg>` ~0.6〜3.7GB (leg 毎、
+  `--downstream` 時のみ。近年版 + `--downstream-test` ほど大きい)
+- `tmp/multi-perl/out/<leg>/apidoc-cache` ~40MB × apidoc data 版数 × leg 数
+  (旧 APIDOC_DATA_VERSION のディレクトリは溜まる一方の純粋なゴミ)
 
-掃除: `scripts/multi-perl.tcl --clean` (状態ディレクトリ) +
-`podman rmi docker.io/library/perl:<tag>` (イメージ)。
+掃除は **`scripts/disk-gc.tcl` が第一の手段** (2026-08 導入):
+
+```bash
+scripts/disk-gc.tcl              # report のみ (df + 既知ディレクトリの du)
+scripts/disk-gc.tcl -clean -n    # dry-run (削除対象と回収サイズを列挙)
+scripts/disk-gc.tcl -clean       # 旧版 apidoc-cache + 古い target-downstream leg を削除
+scripts/disk-gc.tcl -clean -deep # + ビルドキャッシュ全部 (target/ 含む)
+```
+
+既定では publish 検証 leg (`5.30-threaded 5.44-threaded`) と mtime 7 日以内の
+leg を保持する (`-keep-legs` / `-older-than` で調整)。成果物・ログ
+(`out/<leg>/` の bindings.rs / *.log / summary.json) と `tmp/perls/` は
+削除しない。publish.tcl は STEP 1 で `disk-gc.tcl -assert-free` により
+空き容量を検査する (既定 10GiB、`-minfree` で変更)。
+
+全消しは従来どおり `scripts/multi-perl.tcl --clean` (状態ディレクトリ丸ごと)、
+イメージは `podman rmi docker.io/library/perl:<tag>`。
 
 ## トラブルシューティング
 
