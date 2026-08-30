@@ -1122,134 +1122,8 @@ pub fn mark_lvalue_mut(expr: &Expr, params: &HashSet<InternedStr>, result: &mut 
     }
 }
 
-fn collect_mut_params(parse_result: &ParseResult, params: &[MacroParam]) -> HashSet<InternedStr> {
-    let param_names: HashSet<InternedStr> = params.iter().map(|p| p.name).collect();
-    let mut result = HashSet::new();
-    match parse_result {
-        ParseResult::Expression(expr) => collect_mut_params_from_expr(expr, &param_names, &mut result),
-        ParseResult::Statement(items) => {
-            for item in items {
-                if let BlockItem::Stmt(stmt) = item {
-                    collect_mut_params_from_stmt(stmt, &param_names, &mut result);
-                }
-            }
-        }
-        ParseResult::Unparseable(_) => {}
-    }
-    result
-}
-
-fn collect_mut_params_from_expr(expr: &Expr, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
-    match &expr.kind {
-        ExprKind::AddrOf(inner) => {
-            // &mut param → param needs mut
-            if let ExprKind::Ident(name) = &inner.kind {
-                if params.contains(name) {
-                    result.insert(*name);
-                }
-            }
-            collect_mut_params_from_expr(inner, params, result);
-        }
-        ExprKind::Assign { lhs, rhs, .. } => {
-            // param = ... or param += ... → param needs mut
-            if let ExprKind::Ident(name) = &lhs.kind {
-                if params.contains(name) {
-                    result.insert(*name);
-                }
-            }
-            collect_mut_params_from_expr(lhs, params, result);
-            collect_mut_params_from_expr(rhs, params, result);
-        }
-        ExprKind::PreInc(inner) | ExprKind::PreDec(inner) |
-        ExprKind::PostInc(inner) | ExprKind::PostDec(inner) => {
-            if let ExprKind::Ident(name) = &inner.kind {
-                if params.contains(name) {
-                    result.insert(*name);
-                }
-            }
-            collect_mut_params_from_expr(inner, params, result);
-        }
-        // Recurse into subexpressions
-        ExprKind::Binary { lhs, rhs, .. } => {
-            collect_mut_params_from_expr(lhs, params, result);
-            collect_mut_params_from_expr(rhs, params, result);
-        }
-        ExprKind::Deref(inner) | ExprKind::UnaryMinus(inner) | ExprKind::BitNot(inner) |
-        ExprKind::LogNot(inner) | ExprKind::Cast { expr: inner, .. } => {
-            collect_mut_params_from_expr(inner, params, result);
-        }
-        ExprKind::Call { func, args } => {
-            collect_mut_params_from_expr(func, params, result);
-            for arg in args {
-                collect_mut_params_from_expr(arg, params, result);
-            }
-        }
-        ExprKind::MacroCall { expanded, args, .. } => {
-            collect_mut_params_from_expr(expanded, params, result);
-            for arg in args {
-                collect_mut_params_from_expr(arg, params, result);
-            }
-        }
-        ExprKind::Conditional { cond, then_expr, else_expr } => {
-            collect_mut_params_from_expr(cond, params, result);
-            collect_mut_params_from_expr(then_expr, params, result);
-            collect_mut_params_from_expr(else_expr, params, result);
-        }
-        ExprKind::Comma { lhs, rhs } => {
-            collect_mut_params_from_expr(lhs, params, result);
-            collect_mut_params_from_expr(rhs, params, result);
-        }
-        ExprKind::Member { expr: inner, .. } | ExprKind::PtrMember { expr: inner, .. } => {
-            collect_mut_params_from_expr(inner, params, result);
-        }
-        ExprKind::StmtExpr(compound) => {
-            for item in &compound.items {
-                if let BlockItem::Stmt(stmt) = item {
-                    collect_mut_params_from_stmt(stmt, params, result);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_mut_params_from_stmt(stmt: &Stmt, params: &HashSet<InternedStr>, result: &mut HashSet<InternedStr>) {
-    match stmt {
-        Stmt::Expr(Some(expr), _) => collect_mut_params_from_expr(expr, params, result),
-        Stmt::Return(Some(expr), _) => collect_mut_params_from_expr(expr, params, result),
-        Stmt::If { cond, then_stmt, else_stmt, .. } => {
-            collect_mut_params_from_expr(cond, params, result);
-            collect_mut_params_from_stmt(then_stmt, params, result);
-            if let Some(else_s) = else_stmt {
-                collect_mut_params_from_stmt(else_s, params, result);
-            }
-        }
-        Stmt::Compound(compound) => {
-            for item in &compound.items {
-                if let BlockItem::Stmt(s) = item {
-                    collect_mut_params_from_stmt(s, params, result);
-                }
-            }
-        }
-        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
-            collect_mut_params_from_expr(cond, params, result);
-            collect_mut_params_from_stmt(body, params, result);
-        }
-        Stmt::For { init, cond, step, body, .. } => {
-            if let Some(ForInit::Expr(e)) = init {
-                collect_mut_params_from_expr(e, params, result);
-            }
-            if let Some(c) = cond {
-                collect_mut_params_from_expr(c, params, result);
-            }
-            if let Some(s) = step {
-                collect_mut_params_from_expr(s, params, result);
-            }
-            collect_mut_params_from_stmt(body, params, result);
-        }
-        _ => {}
-    }
-}
+// (旧 collect_mut_params 系は Phase 2 の crate::local_usage へ移設した。
+//  GH #16/#22/#23 — Pass Separation Rule)
 
 /// 構造体フィールド名 → 型の逆引きマップを構築
 /// 全構造体で同名フィールドの型が一致する場合のみ含む
@@ -1622,6 +1496,10 @@ pub struct RustCodegen<'a> {
     const_pointer_positions: HashSet<usize>,
     /// 再代入されるローカル変数名の集合（let mut 判定用）
     mut_local_names: HashSet<InternedStr>,
+    /// Phase 2 の名前使用解析 (local_usage)。zeroed 初期化判定などで参照
+    current_local_usage: Option<crate::local_usage::LocalUsageAnalysis>,
+    /// 本体で未使用のパラメータ名（`_` prefix を付ける。GH #22）
+    unused_param_names: HashSet<InternedStr>,
     /// codegen で検出されたエラー
     codegen_errors: Vec<String>,
     /// このマクロが bool を返すと判定されたか
@@ -1700,6 +1578,8 @@ impl<'a> RustCodegen<'a> {
             is_bool_return: false,
             bool_return_macros: HashSet::new(),
             mut_local_names: HashSet::new(),
+            current_local_usage: None,
+            unused_param_names: HashSet::new(),
             codegen_errors: Vec::new(),
             // デフォルトは threaded（後方互換）。Driver 経由で
             // with_perl_threaded() で上書きされる。
@@ -3127,15 +3007,34 @@ impl<'a> RustCodegen<'a> {
 
     /// パラメータリストを構築（型情報付き）
     /// type/cast パラメータは型パラメータなので値引数からは除外する
-    /// 副作用: 各パラメータの型を current_param_types に登録する
+    /// 副作用: 各パラメータの型を current_param_types に登録し、
+    /// Phase 2 の名前使用解析を self (mut_local_names / unused_param_names /
+    /// current_local_usage) に反映する
     fn build_param_list(&mut self, info: &MacroInferInfo) -> String {
-        let mut_params = collect_mut_params(&info.parse_result, &info.params);
+        // Phase 2 (analyze_all_macros) で計算済みの解析を読む。
+        // テスト等で未設定の場合のみその場で計算する
+        let usage = info.local_usage.clone().unwrap_or_else(|| {
+            crate::local_usage::analyze_macro(&info.parse_result, &info.params)
+        });
+        let mut_params = usage.mut_names();
+        self.mut_local_names = mut_params.clone();
+        self.unused_param_names = info.params.iter()
+            .map(|p| p.name)
+            .filter(|n| usage.is_unused(*n))
+            .collect();
+        self.current_local_usage = Some(usage);
         let mut parts = Vec::new();
         for (i, p) in info.params.iter().enumerate() {
             if info.generic_type_params.contains_key(&(i as i32)) {
                 continue;
             }
-            let name = escape_rust_keyword(self.interner.get(p.name));
+            // 未使用パラメータは `_` prefix (unused_variables 対策、GH #22)。
+            // 本体に参照が無いことが保証されるので束縛名だけ変えれば良い
+            let name = if self.unused_param_names.contains(&p.name) {
+                format!("_{}", self.interner.get(p.name))
+            } else {
+                escape_rust_keyword(self.interner.get(p.name))
+            };
             let ty = self.get_param_type(p, info, i);
             // current_param_types に登録（bool 判定等で使用）
             self.current_param_types.insert(p.name, UnifiedType::from_rust_str(&ty));
@@ -5517,42 +5416,35 @@ impl<'a> RustCodegen<'a> {
     pub fn generate_inline_fn(mut self, name: crate::InternedStr, func_def: &FunctionDef) -> GeneratedCode {
         let name_str = self.interner.get(name);
 
-        // mutable パラメータ/ローカル変数を検出
-        let mut_params = {
-            let mut all_names = HashSet::new();
-            // パラメータ名を収集
+        // Phase 2 (InlineFnDict::analyze_local_usage) で計算済みの
+        // 名前使用解析を読む。テスト等で未設定の場合のみその場で計算する。
+        // ネストした compound 内の宣言や Switch/Label も走査済みなので、
+        // ループ内再代入の E0384 (GH #16) をここで解消する
+        let usage = self.inline_fn_dict
+            .and_then(|d| d.local_usage(name))
+            .cloned()
+            .unwrap_or_else(|| crate::local_usage::analyze_function(func_def));
+        let mut_params = usage.mut_names();
+
+        // mut ローカル変数名と未使用パラメータを保存
+        // (decl_to_rust_let / param_decl_to_rust で使用)
+        self.mut_local_names = mut_params.clone();
+        self.unused_param_names = {
+            let mut set = HashSet::new();
             for d in &func_def.declarator.derived {
                 if let DerivedDecl::Function(param_list) = d {
                     for p in &param_list.params {
-                        if let Some(ref declarator) = p.declarator {
-                            if let Some(param_name) = declarator.name {
-                                all_names.insert(param_name);
+                        if let Some(param_name) = p.declarator.as_ref().and_then(|dd| dd.name) {
+                            if usage.is_unused(param_name) {
+                                set.insert(param_name);
                             }
                         }
                     }
                 }
             }
-            // ローカル変数名も収集
-            for item in &func_def.body.items {
-                if let BlockItem::Decl(decl) = item {
-                    for init_decl in &decl.declarators {
-                        if let Some(var_name) = init_decl.declarator.name {
-                            all_names.insert(var_name);
-                        }
-                    }
-                }
-            }
-            let mut result = HashSet::new();
-            for item in &func_def.body.items {
-                if let BlockItem::Stmt(stmt) = item {
-                    collect_mut_params_from_stmt(stmt, &all_names, &mut result);
-                }
-            }
-            result
+            set
         };
-
-        // mut ローカル変数名を保存（decl_to_rust_let で使用）
-        self.mut_local_names = mut_params.clone();
+        self.current_local_usage = Some(usage);
 
         // パラメータリストを取得
         let params_str = self.build_fn_param_list(&func_def.declarator.derived, &mut_params);
@@ -5675,9 +5567,15 @@ impl<'a> RustCodegen<'a> {
         let param_name_interned = param.declarator
             .as_ref()
             .and_then(|d| d.name);
-        let name = param_name_interned
-            .map(|n| escape_rust_keyword(self.interner.get(n)))
-            .unwrap_or_else(|| "_".to_string());
+        let name = match param_name_interned {
+            // 未使用パラメータは `_` prefix (unused_variables 対策、GH #22)。
+            // 本体に参照が無いことが保証されるので束縛名だけ変えれば良い
+            Some(n) if self.unused_param_names.contains(&n) => {
+                format!("_{}", self.interner.get(n))
+            }
+            Some(n) => escape_rust_keyword(self.interner.get(n)),
+            None => "_".to_string(),
+        };
 
         let ty = self.decl_specs_to_rust(&param.specs);
 
@@ -5771,9 +5669,21 @@ impl<'a> RustCodegen<'a> {
                     }
                 }
             } else {
-                // 初期化子なし（未初期化変数 - Rust では unsafe かデフォルト値が必要）
+                // 初期化子なし。Rust の deferred initialization (`let x: T;`)
+                // で「宣言 → 後で代入」は合法だが、最初の代入より前に
+                // アドレスを取られる out-param パターンは E0381 になるため
+                // zeroed 初期化に切り替える (GH #23)
                 let mut_kw = if init_decl.declarator.name.is_some_and(|n| self.mut_local_names.contains(&n)) { "mut " } else { "" };
-                result.push_str(&format!("{}let {}{}: {}; // uninitialized\n", indent, mut_kw, name, ty));
+                let needs_zeroed = init_decl.declarator.name.is_some_and(|n| {
+                    self.current_local_usage.as_ref().is_some_and(|u| u.needs_zeroed_init(n))
+                });
+                if needs_zeroed {
+                    result.push_str(&format!(
+                        "{}let {}{}: {} = std::mem::zeroed(); // C: uninitialized out-param\n",
+                        indent, mut_kw, name, ty));
+                } else {
+                    result.push_str(&format!("{}let {}{}: {}; // uninitialized\n", indent, mut_kw, name, ty));
+                }
             }
         }
 

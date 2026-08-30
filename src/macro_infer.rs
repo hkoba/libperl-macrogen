@@ -351,6 +351,10 @@ pub struct MacroInferInfo {
     /// typedef 名を値として使う式 (dTHXa 等の宣言マクロの誤パース跡)。
     /// これが立っている場合は Statement 確定 (= fn 生成) を行わない。
     pub stmt_unrepresentable: bool,
+
+    /// Phase 2 の名前使用解析 (mut 必要性 / 未使用 / 代入前 AddrOf)。
+    /// analyze_all_macros で設定し、Phase 3 は読むだけ (GH #16/#22/#23)
+    pub local_usage: Option<crate::local_usage::LocalUsageAnalysis>,
 }
 
 impl MacroInferInfo {
@@ -383,6 +387,7 @@ impl MacroInferInfo {
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
             stmt_unrepresentable: false,
+            local_usage: None,
         }
     }
 
@@ -1333,9 +1338,13 @@ impl MacroInferContext {
         let target_macros: Vec<MacroDef> = pp.macros().iter_target_macros().cloned().collect();
 
         for def in &target_macros {
-            let (info, has_pasting, has_thx) = self.build_macro_info(
+            let (mut info, has_pasting, has_thx) = self.build_macro_info(
                 def, pp, typedefs, thx_symbols, no_expand, perl_build_mode
             );
+            // 名前使用解析 (mut 必要性 / 未使用 / 代入前 AddrOf)。
+            // Phase 3 はこの結果を読むだけにする (GH #16/#22/#23)
+            info.local_usage = Some(crate::local_usage::analyze_macro(
+                &info.parse_result, &info.params));
             if has_pasting {
                 pasting_initial.insert(def.name);
             }
@@ -1356,6 +1365,12 @@ impl MacroInferContext {
                     thx_initial.insert(*name);
                 }
             }
+        }
+
+        // Step 1.7: inline 関数の名前使用解析 (local_usage) を実行
+        // (dict はこの時点で構築済み。Phase 3 は結果を読むだけ)
+        if let Some(ref mut ifd) = inline_fn_dict {
+            ifd.analyze_local_usage();
         }
 
         // Step 2: used_by を構築

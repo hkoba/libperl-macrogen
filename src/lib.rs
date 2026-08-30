@@ -106,6 +106,7 @@ pub mod token;
 pub mod token_source;
 pub mod type_env;
 pub mod type_repr;
+pub mod local_usage;
 pub mod unified_type;
 
 /// この crate 自身のバージョン。下流 (libperl-sys) の regen ガードが
