@@ -714,7 +714,8 @@ impl<'a> SemanticAnalyzer<'a> {
         let derived = param.declarator.as_ref()
             .map(|d| {
                 // Function 派生型より前の部分のみ（パラメータ自体の型）
-                CDerivedType::from_derived_decls(&d.derived)
+                CDerivedType::from_derived_decls_with_base_const(
+                    &d.derived, param.specs.qualifiers.is_const)
                     .into_iter()
                     .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
                     .collect()
@@ -736,7 +737,8 @@ impl<'a> SemanticAnalyzer<'a> {
         let specs = CTypeSpecs::from_decl_specs(&func_def.specs, self.interner);
 
         // Declarator の Function より前の derived 部分のみ（戻り値のポインタ等）
-        let derived: Vec<_> = CDerivedType::from_derived_decls(&func_def.declarator.derived)
+        let derived: Vec<_> = CDerivedType::from_derived_decls_with_base_const(
+            &func_def.declarator.derived, func_def.specs.qualifiers.is_const)
             .into_iter()
             .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
             .collect();
@@ -1615,7 +1617,8 @@ impl<'a> SemanticAnalyzer<'a> {
                 let specs = CTypeSpecs::from_decl_specs(&type_name.specs, self.interner);
                 let derived: Vec<CDerivedType> = type_name.declarator.as_ref()
                     .map(|d| {
-                        CDerivedType::from_derived_decls(&d.derived)
+                        CDerivedType::from_derived_decls_with_base_const(
+                            &d.derived, type_name.specs.qualifiers.is_const)
                             .into_iter()
                             .take_while(|d| !matches!(d, CDerivedType::Function { .. }))
                             .collect()

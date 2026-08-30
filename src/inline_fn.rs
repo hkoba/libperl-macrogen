@@ -26,6 +26,10 @@ pub struct InlineFnDict {
     /// 直接の skip 対象にしか入れない。伝播では `is_unavailable_for_codegen()`
     /// で `calls_unavailable` と OR を取って参照する。
     apidoc_suppressed: HashSet<InternedStr>,
+    /// Phase 2 の名前使用解析 (mut 必要性 / 未使用 / 代入前 AddrOf)。
+    /// `analyze_local_usage()` で全関数分を計算し、Phase 3 は読むだけ
+    /// (GH #16/#22/#23)
+    local_usage: HashMap<InternedStr, crate::local_usage::LocalUsageAnalysis>,
 }
 
 impl InlineFnDict {
@@ -119,6 +123,22 @@ impl InlineFnDict {
     /// called_functions の全エントリを走査
     pub fn called_functions_iter(&self) -> impl Iterator<Item = (&InternedStr, &HashSet<InternedStr>)> {
         self.called_functions.iter()
+    }
+
+    /// 全 inline 関数の名前使用解析を実行して保持する (Phase 2)
+    pub fn analyze_local_usage(&mut self) {
+        let names: Vec<InternedStr> = self.fns.keys().copied().collect();
+        for name in names {
+            if let Some(func_def) = self.fns.get(&name) {
+                let analysis = crate::local_usage::analyze_function(func_def);
+                self.local_usage.insert(name, analysis);
+            }
+        }
+    }
+
+    /// 名前使用解析の結果を取得 (Phase 3 から参照)
+    pub fn local_usage(&self, name: InternedStr) -> Option<&crate::local_usage::LocalUsageAnalysis> {
+        self.local_usage.get(&name)
     }
 
     /// FunctionDef から inline 関数を収集

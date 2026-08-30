@@ -19,7 +19,11 @@
       "2026-08-29 (2): 5.24-non-threaded downstream 初実走で S__is_utf8_char_slow の",
       "E0381 (未初期化 out-param、v5.22 と同一) が発覚 → skip 追加。",
       "実測 counts (2026-08-29/30 検証スイープ): threaded fn=1487 sup=22 unres=45 / non-threaded fn=1398 sup=23 unres=106。",
-      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。"
+      "bounds 再較正 (unresolved/suppressed = 実測x1.2, fn min = 実測x0.9)。",
+      "2026-08-30: out-param zeroed 初期化 (local_usage, GH #23) で",
+      "S__is_utf8_char_slow の E0381 が解消 → skip を削除 (apidoc data 1.16) し",
+      "non-threaded の must_generate_extra で enforced 化。",
+      "実測 (2026-08-30): non-threaded fn=1399 sup=22 unres=106。"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",
@@ -32,6 +36,9 @@
       "Perl_SvREFCNT_dec: この名前は 5.32 の inline 関数改名 (S_SvREFCNT_dec → Perl_SvREFCNT_dec) から。<=5.30 に存在するのは S_SvREFCNT_dec (inline) と SvREFCNT_dec (マクロ)"
    ],
    "non-threaded": {
+      "must_generate_extra": [
+         "S__is_utf8_char_slow"
+      ],
       "bounds": {
          "codegen_suppressed_max": 27,
          "generated_fn_min": 1258,

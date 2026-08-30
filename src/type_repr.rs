@@ -48,6 +48,11 @@ pub enum CTypeSource {
     Header,
     /// apidoc（embed.fnc 等）- 元の文字列を保持
     Apidoc { raw: String },
+    /// apidoc_patches の override (return_type_override / arg_type_override)。
+    /// 手書きの修正なので最優先 Tier (0) — bindings 伝播 (Tier 1) にも勝つ。
+    /// AvFILL の return_type_override が callee (mg_size) 由来の Tier 1 I32 に
+    /// 負けていた問題への対処 (GH #15)
+    PatchOverride { raw: String },
     /// inline 関数の AST
     InlineFn { func_name: InternedStr },
     /// parser.rs の parse_type_from_string を使用して解析
@@ -471,7 +476,61 @@ impl CTypeSpecs {
     }
 }
 
+/// C の「指し先 const」を Rust の `*const` 位相に合わせてシフトする。
+///
+/// Rust の `*const`/`*mut` は **指し先** の const 性を表すが、C の宣言では
+/// - 最内ポインタの指し先 const = **base 型の const 修飾** (`const char *`)
+/// - 外側ポインタの指し先 const = **一つ内側のポインタ自身の const 修飾**
+///   (`char * const *`)
+///
+/// `CDerivedType::from_derived_decls` は各 Pointer に C の「ポインタ自身の
+/// 修飾」を保持したままなので、このシフトを通して Rust 表記 (renderer は
+/// Pointer.is_const をそのまま `*const` にする) の意味に正規化する。
+/// 最外ポインタ自身の C 修飾 (束縛の const) は Rust ポインタ型には現れない
+/// ため捨てる。derived は外→内順であることを前提とする (GH #15)。
+pub fn shift_pointee_const(derived: &mut [CDerivedType], base_is_const: bool) {
+    let ptr_idxs: Vec<usize> = derived
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| matches!(d, CDerivedType::Pointer { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    if ptr_idxs.is_empty() {
+        return;
+    }
+    let old_quals: Vec<bool> = ptr_idxs
+        .iter()
+        .map(|&i| match &derived[i] {
+            CDerivedType::Pointer { is_const, .. } => *is_const,
+            _ => unreachable!(),
+        })
+        .collect();
+    for (j, &i) in ptr_idxs.iter().enumerate() {
+        // 最内 (末尾) = base の const、それ以外 = 一つ内側の旧 C 修飾
+        let new_const = if j + 1 == ptr_idxs.len() {
+            base_is_const
+        } else {
+            old_quals[j + 1]
+        };
+        if let CDerivedType::Pointer { is_const, .. } = &mut derived[i] {
+            *is_const = new_const;
+        }
+    }
+}
+
 impl CDerivedType {
+    /// DerivedDecl のリストから CDerivedType のリストを作成し、
+    /// base 型の const 修飾を含めて Rust の `*const` 位相へ正規化する。
+    /// (`const char *` → 最内 Pointer.is_const = true。GH #15)
+    pub fn from_derived_decls_with_base_const(
+        derived: &[crate::ast::DerivedDecl],
+        base_is_const: bool,
+    ) -> Vec<Self> {
+        let mut v = Self::from_derived_decls(derived);
+        shift_pointee_const(&mut v, base_is_const);
+        v
+    }
+
     /// DerivedDecl のリストから CDerivedType のリストを作成
     pub fn from_derived_decls(derived: &[crate::ast::DerivedDecl]) -> Vec<Self> {
         use crate::ast::ExprKind;
@@ -680,6 +739,7 @@ impl TypeRepr {
             TypeRepr::CType { source, .. } => match source {
                 CTypeSource::Header => "c-header",
                 CTypeSource::Apidoc { .. } => "apidoc",
+                CTypeSource::PatchOverride { .. } => "patch-override",
                 CTypeSource::InlineFn { .. } => "inline-fn",
                 CTypeSource::Parser => "parser",
                 CTypeSource::FieldInference { .. } => "field-inference",
@@ -717,6 +777,7 @@ impl TypeRepr {
                 RustTypeSource::Propagated { .. } => 4,
             },
             TypeRepr::CType { source, .. } => match source {
+                CTypeSource::PatchOverride { .. } => 0,
                 CTypeSource::InlineFn { .. } | CTypeSource::Header => 2,
                 CTypeSource::Apidoc { .. }
                 | CTypeSource::CommonMacroFieldInference => 3,
@@ -938,7 +999,8 @@ impl TypeRepr {
         _interner: &crate::intern::StringInterner,
     ) -> Self {
         let c_specs = CTypeSpecs::from_decl_specs(specs, _interner);
-        let derived = CDerivedType::from_derived_decls(&declarator.derived);
+        let derived = CDerivedType::from_derived_decls_with_base_const(
+            &declarator.derived, specs.qualifiers.is_const);
         TypeRepr::CType {
             specs: c_specs,
             derived,
@@ -957,7 +1019,8 @@ impl TypeRepr {
         let c_specs = CTypeSpecs::from_decl_specs(&type_name.specs, interner);
         let derived = type_name.declarator
             .as_ref()
-            .map(|d| CDerivedType::from_derived_decls(&d.derived))
+            .map(|d| CDerivedType::from_derived_decls_with_base_const(
+                &d.derived, type_name.specs.qualifiers.is_const))
             .unwrap_or_default();
         TypeRepr::CType {
             specs: c_specs,
@@ -1055,7 +1118,9 @@ impl TypeRepr {
         }
         for i in 0..ptr_count {
             derived.push(CDerivedType::Pointer {
-                is_const: i == 0 && is_const,
+                // Rust の *const は「指し先の const」。base が const なら
+                // 最内 (最後に push される) ポインタに付ける
+                is_const: i + 1 == ptr_count && is_const,
                 is_volatile: false,
                 is_restrict: false,
             });
@@ -1624,6 +1689,47 @@ impl InferredType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ptr(is_const: bool) -> CDerivedType {
+        CDerivedType::Pointer { is_const, is_volatile: false, is_restrict: false }
+    }
+
+    fn const_flags(derived: &[CDerivedType]) -> Vec<bool> {
+        derived.iter().map(|d| match d {
+            CDerivedType::Pointer { is_const, .. } => *is_const,
+            _ => unreachable!(),
+        }).collect()
+    }
+
+    /// C の指し先 const → Rust *const への位相シフト (GH #15)
+    #[test]
+    fn test_shift_pointee_const() {
+        // const char *  →  *const char (最内 = base const)
+        let mut d = vec![ptr(false)];
+        shift_pointee_const(&mut d, true);
+        assert_eq!(const_flags(&d), vec![true]);
+
+        // char *  →  *mut char
+        let mut d = vec![ptr(false)];
+        shift_pointee_const(&mut d, false);
+        assert_eq!(const_flags(&d), vec![false]);
+
+        // char * const  →  *mut char (束縛 const は Rust ポインタ型に現れない)
+        let mut d = vec![ptr(true)];
+        shift_pointee_const(&mut d, false);
+        assert_eq!(const_flags(&d), vec![false]);
+
+        // const char **  →  *mut *const char (derived は外→内順)
+        let mut d = vec![ptr(false), ptr(false)];
+        shift_pointee_const(&mut d, true);
+        assert_eq!(const_flags(&d), vec![false, true]);
+
+        // char * const *  →  *const *mut char
+        //   (外側ポインタの指し先 = 内側ポインタ自身が const)
+        let mut d = vec![ptr(false), ptr(true)];
+        shift_pointee_const(&mut d, false);
+        assert_eq!(const_flags(&d), vec![true, false]);
+    }
 
     #[test]
     fn test_rust_type_repr_from_string() {

@@ -16,6 +16,7 @@ Rules for handling macros in generated code:
 | Function macro | **Not registered** in special dictionaries | Preserve as function call |
 | Function macro | Registered in `ExplicitExpandSymbols` | Expand (e.g., `SvANY`, `SvFLAGS`) |
 | assert family | `NoExpandSymbols` / `wrapped_macros` | Ignore `DEBUGGING` state, process arguments and generate as `assert!` |
+| Function macro | apidoc return type is `pair` (e.g., `STR_WITH_LEN`) | **Do not generate a fn** (`[CODEGEN_SUPPRESSED]`, Phase 2 Step 4.45). Comma expression cannot be a single-value Rust fn. Callers normally token-expand it away; a caller with a surviving AST call is downgraded via `called_functions` check, NOT via `used_by` propagation (GH #14, doc/plan/skip-pair-return-type-macros.md Step 1) |
 
 ### Key Implication
 

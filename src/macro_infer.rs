@@ -327,6 +327,10 @@ pub struct MacroInferInfo {
     /// 直接の skip 対象にしか立てない。伝播では `is_unavailable_for_codegen()`
     /// で `calls_unavailable` と OR を取って参照する。
     pub apidoc_suppressed: bool,
+    /// apidoc 戻り値型が `pair` (カンマ式で複数値を返す) のマクロか。
+    /// 単一の戻り値を持つ Rust 関数に落とせないため codegen 対象外にする
+    /// (STR_WITH_LEN 等。doc/plan/skip-pair-return-type-macros.md Step 1)。
+    pub pair_return: bool,
 
     // ── Phase 2 確定型（resolve_param_and_return_types で設定）──
 
@@ -347,6 +351,10 @@ pub struct MacroInferInfo {
     /// typedef 名を値として使う式 (dTHXa 等の宣言マクロの誤パース跡)。
     /// これが立っている場合は Statement 確定 (= fn 生成) を行わない。
     pub stmt_unrepresentable: bool,
+
+    /// Phase 2 の名前使用解析 (mut 必要性 / 未使用 / 代入前 AddrOf)。
+    /// analyze_all_macros で設定し、Phase 3 は読むだけ (GH #16/#22/#23)
+    pub local_usage: Option<crate::local_usage::LocalUsageAnalysis>,
 }
 
 impl MacroInferInfo {
@@ -373,11 +381,13 @@ impl MacroInferInfo {
             called_functions: HashSet::new(),
             calls_unavailable: false,
             apidoc_suppressed: false,
+            pair_return: false,
             resolved_param_types: Vec::new(),
             resolved_return_type: None,
             const_pointer_positions: HashSet::new(),
             is_bool_return: false,
             stmt_unrepresentable: false,
+            local_usage: None,
         }
     }
 
@@ -391,6 +401,13 @@ impl MacroInferInfo {
     /// `calls_unavailable`（不在関数を呼ぶ／推移的）または
     /// `apidoc_suppressed`（自分が skip_codegen 対象）のいずれかが立っていれば
     /// codegen 対象外。propagation や cascade 検査ではこのヘルパーを使う。
+    ///
+    /// 注意: `pair_return` はここに **含めない**。pair マクロは caller 側で
+    /// トークン展開されて消えるのが通常で (newSVpvs → STR_WITH_LEN 等)、
+    /// used_by (= `uses`) 経由の伝播に乗せると展開済みの caller まで
+    /// 巻き添えになる。fn 生成の抑止は Phase 3 の pair_return 分岐、
+    /// AST 呼び出しが残った caller の降格は check_function_availability の
+    /// called_functions 検査が担う。
     pub fn is_unavailable_for_codegen(&self) -> bool {
         self.calls_unavailable || self.apidoc_suppressed
     }
@@ -512,6 +529,11 @@ pub struct MacroInferContext {
     /// マクロ名 → [(パラメータ名, 型文字列)]
     /// ネストしたマクロ呼び出しからの型伝播に使用
     pub macro_param_types: HashMap<String, Vec<(String, String)>>,
+
+    /// apidoc_patches の return_type_override が当たっている名前の集合。
+    /// これらの apidoc 戻り値制約は手書き修正なので PatchOverride source
+    /// (Tier 0) を与え、callee 伝播 (Tier 1) にも勝たせる (GH #15 AvFILL)
+    pub return_override_names: HashSet<InternedStr>,
 }
 
 impl MacroInferContext {
@@ -524,6 +546,7 @@ impl MacroInferContext {
             unknown: HashSet::new(),
             debug_macros: HashSet::new(),
             macro_param_types: HashMap::new(),
+            return_override_names: HashSet::new(),
         }
     }
 
@@ -967,6 +990,8 @@ impl MacroInferContext {
     ) {
         let macro_name_str = interner.get(name);
         let is_debug = self.is_debug_target(macro_name_str);
+        // self.macros の可変借用より前に読む (PatchOverride Tier 0 付与用)
+        let is_return_override = self.return_override_names.contains(&name);
 
         if is_debug {
             eprintln!("\n[DEBUG infer_macro_types] macro={}", macro_name_str);
@@ -1025,7 +1050,17 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        let type_repr = TypeRepr::from_c_type_string(return_type, interner, files, typedefs);
+                        let mut type_repr = TypeRepr::from_c_type_string(return_type, interner, files, typedefs);
+                        // return_type_override 由来なら手書き修正として
+                        // PatchOverride source (Tier 0) を与え、callee 伝播
+                        // (Tier 1) にも勝たせる (GH #15 AvFILL)
+                        if is_return_override {
+                            if let TypeRepr::CType { ref mut source, .. } = type_repr {
+                                *source = crate::type_repr::CTypeSource::PatchOverride {
+                                    raw: return_type.clone(),
+                                };
+                            }
+                        }
                         info.type_env.add_return_constraint(TypeConstraint::new(
                             expr.id,
                             type_repr,
@@ -1321,9 +1356,13 @@ impl MacroInferContext {
         let target_macros: Vec<MacroDef> = pp.macros().iter_target_macros().cloned().collect();
 
         for def in &target_macros {
-            let (info, has_pasting, has_thx) = self.build_macro_info(
+            let (mut info, has_pasting, has_thx) = self.build_macro_info(
                 def, pp, typedefs, thx_symbols, no_expand, perl_build_mode
             );
+            // 名前使用解析 (mut 必要性 / 未使用 / 代入前 AddrOf)。
+            // Phase 3 はこの結果を読むだけにする (GH #16/#22/#23)
+            info.local_usage = Some(crate::local_usage::analyze_macro(
+                &info.parse_result, &info.params));
             if has_pasting {
                 pasting_initial.insert(def.name);
             }
@@ -1346,6 +1385,12 @@ impl MacroInferContext {
             }
         }
 
+        // Step 1.7: inline 関数の名前使用解析 (local_usage) を実行
+        // (dict はこの時点で構築済み。Phase 3 は結果を読むだけ)
+        if let Some(ref mut ifd) = inline_fn_dict {
+            ifd.analyze_local_usage();
+        }
+
         // Step 2: used_by を構築
         self.build_use_relations();
 
@@ -1360,6 +1405,12 @@ impl MacroInferContext {
         //   伝播の起点として扱うため、availability チェックの前に立てる）
         if let Some(patches) = apidoc_patches {
             let interner = pp.interner();
+            // return_type_override が当たる名前を控える (Tier 0 付与用)
+            self.return_override_names = patches
+                .return_overrides
+                .keys()
+                .filter_map(|n| interner.lookup(n))
+                .collect();
             let macro_hits = self.apply_apidoc_suppressions(patches, interner);
             let inline_hits = inline_fn_dict
                 .as_mut()
@@ -1372,6 +1423,31 @@ impl MacroInferContext {
                  {} of {} entries unmatched (no such macro/inline; possibly stale skip-list)",
                 macro_hits, inline_hits, unmatched, total,
             );
+        }
+
+        // Step 4.45: apidoc 戻り値型 `pair` のマクロを codegen 対象外に
+        // （STR_WITH_LEN 等。カンマ式で複数値を返すため単一戻り値の Rust fn に
+        //   落とせない。caller 側でトークン展開されて消えるのが通常のため
+        //   used_by 伝播には乗せず、AST 呼び出しが残った caller だけを
+        //   Step 4.5 の called_functions 検査で降格する）
+        if let Some(apidoc_dict) = apidoc {
+            let interner = pp.interner();
+            let mut pair_names: Vec<&str> = Vec::new();
+            for (name, info) in self.macros.iter_mut() {
+                let name_str = interner.get(*name);
+                if let Some(entry) = apidoc_dict.get(name_str) {
+                    if entry.return_type.as_deref() == Some("pair") {
+                        info.pair_return = true;
+                        pair_names.push(name_str);
+                    }
+                }
+            }
+            if !pair_names.is_empty() {
+                eprintln!(
+                    "[apidoc-suppress] pair-return macro(s) excluded from codegen: {}",
+                    pair_names.join(", "),
+                );
+            }
         }
 
         // Step 4.5: マクロの利用不可関数呼び出しチェック
@@ -1520,6 +1596,13 @@ impl MacroInferContext {
             for called_fn in called_functions {
                 let fn_name = interner.get(called_fn);
 
+                // pair 戻り値マクロ (STR_WITH_LEN 等) は fn を生成しないため、
+                // AST 上の呼び出しとして残っている caller は利用不可
+                if self.macros.get(&called_fn).is_some_and(|i| i.pair_return) {
+                    has_unavailable = true;
+                    break;
+                }
+
                 // マクロとして存在する場合はOK
                 if macro_names.contains(&called_fn) {
                     continue;
@@ -1653,6 +1736,13 @@ impl MacroInferContext {
             let mut has_unavailable = false;
             for called_fn in called_fns {
                 let fn_name = interner.get(called_fn);
+
+                // pair 戻り値マクロの呼び出しが AST に残っている場合は利用不可
+                // (check_function_availability と同じ理由)
+                if self.macros.get(&called_fn).is_some_and(|i| i.pair_return) {
+                    has_unavailable = true;
+                    break;
+                }
 
                 if macro_names.contains(&called_fn) { continue; }
                 if bindings_fns.contains(fn_name) { continue; }

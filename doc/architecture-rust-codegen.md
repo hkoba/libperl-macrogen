@@ -284,6 +284,8 @@ pub struct RustCodegen<'a> {
 | `expr_to_rust()` | 式を Rust コードに変換（マクロ用、型推論統合） |
 | `expr_to_rust_inline()` | 式を Rust コードに変換（inline 関数用） |
 | `stmt_to_rust()` | 文を Rust コードに変換 |
+| `expr_stmt_string()` | 式を **文位置** で出力する共通経路。代入・増減式は `{ lv op= r; lv }` の block_with_value 形ではなく値を返さない文形式に落とす (`stmt_to_rust` / `stmt_to_rust_inline` / for の init・step 部で共用。unused_must_use 対策、GH #14) |
+| (`mut_local_names` / `unused_param_names` / `current_local_usage`) | Phase 2 の名前使用解析 (`src/local_usage.rs`、`MacroInferInfo::local_usage` / `InlineFnDict::local_usage()`) から供給される読み取り専用の状態。`let mut` 判定・未使用パラメータの `_` prefix・未初期化宣言の zeroed 初期化に使う (GH #16/#22/#23)。Phase 3 では解析しない |
 | `type_repr_to_rust()` | TypeRepr を Rust 型文字列に変換 |
 | `get_param_type()` | パラメータの宣言型を best-tier 制約から取得 |
 | `get_callee_param_type_extended()` | 呼び出し先パラメータ型を取得（bindings → inline → マクロ type_env、最後の段は best-tier + 自前の const 調整） |

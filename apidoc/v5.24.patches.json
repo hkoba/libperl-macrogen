@@ -130,12 +130,6 @@
       "upstream_status": "n/a (macrogen limitation)"
     },
     {
-      "name": "S__is_utf8_char_slow",
-      "kind": "skip_codegen",
-      "reason": "The inline body declares `STRLEN actual_len;` uninitialized and passes &actual_len as an out-param to Perl_utf8n_to_uvchr, so the generated `let mut actual_len: STRLEN;` + `&raw mut actual_len` is rejected by rustc (E0381 used binding isn't initialized). Out-param zero-initialization would be a future codegen fix. Generated only on the non-threaded build of this version (threaded legs do not generate it). Same entry as v5.22; verified failing in the 2026-08-29 collection.",
-      "upstream_status": "n/a (macrogen limitation)"
-    },
-    {
       "name": "RCPV_LEN",
       "kind": "remove",
       "reason": "RCPV_* does not exist before perl 5.38 (cop.h RCPV refactor), so the common return_type_override has no target here and only emits a MISS warning (dict lookup fails; issue #17). Cancel the common patch on this version.",
