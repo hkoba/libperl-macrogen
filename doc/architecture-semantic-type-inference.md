@@ -381,11 +381,22 @@ pub enum RustTypeSource {
 
 | Tier | source                                          | 用途・信頼度 |
 |------|-------------------------------------------------|--------------|
+| 0    | `CType { PatchOverride }`                       | apidoc_patches の override。手書き修正なので **すべてに勝つ** (AvFILL の return_type_override が Tier 1 の callee 伝播に負けていた問題への対処、GH #15) |
 | 1    | `RustType { FnParam / FnReturn / Const }`       | bindings.rs 由来。最も高い |
 | 2    | `CType { Header / InlineFn }`                   | C ヘッダー宣言。高い |
 | 3    | `CType { Apidoc / CommonMacroFieldInference }`  | apidoc 文字列、共通マクロ逆推論 |
 | 3    | `RustType { Parsed }`                           | bindings.rs 由来の文字列パース |
 | 4    | `CType { Cast / SvFamilyCast / FieldInference / Parser }`, `Inferred(_)` | コード上の構造からの推論 |
+
+**const 位相シフト**: C の `const char *` (指し先 const) は Rust では
+`*const c_char` になる。C パース由来の TypeRepr 構築
+(`from_type_name` / `from_decl` / semantic.rs の各直接構築) は
+`CDerivedType::from_derived_decls_with_base_const` を通し、base 型の
+const 修飾を最内 Pointer に、各ポインタ自身の C 修飾を一つ外側の
+Rust `*const` にシフトして正規化する (`shift_pointee_const`,
+src/type_repr.rs)。これが無かったため `=for apidoc const char *|OP_NAME`
+等の const が落ち、`-> *mut c_char` に *const の body で E0308 になっていた
+(GH #15 の const/mut クラスの根本原因)。
 
 `SemanticAnalyzer` がパラメータ型を確定する際、`get_param_type` および
 `get_callee_param_type_extended` (`src/rust_codegen.rs`) は同一パラメータに

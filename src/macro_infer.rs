@@ -529,6 +529,11 @@ pub struct MacroInferContext {
     /// マクロ名 → [(パラメータ名, 型文字列)]
     /// ネストしたマクロ呼び出しからの型伝播に使用
     pub macro_param_types: HashMap<String, Vec<(String, String)>>,
+
+    /// apidoc_patches の return_type_override が当たっている名前の集合。
+    /// これらの apidoc 戻り値制約は手書き修正なので PatchOverride source
+    /// (Tier 0) を与え、callee 伝播 (Tier 1) にも勝たせる (GH #15 AvFILL)
+    pub return_override_names: HashSet<InternedStr>,
 }
 
 impl MacroInferContext {
@@ -541,6 +546,7 @@ impl MacroInferContext {
             unknown: HashSet::new(),
             debug_macros: HashSet::new(),
             macro_param_types: HashMap::new(),
+            return_override_names: HashSet::new(),
         }
     }
 
@@ -984,6 +990,8 @@ impl MacroInferContext {
     ) {
         let macro_name_str = interner.get(name);
         let is_debug = self.is_debug_target(macro_name_str);
+        // self.macros の可変借用より前に読む (PatchOverride Tier 0 付与用)
+        let is_return_override = self.return_override_names.contains(&name);
 
         if is_debug {
             eprintln!("\n[DEBUG infer_macro_types] macro={}", macro_name_str);
@@ -1042,7 +1050,17 @@ impl MacroInferContext {
                 let macro_name_str = interner.get(name);
                 if let Some(entry) = apidoc_dict.get(macro_name_str) {
                     if let Some(ref return_type) = entry.return_type {
-                        let type_repr = TypeRepr::from_c_type_string(return_type, interner, files, typedefs);
+                        let mut type_repr = TypeRepr::from_c_type_string(return_type, interner, files, typedefs);
+                        // return_type_override 由来なら手書き修正として
+                        // PatchOverride source (Tier 0) を与え、callee 伝播
+                        // (Tier 1) にも勝たせる (GH #15 AvFILL)
+                        if is_return_override {
+                            if let TypeRepr::CType { ref mut source, .. } = type_repr {
+                                *source = crate::type_repr::CTypeSource::PatchOverride {
+                                    raw: return_type.clone(),
+                                };
+                            }
+                        }
                         info.type_env.add_return_constraint(TypeConstraint::new(
                             expr.id,
                             type_repr,
@@ -1387,6 +1405,12 @@ impl MacroInferContext {
         //   伝播の起点として扱うため、availability チェックの前に立てる）
         if let Some(patches) = apidoc_patches {
             let interner = pp.interner();
+            // return_type_override が当たる名前を控える (Tier 0 付与用)
+            self.return_override_names = patches
+                .return_overrides
+                .keys()
+                .filter_map(|n| interner.lookup(n))
+                .collect();
             let macro_hits = self.apply_apidoc_suppressions(patches, interner);
             let inline_hits = inline_fn_dict
                 .as_mut()

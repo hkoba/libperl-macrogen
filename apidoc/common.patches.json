@@ -239,6 +239,14 @@
       "upstream_status": "n/a (bundled-data fix)"
     },
     {
+      "name": "CvPROTO",
+      "kind": "add_decl",
+      "value": "Am|const char *|CvPROTO|CV * cv",
+      "source_loc": "perl-5.42 cv.h (#define CvPROTO(sv) ... SvPVX_const ...)",
+      "reason": "No apidoc declaration exists in any header, so the return type is inferred only from callee propagation (SvPVX -> char *), while the actual body value flows through SvPVX_const (const char *), producing a *mut fn signature with a *const body arm (E0308 on 5.42, GH #15). perlapi documents char* but the macro body has been const-reading since the SvPVX_const introduction; declare const char * to match the code.",
+      "upstream_status": "to-report (missing apidoc)"
+    },
+    {
       "name": "GvGP",
       "kind": "add_decl",
       "value": "Am|GP *|GvGP|GV * gv",

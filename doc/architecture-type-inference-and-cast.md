@@ -68,6 +68,7 @@ collect_call_constraints() が Perl_sv_dup_inc の bindings を参照:
 
 | Tier | 情報源 | 変更可能性 |
 |------|--------|-----------|
+| 0 | apidoc_patches override (PatchOverride) | 手書き修正。常に勝つ |
 | 1 | bindings.rs (FnParam, FnReturn, Const) | 変更不可 |
 | 2 | C ヘッダー宣言 (InlineFn, Header) | 変更不可 |
 | 3 | apidoc (embed.fnc), CommonMacroFieldInference, RustType{Parsed} | 参考情報 |
