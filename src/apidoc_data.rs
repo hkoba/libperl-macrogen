@@ -74,7 +74,7 @@ use tar::Archive;
 ///      v5.20 に Padname*REFCNT{,_dec} の remove 4 件 (5.20 に API 不在で
 ///      common override が MISS ノイズになるだけ — issue #17 と同型)。
 ///      v5.20〜v5.32 の sv_collxfrm skip の reason を正確な原因に更新。
-pub const APIDOC_DATA_VERSION: &str = "1.15";
+pub const APIDOC_DATA_VERSION: &str = "1.16";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));

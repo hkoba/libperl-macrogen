@@ -619,11 +619,29 @@ MUTABLE_PTR 展開 `({ void *p_ = (e); p_; })` も `mutable_ptr_inner_expr`
 3. **apidoc / 共通マクロ逆推論 / RustType{Parsed}** — Tier 3
 4. **キャスト/フィールド推論/Inferred** — Tier 4
 
+## 名前使用解析 (local_usage)
+
+型推論とは別に、Phase 2 は各関数/マクロ本体の **名前使用解析**
+(`src/local_usage.rs`) を行い、結果を `MacroInferInfo::local_usage` /
+`InlineFnDict::local_usage()` に保持する (GH #16/#22/#23)。
+Phase 3 は結果を読むだけで、旧 `collect_mut_params` 系 (Phase 3 内の
+解析、技術的負債) はこれに置換された。
+
+パラメータ・局所変数 (ネストした compound / ForInit::Decl 含む) ごとに:
+
+- `needs_mut` — 再代入・複合代入・増減・AddrOf → `let mut` / `mut` param
+- `used` — 参照ゼロなら `_` prefix (unused_variables 対策)
+- `addr_taken_before_assign` — 無条件の初期化より前の AddrOf
+  (out-param パターン) → 未初期化宣言を `std::mem::zeroed()` 初期化に切替。
+  条件付き文脈 (If/Switch/ループ本体/三項) 内の代入は「無条件の初期化」と
+  見なさない保守判定
+
 ## 関連ファイル
 
 | ファイル | 役割 |
 |----------|------|
 | `src/macro_infer.rs` | マクロ解析エンジン |
+| `src/local_usage.rs` | 名前使用解析 (mut / 未使用 / 代入前 AddrOf) |
 | `src/semantic.rs` | 意味解析・型推論 |
 | `src/type_env.rs` | 型制約管理 |
 | `src/type_repr.rs` | 型表現（出所情報付き） |
