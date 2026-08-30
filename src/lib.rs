@@ -108,6 +108,11 @@ pub mod type_env;
 pub mod type_repr;
 pub mod unified_type;
 
+/// この crate 自身のバージョン。下流 (libperl-sys) の regen ガードが
+/// apidoc data version と組にしてスタンプ比較することで、codegen-only
+/// リリースでも確実に再生成させるために公開する (GH #18)。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 // 主要な型を再エクスポート
 pub use apidoc::{
     find_apidoc_dir_from, resolve_apidoc_path,
