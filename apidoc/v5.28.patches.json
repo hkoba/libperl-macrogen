@@ -38,46 +38,6 @@
       "reason": "type-check fails on perl 5.28 (auto-generated)"
     },
     {
-      "name": "PadnameIsOUR",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnameLEN",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnamePV",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnameREFCNT",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnameTYPE",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistARRAY",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistMAX",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
-      "name": "PadnamelistREFCNT",
-      "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
-    },
-    {
       "name": "Perl_atof",
       "kind": "skip_codegen",
       "reason": "type-check fails on perl 5.28 (auto-generated)"
@@ -195,7 +155,8 @@
     {
       "name": "sv_collxfrm",
       "kind": "skip_codegen",
-      "reason": "type-check fails on perl 5.28 (auto-generated)"
+      "reason": "Upstream sv.h bug on this version: `#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` calls sv_cmp_flags instead of sv_collxfrm_flags, passing STRLEN* where SV* is expected (E0308). Latent in C because core code never calls the short name. Same entry as v5.26; fixed upstream by 5.34.",
+      "upstream_status": "fixed-in-5.34"
     },
     {
       "name": "zaphod32_seed_state",

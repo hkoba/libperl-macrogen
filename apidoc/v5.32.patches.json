@@ -110,8 +110,8 @@
     {
       "name": "sv_collxfrm",
       "kind": "skip_codegen",
-      "reason": "Type mismatch specific to this perl's macro shape (see 2026-08-22 build-error.log); kept after the re-evaluation that removed the entries fixed by apidoc data 1.3-1.7.",
-      "upstream_status": "n/a (macrogen limitation)"
+      "reason": "Upstream sv.h bug on this version: `#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` calls sv_cmp_flags instead of sv_collxfrm_flags, passing STRLEN* where SV* is expected (E0308). Latent in C because core code never calls the short name. fixed upstream by 5.34.",
+      "upstream_status": "fixed-in-5.34"
     },
     {
       "name": "RCPV_LEN",

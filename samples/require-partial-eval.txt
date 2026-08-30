@@ -9,11 +9,15 @@ CvSTART
 CvPADLIST
 CvISXSUB
 CopLINE  # runloop/raw.rs が参照。5.34/5.36 は cop.h apidoc 誤記 (STRLEN) を return_type_override で補正
-PadlistARRAY  # frame.rs が参照。5.28/5.30 の auto skip は apidoc data 1.14 で解除 (5.26 以前は未解除 = 次段タスク)
+PadlistARRAY  # frame.rs が参照。5.28/5.30 の auto skip は apidoc data 1.14 で、5.26 は 1.15 で解除 (5.20〜5.24 は元々 skip されておらず生成可)
 PadlistMAX    # 同上
 #
 # 以下は版・モード依存のためこのリストには載せない (multi-perl-expect の
 # 版別 overlay + libperl-sys 側 require-codegen.txt で enforced):
-# - PAD_SET_CUR: threaded のみ生成可 (non-threaded は PAD_SET_CUR_NOSAVE が unresolved)
+# - PAD_SET_CUR: downstream (libperl-sys の実 bindgen bindings) では両モードで
+#   生成される (5.26/5.28/5.30/5.42 の nt downstream 産物で確認、2026-08-29)。
+#   ただし multi-perl の smoke は threaded スナップショットの samples/bindings.rs
+#   を使うため non-threaded では PL_comppad グローバルが見えず連鎖不生成になる
+#   (harness 制限)。expect では threaded 節のみで enforced
 # - Perl_SvREFCNT_dec: 名前自体が 5.32 の inline 改名から。<=5.30 は
 #   S_SvREFCNT_dec / SvREFCNT_dec が正 (Perl_ 名は libperl-sys 側 shim で吸収)

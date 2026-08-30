@@ -28,10 +28,20 @@ $version =~ /^\d+\.\d+$/
     or die "invalid version: '$version' (expected major.minor like 5.36)\n";
 
 # 1) エラー行番号を収集
+#    `note: function defined here` 等の note ブロックが指す span は「呼ばれた側」
+#    であってエラー箇所ではないので除外する (例: 呼び出し側の引数型不一致で
+#    正常な callee が failing 扱いになる誤検出があった — 2026-08-29 の 5.26 採取で
+#    sv_cmp_flags が混入)。error/warning ヘッダ直後の primary span のみ拾う。
 open my $lf, '<', $log_path or die "open $log_path: $!";
 my %err_lines;
+my $in_primary = 0;
 while (<$lf>) {
-    if (m{--> \S*/macro_bindings\.rs:(\d+):\d+}) {
+    if (/^error(?:\[E\d+\])?: /) {
+        $in_primary = 1;
+    } elsif (/^(?:warning|note|help)(?:\[.*?\])?: /) {
+        $in_primary = 0;
+    }
+    if ($in_primary && m{--> \S*/macro_bindings\.rs:(\d+):\d+}) {
         $err_lines{$1} = 1;
     }
 }

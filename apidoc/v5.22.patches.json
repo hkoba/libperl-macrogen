@@ -54,8 +54,8 @@
     {
       "name": "sv_collxfrm",
       "kind": "skip_codegen",
-      "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
-      "upstream_status": "n/a (macrogen limitation)"
+      "reason": "Upstream sv.h bug on this version: `#define sv_collxfrm(sv, nxp) sv_cmp_flags(sv, nxp, SV_GMAGIC)` calls sv_cmp_flags instead of sv_collxfrm_flags, passing STRLEN* where SV* is expected (E0308). Latent in C because core code never calls the short name. Same entry as v5.26; fixed upstream by 5.34.",
+      "upstream_status": "fixed-in-5.34"
     },
     {
       "name": "hv_exists",
@@ -115,6 +115,24 @@
       "name": "RX_ENGINE",
       "kind": "skip_codegen",
       "reason": "Residual bool/int coercion or cast gap specific to this perl's macro shape (same class as the v5.32/v5.34 residual entries); candidate for a future codegen fix. Verified still failing in the 2026-08-22 re-evaluation (build-error.log in tmp/multi-perl/out/).",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "GvALIASED_SV_on",
+      "kind": "skip_codegen",
+      "reason": "gv.h declares gp_flags as a 1-bit bitfield (PERL_BITFIELD32 gp_flags:1), so bindgen exposes it only via accessor methods and the generated `(*GvGP(gv)).gp_flags() |= / &= GPf_ALIASED_SV` has a method call on the left-hand side (E0067 invalid left-hand side of assignment). Bitfield write support (set_gp_flags) would be a new codegen feature (Signature Approval). 5.24+ does not generate these macros, so the shape is 5.22-only. No downstream user. Verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "GvALIASED_SV_off",
+      "kind": "skip_codegen",
+      "reason": "gv.h declares gp_flags as a 1-bit bitfield (PERL_BITFIELD32 gp_flags:1), so bindgen exposes it only via accessor methods and the generated `(*GvGP(gv)).gp_flags() |= / &= GPf_ALIASED_SV` has a method call on the left-hand side (E0067 invalid left-hand side of assignment). Bitfield write support (set_gp_flags) would be a new codegen feature (Signature Approval). 5.24+ does not generate these macros, so the shape is 5.22-only. No downstream user. Verified failing in the 2026-08-29 collection.",
+      "upstream_status": "n/a (macrogen limitation)"
+    },
+    {
+      "name": "S__is_utf8_char_slow",
+      "kind": "skip_codegen",
+      "reason": "The inline body declares `STRLEN actual_len;` uninitialized and passes &actual_len as an out-param to Perl_utf8n_to_uvchr, so the generated `let mut actual_len: STRLEN;` + `&raw mut actual_len` is rejected by rustc (E0381 used binding isn't initialized). Out-param zero-initialization would be a future codegen fix. Generated only on the non-threaded build of this version (threaded legs do not generate it). Verified failing in the 2026-08-29 collection.",
       "upstream_status": "n/a (macrogen limitation)"
     },
     {

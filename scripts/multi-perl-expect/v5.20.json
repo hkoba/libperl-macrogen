@@ -16,7 +16,10 @@
       "(Perl_atof / 旧ハッシュ inline 群 / 残渣クラスの理由付き skip) と",
       "Padname* の * 抜け override (common, apidoc data 1.12) を反映して bounds 再較正。",
       "5.20/5.22 の下流 libperl-sys ビルドは green (Phase 9 の当初要件完了)。",
-      "実測 counts (2026-08-22 (5)): threaded fn=1436 unresolved=44 / non-threaded fn=1382 unresolved=87"
+      "実測 counts (2026-08-22 (5)): threaded fn=1436 unresolved=44 / non-threaded fn=1382 unresolved=87",
+      "2026-08-29: 0.1.12 ラウンド (apidoc data 1.15) で Padname*REFCNT{,_dec} の",
+      "remove 4 件を追加 (5.20 に API 不在で common override が MISS ノイズ化 —",
+      "issue #17 と同型)。counts への影響は無し。"
    ],
    "must_not_generate": [
       "Perl_CvDEPTH",

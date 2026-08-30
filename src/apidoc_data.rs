@@ -56,7 +56,25 @@ use tar::Archive;
 ///      `kind: "remove"` により打ち消し (RCPV_* は 5.38 生まれ。それ以前は
 ///      target 不在の MISS 警告ノイズになるだけだった — issue #17。
 ///      v5.24.patches.json はこの打ち消しのために新設)
-pub const APIDOC_DATA_VERSION: &str = "1.14";
+/// 1.15: 5.20〜5.26 downstream green 化ラウンド (doc/plan/round-5.20-5.26.md)。
+///      v5.26 の auto-generated skip 62 件を下流ビルド実走で再評価し 17 件を
+///      恒久解除 (Padlist* 4 / S_SvREFCNT_dec{,_NN} / Padname·Padnamelist 全 8 /
+///      CxLABEL / isUTF8_CHAR_flags / S_is_utf8_fixed_width_buf_loclen_flags。
+///      連鎖で SvREFCNT_dec / PAD_SET_CUR 等も復活。PAD_SET_CUR は downstream
+///      の実 bindgen bindings なら non-threaded でも生成される — multi-perl
+///      smoke で nt 不生成に見えるのは threaded スナップショット
+///      samples/bindings.rs に PL_comppad グローバルが無い harness 制限)。
+///      真の失敗 12 件はクラス別理由付きで再登録し、初露出の sv_collxfrm
+///      (上流 sv.h の typo: sv_cmp_flags を呼ぶ。5.34 で修正) を skip 新設。
+///      v5.28/v5.30 の Padname* 8 件ずつも同根 (data 1.11 で解消済み) として解除。
+///      v5.24 に skip 21 件を採取・登録 (0.1.7 時代の auto 採取から 5.24 leg
+///      だけが漏れていた — hash inline 7 / Perl_atof / 残渣クラス 9 /
+///      RX_* 3 / sv_collxfrm)。v5.22 に GvALIASED_SV_{on,off} の skip 2 件
+///      (gp_flags ビットフィールドのアクセサが代入 LHS になる E0067、5.22 のみ)。
+///      v5.20 に Padname*REFCNT{,_dec} の remove 4 件 (5.20 に API 不在で
+///      common override が MISS ノイズになるだけ — issue #17 と同型)。
+///      v5.20〜v5.32 の sv_collxfrm skip の reason を正確な原因に更新。
+pub const APIDOC_DATA_VERSION: &str = "1.15";
 
 /// 埋め込まれた apidoc.tar.gz データ
 const EMBEDDED_APIDOC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apidoc.tar.gz"));
