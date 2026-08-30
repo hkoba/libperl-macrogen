@@ -327,6 +327,10 @@ pub struct MacroInferInfo {
     /// 直接の skip 対象にしか立てない。伝播では `is_unavailable_for_codegen()`
     /// で `calls_unavailable` と OR を取って参照する。
     pub apidoc_suppressed: bool,
+    /// apidoc 戻り値型が `pair` (カンマ式で複数値を返す) のマクロか。
+    /// 単一の戻り値を持つ Rust 関数に落とせないため codegen 対象外にする
+    /// (STR_WITH_LEN 等。doc/plan/skip-pair-return-type-macros.md Step 1)。
+    pub pair_return: bool,
 
     // ── Phase 2 確定型（resolve_param_and_return_types で設定）──
 
@@ -373,6 +377,7 @@ impl MacroInferInfo {
             called_functions: HashSet::new(),
             calls_unavailable: false,
             apidoc_suppressed: false,
+            pair_return: false,
             resolved_param_types: Vec::new(),
             resolved_return_type: None,
             const_pointer_positions: HashSet::new(),
@@ -391,6 +396,13 @@ impl MacroInferInfo {
     /// `calls_unavailable`（不在関数を呼ぶ／推移的）または
     /// `apidoc_suppressed`（自分が skip_codegen 対象）のいずれかが立っていれば
     /// codegen 対象外。propagation や cascade 検査ではこのヘルパーを使う。
+    ///
+    /// 注意: `pair_return` はここに **含めない**。pair マクロは caller 側で
+    /// トークン展開されて消えるのが通常で (newSVpvs → STR_WITH_LEN 等)、
+    /// used_by (= `uses`) 経由の伝播に乗せると展開済みの caller まで
+    /// 巻き添えになる。fn 生成の抑止は Phase 3 の pair_return 分岐、
+    /// AST 呼び出しが残った caller の降格は check_function_availability の
+    /// called_functions 検査が担う。
     pub fn is_unavailable_for_codegen(&self) -> bool {
         self.calls_unavailable || self.apidoc_suppressed
     }
@@ -1374,6 +1386,31 @@ impl MacroInferContext {
             );
         }
 
+        // Step 4.45: apidoc 戻り値型 `pair` のマクロを codegen 対象外に
+        // （STR_WITH_LEN 等。カンマ式で複数値を返すため単一戻り値の Rust fn に
+        //   落とせない。caller 側でトークン展開されて消えるのが通常のため
+        //   used_by 伝播には乗せず、AST 呼び出しが残った caller だけを
+        //   Step 4.5 の called_functions 検査で降格する）
+        if let Some(apidoc_dict) = apidoc {
+            let interner = pp.interner();
+            let mut pair_names: Vec<&str> = Vec::new();
+            for (name, info) in self.macros.iter_mut() {
+                let name_str = interner.get(*name);
+                if let Some(entry) = apidoc_dict.get(name_str) {
+                    if entry.return_type.as_deref() == Some("pair") {
+                        info.pair_return = true;
+                        pair_names.push(name_str);
+                    }
+                }
+            }
+            if !pair_names.is_empty() {
+                eprintln!(
+                    "[apidoc-suppress] pair-return macro(s) excluded from codegen: {}",
+                    pair_names.join(", "),
+                );
+            }
+        }
+
         // Step 4.5: マクロの利用不可関数呼び出しチェック
         {
             let interner = pp.interner();
@@ -1520,6 +1557,13 @@ impl MacroInferContext {
             for called_fn in called_functions {
                 let fn_name = interner.get(called_fn);
 
+                // pair 戻り値マクロ (STR_WITH_LEN 等) は fn を生成しないため、
+                // AST 上の呼び出しとして残っている caller は利用不可
+                if self.macros.get(&called_fn).is_some_and(|i| i.pair_return) {
+                    has_unavailable = true;
+                    break;
+                }
+
                 // マクロとして存在する場合はOK
                 if macro_names.contains(&called_fn) {
                     continue;
@@ -1653,6 +1697,13 @@ impl MacroInferContext {
             let mut has_unavailable = false;
             for called_fn in called_fns {
                 let fn_name = interner.get(called_fn);
+
+                // pair 戻り値マクロの呼び出しが AST に残っている場合は利用不可
+                // (check_function_availability と同じ理由)
+                if self.macros.get(&called_fn).is_some_and(|i| i.pair_return) {
+                    has_unavailable = true;
+                    break;
+                }
 
                 if macro_names.contains(&called_fn) { continue; }
                 if bindings_fns.contains(fn_name) { continue; }

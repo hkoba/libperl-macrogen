@@ -50,6 +50,12 @@ fn syn_binop_precedence(op: &syn::BinOp) -> u8 {
         syn::BinOp::Eq(_) | syn::BinOp::Ne(_) => 40,
         syn::BinOp::And(_) => 35,
         syn::BinOp::Or(_) => 30,
+        // 複合代入は Expr::Assign (10) と同格。ここに arm が無いと _ => 50 に
+        // 落ち、RHS の BitOr (45) 等が括弧で包まれて unused_parens になる
+        syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_) | syn::BinOp::MulAssign(_) |
+        syn::BinOp::DivAssign(_) | syn::BinOp::RemAssign(_) | syn::BinOp::BitXorAssign(_) |
+        syn::BinOp::BitAndAssign(_) | syn::BinOp::BitOrAssign(_) |
+        syn::BinOp::ShlAssign(_) | syn::BinOp::ShrAssign(_) => 10,
         _ => 50,
     }
 }

@@ -3089,6 +3089,9 @@ impl<'a> RustCodegen<'a> {
                 for item in block_items {
                     if let BlockItem::Stmt(stmt) = item {
                         let rust_stmt = self.stmt_to_rust(stmt, info);
+                        if rust_stmt.is_empty() {
+                            continue; // 空文 (空マクロ消去跡)
+                        }
                         self.writeln(&format!("{}{}", body_indent, rust_stmt));
                     }
                 }
@@ -4521,7 +4524,10 @@ impl<'a> RustCodegen<'a> {
                                 Some(info) => self.stmt_to_rust(stmt, info),
                                 None => self.stmt_to_rust_inline(stmt, ""),
                             };
-                            parts.push(s);
+                            if !s.is_empty() {
+                                // 空文を push すると join で `;;` になる
+                                parts.push(s);
+                            }
                         }
                         BlockItem::Decl(decl) => {
                             self.collect_decl_types(decl);
@@ -4808,28 +4814,37 @@ impl<'a> RustCodegen<'a> {
         self.build_syn_expr(expr, info)
     }
 
-    /// `Pre/PostInc/Dec` を syn::Expr で構築。
-    /// 旧パス `expr_to_rust_ctx` の対応 arm（rust_codegen.rs の PreInc 〜 PostDec）と同等。
-    fn build_inc_dec_syn_expr(&mut self, inner: &Expr, info: Option<&MacroInferInfo>,
-                              is_inc: bool, is_post: bool) -> syn::Expr {
+    /// `Pre/PostInc/Dec` の「lv を 1 つ増減する」代入式と lvalue を構築。
+    /// 値が要らない文位置では pre/post の区別が消えるため、step だけを使う。
+    fn build_inc_dec_step_expr(&mut self, inner: &Expr, info: Option<&MacroInferInfo>,
+                               is_inc: bool) -> (syn::Expr, syn::Expr) {
         use crate::syn_codegen::*;
         let lv = self.build_lvalue_syn_expr(inner, info);
         let is_ptr = self.is_pointer_expr_unified(inner, info)
             || self.infer_expr_type_unified(inner, info).is_some_and(|ut| ut.is_pointer());
-        // 「lv を 1 つ増減する」文を構築
-        let step_stmt: syn::Stmt = if is_ptr {
-            // lv = lv.wrapping_add(1);  または wrapping_sub
+        let step: syn::Expr = if is_ptr {
+            // lv = lv.wrapping_add(1)  または wrapping_sub
             let method = if is_inc { "wrapping_add" } else { "wrapping_sub" };
             let call = method_call(lv.clone(), method, vec![int_lit(1)]);
-            semi_stmt(assign_expr(lv.clone(), call))
+            assign_expr(lv.clone(), call)
         } else {
             let op = if is_inc {
                 syn::BinOp::AddAssign(Default::default())
             } else {
                 syn::BinOp::SubAssign(Default::default())
             };
-            semi_stmt(assign_op_expr(lv.clone(), op, int_lit(1)))
+            assign_op_expr(lv.clone(), op, int_lit(1))
         };
+        (step, lv)
+    }
+
+    /// `Pre/PostInc/Dec` を syn::Expr で構築。
+    /// 旧パス `expr_to_rust_ctx` の対応 arm（rust_codegen.rs の PreInc 〜 PostDec）と同等。
+    fn build_inc_dec_syn_expr(&mut self, inner: &Expr, info: Option<&MacroInferInfo>,
+                              is_inc: bool, is_post: bool) -> syn::Expr {
+        use crate::syn_codegen::*;
+        let (step, lv) = self.build_inc_dec_step_expr(inner, info, is_inc);
+        let step_stmt = semi_stmt(step);
         if is_post {
             // { let _t = lv; <step>; _t }
             let save = let_stmt("_t", lv.clone());
@@ -4837,6 +4852,33 @@ impl<'a> RustCodegen<'a> {
         } else {
             // { <step>; lv }
             block_with_value(vec![step_stmt], lv)
+        }
+    }
+
+    /// 文位置の `Pre/PostInc/Dec` を step 代入文だけで出力する。
+    /// block_with_value 形 `{ *lv -= 1; *lv }` を文として出すと末尾の
+    /// 単項式が unused_must_use に触れるため (Perl_cx_popformat 等)。
+    fn build_inc_dec_stmt(&mut self, inner: &Expr, info: Option<&MacroInferInfo>,
+                          is_inc: bool, indent: &str) -> String {
+        let (step, _lv) = self.build_inc_dec_step_expr(inner, info, is_inc);
+        let s = normalize_parens(&crate::syn_codegen::expr_to_string(&step));
+        format!("{}{};", indent, s)
+    }
+
+    /// 式を文位置で出力する共通経路。代入・増減式は値を返さない文形式に
+    /// 落とす (stmt_to_rust / stmt_to_rust_inline / for の step 部で共用)。
+    fn expr_stmt_string(&mut self, expr: &Expr, info: Option<&MacroInferInfo>, indent: &str) -> String {
+        match &expr.kind {
+            ExprKind::Assign { op, lhs, rhs } => {
+                self.build_assign_stmt(op, lhs, rhs, indent, info)
+            }
+            ExprKind::PreInc(inner) | ExprKind::PostInc(inner) => {
+                self.build_inc_dec_stmt(inner, info, true, indent)
+            }
+            ExprKind::PreDec(inner) | ExprKind::PostDec(inner) => {
+                self.build_inc_dec_stmt(inner, info, false, indent)
+            }
+            _ => format!("{}{};", indent, self.build_expr_string(expr, info)),
         }
     }
 
@@ -5223,9 +5265,15 @@ impl<'a> RustCodegen<'a> {
     fn stmt_to_rust(&mut self, stmt: &Stmt, info: &MacroInferInfo) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                format!("{};", self.build_expr_string(expr, Some(info)))
+                // 代入式・増減式は inline 経路 (stmt_to_rust_inline) と同様、
+                // 値を返さない文形式で出力する。block_with_value 形
+                // `{ lv op= r; lv }` を文位置に出すと末尾式が
+                // unused_must_use 等の lint に触れるため
+                self.expr_stmt_string(expr, Some(info), "")
             }
-            Stmt::Expr(None, _) => ";".to_string(),
+            // 空文 (空マクロ消去後の残骸) は出力しない。";" を返すと
+            // 呼び出し側の join で `;;` (redundant_semicolons) になる
+            Stmt::Expr(None, _) => String::new(),
             Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, "", Some(info)),
             Stmt::Return(None, _) => "return;".to_string(),
             _ => self.todo_marker("stmt")
@@ -5743,8 +5791,10 @@ impl<'a> RustCodegen<'a> {
                 }
                 BlockItem::Stmt(s) => {
                     let rust_stmt = self.stmt_to_rust_inline(s, indent);
-                    result.push_str(&rust_stmt);
-                    result.push('\n');
+                    if !rust_stmt.is_empty() {
+                        result.push_str(&rust_stmt);
+                        result.push('\n');
+                    }
                 }
             }
         }
@@ -5755,12 +5805,8 @@ impl<'a> RustCodegen<'a> {
     fn stmt_to_rust_inline(&mut self, stmt: &Stmt, indent: &str) -> String {
         match stmt {
             Stmt::Expr(Some(expr), _) => {
-                // 代入式は値を返さない形式で出力（統一ヘルパー使用）
-                if let ExprKind::Assign { op, lhs, rhs } = &expr.kind {
-                    self.build_assign_stmt(op, lhs, rhs, indent, None)
-                } else {
-                    format!("{}{};", indent, self.build_expr_string(expr, None))
-                }
+                // 代入式・増減式は値を返さない形式で出力（統一ヘルパー使用）
+                self.expr_stmt_string(expr, None, indent)
             }
             Stmt::Expr(None, _) => String::new(),
             Stmt::Return(Some(expr), _) => self.build_return_stmt(expr, indent, None),
@@ -5803,9 +5849,11 @@ impl<'a> RustCodegen<'a> {
             }
             Stmt::While { cond, body, .. } => {
                 let cond_str = self.build_expr_string(cond, None);
-                // 条件が既に bool なら != 0 を追加しない
+                // 条件が既に bool なら != 0 を追加しない。
+                // if 側 (:5822) と同様 normalize_parens で外側括弧を除去しないと
+                // `while (cond)` が unused_parens になる
                 let cond_bool = self.wrap_as_bool_condition_inline(cond, &cond_str);
-                let mut result = format!("{}while {} {{\n", indent, cond_bool);
+                let mut result = format!("{}while {} {{\n", indent, normalize_parens(&cond_bool));
                 let nested_indent = format!("{}    ", indent);
                 result.push_str(&self.stmt_to_rust_inline(body, &nested_indent));
                 result.push_str("\n");
@@ -5820,7 +5868,8 @@ impl<'a> RustCodegen<'a> {
                 if let Some(for_init) = init {
                     match for_init {
                         ForInit::Expr(expr) => {
-                            result.push_str(&format!("{}{};\n", nested_indent, self.build_expr_string(expr, None)));
+                            result.push_str(&self.expr_stmt_string(expr, None, &nested_indent));
+                            result.push('\n');
                         }
                         ForInit::Decl(decl) => {
                             self.collect_decl_types(decl);
@@ -5832,9 +5881,9 @@ impl<'a> RustCodegen<'a> {
                 // ループ部分
                 if let Some(cond_expr) = cond {
                     let cond_str = self.build_expr_string(cond_expr, None);
-                    // 条件が既に bool なら != 0 を追加しない
+                    // 条件が既に bool なら != 0 を追加しない (外側括弧除去は While と同様)
                     let cond_bool = self.wrap_as_bool_condition_inline(cond_expr, &cond_str);
-                    result.push_str(&format!("{}while {} {{\n", nested_indent, cond_bool));
+                    result.push_str(&format!("{}while {} {{\n", nested_indent, normalize_parens(&cond_bool)));
                 } else {
                     result.push_str(&format!("{}loop {{\n", nested_indent));
                 }
@@ -5845,9 +5894,10 @@ impl<'a> RustCodegen<'a> {
                 result.push_str(&self.stmt_to_rust_inline(body, &body_indent));
                 result.push_str("\n");
 
-                // ステップ部分
+                // ステップ部分 (i++ 等は値を返さない文形式で)
                 if let Some(step_expr) = step {
-                    result.push_str(&format!("{}{};\n", body_indent, self.build_expr_string(step_expr, None)));
+                    result.push_str(&self.expr_stmt_string(step_expr, None, &body_indent));
+                    result.push('\n');
                 }
 
                 result.push_str(&format!("{}}}\n", nested_indent));
@@ -6710,6 +6760,22 @@ impl<'a, W: Write> CodegenDriver<'a, W> {
                 writeln!(self.writer)?;
                 self.report.record_skip(name_str_for_patch, format!(
                     "CODEGEN_SUPPRESSED (apidoc patch): {}", reason));
+                continue;
+            }
+
+            // ── apidoc 戻り値型 pair (カンマ式で複数値) も codegen 対象外 ──
+            // Phase 2 (Step 4.45) で `info.pair_return` が立っている
+            if info.pair_return {
+                let name_str = self.interner.get(name);
+                writeln!(self.writer,
+                    "// [CODEGEN_SUPPRESSED] {} - pair return type (comma expression)",
+                    name_str)?;
+                writeln!(self.writer,
+                    "// Reason: apidoc declares return type `pair`; \
+                     not representable as a single-value Rust fn")?;
+                writeln!(self.writer)?;
+                self.report.record_skip(name_str,
+                    "CODEGEN_SUPPRESSED (pair return type)".to_string());
                 continue;
             }
 
